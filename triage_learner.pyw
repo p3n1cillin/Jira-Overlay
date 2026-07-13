@@ -192,7 +192,12 @@ def tokenize(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class Learner:
-    """Naive-Bayes-style keyword model over routing destinations."""
+    """Naive-Bayes-style model over routing destinations.
+
+    Features are unigrams + bigrams; the summary counts double because it's
+    what the team actually triages by. The reporter and request type get
+    their own channels. When a prediction turns out wrong, the correcting
+    example is learned at double weight so mistakes sting."""
 
     def __init__(self, state: dict) -> None:
         m = state.setdefault("model", {})
@@ -200,26 +205,31 @@ class Learner:
         m.setdefault("tokens", {})         # dest -> {token: count}
         m.setdefault("totals", {})         # dest -> total token count
         m.setdefault("reqTypes", {})       # dest -> {request type: count}
+        m.setdefault("reporters", {})      # dest -> {reporter: count}
         m.setdefault("cloneProjects", {})  # dest -> {clone project key: count}
         self.m = m
 
-    def learn(self, dest: str, tokens: list[str],
-              req_type: str, clone_projects: list[str]) -> None:
+    def learn(self, dest: str, tokens: list[str], req_type: str,
+              clone_projects: list[str], reporter: str = "",
+              weight: int = 1) -> None:
         m = self.m
         m["priors"][dest] = m["priors"].get(dest, 0) + 1
         tok = m["tokens"].setdefault(dest, {})
         for t in tokens:
-            tok[t] = tok.get(t, 0) + 1
-        m["totals"][dest] = m["totals"].get(dest, 0) + len(tokens)
+            tok[t] = tok.get(t, 0) + weight
+        m["totals"][dest] = m["totals"].get(dest, 0) + weight * len(tokens)
         if req_type:
             rt = m["reqTypes"].setdefault(dest, {})
-            rt[req_type] = rt.get(req_type, 0) + 1
+            rt[req_type] = rt.get(req_type, 0) + weight
+        if reporter:
+            rp = m["reporters"].setdefault(dest, {})
+            rp[reporter] = rp.get(reporter, 0) + weight
         for proj in clone_projects:
             cp = m["cloneProjects"].setdefault(dest, {})
             cp[proj] = cp.get(proj, 0) + 1
 
-    def predict(self, tokens: list[str],
-                req_type: str) -> tuple[Optional[str], int, str]:
+    def predict(self, tokens: list[str], req_type: str,
+                reporter: str = "") -> tuple[Optional[str], int, str]:
         """Return (destination, confidence %, note). Destination is None
         while the model doesn't have enough examples to be worth logging."""
         m      = self.m
@@ -239,12 +249,19 @@ class Learner:
                 rt = m["reqTypes"].get(d, {})
                 n_rt = sum(rt.values())
                 score += math.log((rt.get(req_type, 0) + 1) / (n_rt + 10))
+            if reporter:
+                rp = m.get("reporters", {}).get(d, {})
+                n_rp = sum(rp.values())
+                score += math.log((rp.get(reporter, 0) + 1) / (n_rp + 20))
             scores[d] = score
 
         best = max(scores, key=scores.get)  # type: ignore[arg-type]
-        # softmax over log scores -> a rough relative confidence
+        # Temperature-scaled softmax: raw NB log-score gaps grow with text
+        # length, which reads as false 100% certainty. Scaling by token
+        # count keeps confidence honest.
         mx    = scores[best]
-        exps  = {d: math.exp(s - mx) for d, s in scores.items()}
+        temp  = max(1.0, len(tokens) / 8)
+        exps  = {d: math.exp((s - mx) / temp) for d, s in scores.items()}
         conf  = int(round(100 * exps[best] / sum(exps.values())))
         if best == TAC_DEST:
             note = "keep in TAC — plain IT, resolve here, no clone"
@@ -263,7 +280,7 @@ class Learner:
 
     def top_keywords(self, dest: str, n: int = 12) -> list[str]:
         tok = self.m["tokens"].get(dest, {})
-        return [t for t, _ in
+        return [t.replace("·", " ") for t, _ in
                 sorted(tok.items(), key=lambda kv: -kv[1])[:n]]
 
 
@@ -332,10 +349,16 @@ class ShadowWatcher:
             "reporter": (f.get("reporter") or {}).get("displayName", ""),
         }
 
-    def _tokens_for(self, det: dict, req_type: str) -> list[str]:
-        text = " ".join([det["summary"], det["desc"], req_type,
-                         " ".join(det["labels"]), " ".join(det["components"])])
-        return tokenize(text)
+    def _features_for(self, det: dict, req_type: str) -> list[str]:
+        """Unigrams + bigrams. The summary counts double (it's what the team
+        triages by); description features are deduplicated so a long email
+        body can't drown out the title signal."""
+        s_toks = tokenize(" ".join([det["summary"], req_type]))
+        d_toks = tokenize(" ".join([det["desc"], " ".join(det["labels"]),
+                                    " ".join(det["components"])]))
+        s_bi = [f"{a}·{b}" for a, b in zip(s_toks, s_toks[1:])]
+        d_bi = [f"{a}·{b}" for a, b in zip(d_toks, d_toks[1:])]
+        return (s_toks + s_bi) * 2 + sorted(set(d_toks) | set(d_bi))
 
     def _transitions(self, key: str) -> tuple[list[dict], list[dict]]:
         """(transitions into a destination status, transitions into Resolved)
@@ -403,9 +426,10 @@ class ShadowWatcher:
                     continue
                 seen.add(tr["id"])
                 req_type = self.jira.request_type(det["key"])
-                toks     = self._tokens_for(det, req_type)
+                toks     = self._features_for(det, req_type)
                 projs    = [c["key"].split("-")[0] for c in det["clones"]]
-                self.learner.learn(tr["dest"], toks, req_type, projs)
+                self.learner.learn(tr["dest"], toks, req_type, projs,
+                                   reporter=det["reporter"])
                 learned += 1
                 self._log({"event": "backfill", "key": det["key"],
                            "summary": det["summary"], "dest": tr["dest"],
@@ -430,8 +454,9 @@ class ShadowWatcher:
                     continue
                 seen.add(tr["id"])
                 req_type = self.jira.request_type(det["key"])
-                toks     = self._tokens_for(det, req_type)
-                self.learner.learn(TAC_DEST, toks, req_type, [])
+                toks     = self._features_for(det, req_type)
+                self.learner.learn(TAC_DEST, toks, req_type, [],
+                                   reporter=det["reporter"])
                 learned += 1
                 self._log({"event": "backfill", "key": det["key"],
                            "summary": det["summary"], "dest": TAC_DEST,
@@ -451,12 +476,13 @@ class ShadowWatcher:
                 continue
             if orig_summary:    # learn from the intake wording, not the rename
                 det["summary"] = f"{orig_summary} — {det['summary']}"
-            toks = self._tokens_for(det, "")
+            toks = self._features_for(det, "")
             for mv in moves:
                 if mv["id"] in seen:
                     continue
                 seen.add(mv["id"])
-                self.learner.learn(PROCLAIM_DEST, toks, "", [])
+                self.learner.learn(PROCLAIM_DEST, toks, "", [],
+                                   reporter=det["reporter"])
                 learned += 1
                 self._log({"event": "backfill", "key": mv["oldKey"],
                            "summary": det["summary"], "dest": PROCLAIM_DEST,
@@ -490,8 +516,9 @@ class ShadowWatcher:
                 continue
             det      = self._issue_details(issue)
             req_type = self.jira.request_type(key)
-            toks     = self._tokens_for(det, req_type)
-            dest, conf, note = self.learner.predict(toks, req_type)
+            toks     = self._features_for(det, req_type)
+            dest, conf, note = self.learner.predict(toks, req_type,
+                                                    det["reporter"])
             predicted[key] = {"dest": dest, "conf": conf,
                               "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
             self._log({"event": "would_have_done", "key": key,
@@ -512,12 +539,14 @@ class ShadowWatcher:
                     continue
                 seen.add(tr["id"])
                 req_type = self.jira.request_type(det["key"])
-                toks     = self._tokens_for(det, req_type)
+                toks     = self._features_for(det, req_type)
                 projs    = [c["key"].split("-")[0] for c in det["clones"]]
-                self.learner.learn(tr["dest"], toks, req_type, projs)
-                self._resolve_prediction(det, tr["dest"], tr, req_type,
-                                         predicted, stats,
-                                         clones=[c["key"] for c in det["clones"]])
+                correct  = self._resolve_prediction(
+                    det, tr["dest"], tr, req_type, predicted, stats,
+                    clones=[c["key"] for c in det["clones"]])
+                self.learner.learn(tr["dest"], toks, req_type, projs,
+                                   reporter=det["reporter"],
+                                   weight=2 if correct is False else 1)
 
         # 3. Plain-IT tickets resolved inside the TAC (never cloned/moved)
         #    — the fourth outcome we learn from
@@ -533,10 +562,13 @@ class ShadowWatcher:
                     continue
                 seen.add(tr["id"])
                 req_type = self.jira.request_type(det["key"])
-                toks     = self._tokens_for(det, req_type)
-                self.learner.learn(TAC_DEST, toks, req_type, [])
-                self._resolve_prediction(det, TAC_DEST, tr, req_type,
-                                         predicted, stats, clones=[])
+                toks     = self._features_for(det, req_type)
+                correct  = self._resolve_prediction(det, TAC_DEST, tr,
+                                                    req_type, predicted,
+                                                    stats, clones=[])
+                self.learner.learn(TAC_DEST, toks, req_type, [],
+                                   reporter=det["reporter"],
+                                   weight=2 if correct is False else 1)
 
         # 4. Proclaim bugs — ITS tickets moved into PPS and converted to
         #    Bug (key change recorded in the PPS-side changelog)
@@ -549,17 +581,19 @@ class ShadowWatcher:
                 continue
             if orig_summary:
                 det["summary"] = f"{orig_summary} — {det['summary']}"
-            toks = self._tokens_for(det, "")
+            toks = self._features_for(det, "")
             for mv in moves:
                 if mv["id"] in seen:
                     continue
                 seen.add(mv["id"])
-                self.learner.learn(PROCLAIM_DEST, toks, "", [])
                 # score against the prediction made under the old ITS key
-                self._resolve_prediction(
+                correct = self._resolve_prediction(
                     dict(det, key=mv["oldKey"]), PROCLAIM_DEST,
                     {"by": mv["by"], "when": mv["when"]}, "",
                     predicted, stats, clones=[det["key"]])
+                self.learner.learn(PROCLAIM_DEST, toks, "", [],
+                                   reporter=det["reporter"],
+                                   weight=2 if correct is False else 1)
 
         # housekeeping
         self.state["seenTransitions"] = list(seen)[-8000:]
@@ -572,8 +606,10 @@ class ShadowWatcher:
 
     def _resolve_prediction(self, det: dict, dest: str, tr: dict,
                             req_type: str, predicted: dict, stats: dict,
-                            clones: list[str]) -> None:
-        """Score our earlier guess against the human decision and log it."""
+                            clones: list[str]) -> Optional[bool]:
+        """Score our earlier guess against the human decision and log it.
+        Returns True/False for a scored prediction, None if we never made
+        one (e.g. the ticket predates the learner)."""
         pred    = predicted.get(det["key"], {})
         p_dest  = pred.get("dest")
         correct = None
@@ -581,11 +617,15 @@ class ShadowWatcher:
             correct = (p_dest == dest)
             stats["predictions"] += 1
             stats["correct"]     += int(correct)
+            confusion = self.state.setdefault("confusion", {})
+            pair = f"{p_dest} → {dest}"
+            confusion[pair] = confusion.get(pair, 0) + 1
         self._log({"event": "routed", "key": det["key"],
                    "summary": det["summary"], "dest": dest,
                    "by": tr["by"], "when": tr["when"],
                    "requestType": req_type, "clones": clones,
                    "predicted": p_dest, "predictionCorrect": correct})
+        return correct
 
     # -- report --------------------------------------------------------------
 
@@ -615,8 +655,33 @@ class ShadowWatcher:
                      f"'Proclaim Bug' (+10 min / £65 time lost) | "
                      f"{m['priors'].get(PROCLAIM_DEST, 0)} |")
 
-        lines += ["", f"## Prediction accuracy: {acc}", "",
-                  "## Signals per destination", ""]
+        lines += ["", f"## Prediction accuracy: {acc}"]
+
+        confusion = self.state.get("confusion", {})
+        if confusion:
+            per: dict[str, list[int]] = {}
+            for pair, count in confusion.items():
+                p_dest, actual = pair.split(" → ")
+                row = per.setdefault(actual, [0, 0])
+                row[0] += count
+                if p_dest == actual:
+                    row[1] += count
+            lines.append("")
+            for dest in self.dests + [TAC_DEST, PROCLAIM_DEST]:
+                if dest in per:
+                    total, right = per[dest]
+                    lines.append(f"- {dest}: {100 * right // total}% "
+                                 f"({right}/{total})")
+            wrong = sorted(((pair, n) for pair, n in confusion.items()
+                            if pair.split(" → ")[0] != pair.split(" → ")[1]),
+                           key=lambda kv: -kv[1])
+            if wrong:
+                lines += ["", "## Mistakes learned from (said → team chose)",
+                          ""]
+                for pair, n in wrong[:10]:
+                    lines.append(f"- {pair} — {n}×")
+
+        lines += ["", "## Signals per destination", ""]
         for dest in self.dests + [TAC_DEST, PROCLAIM_DEST]:
             kws = ", ".join(self.learner.top_keywords(dest)) or "—"
             rts = m["reqTypes"].get(dest, {})
