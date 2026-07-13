@@ -484,8 +484,7 @@ class NewTicketTooltip:
     """Frameless popup listing alert-queue tickets; each row opens in browser."""
 
     def __init__(self, parent: tk.Tk, issues: list[dict],
-                 domain: str, on_mark_seen=None,
-                 suggestions: Optional[dict] = None) -> None:
+                 domain: str, on_mark_seen=None) -> None:
         self.win = tk.Toplevel(parent)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
@@ -507,8 +506,7 @@ class NewTicketTooltip:
             summary = (issue.get("fields") or {}).get("summary", "(no summary)")
             short   = summary[:55] + "…" if len(summary) > 55 else summary
             url     = f"https://{domain}/browse/{key}"
-            sugg    = (suggestions or {}).get(key, {}).get("label")
-            self._make_issue_row(url, key, short, sugg)
+            self._make_issue_row(url, key, short)
 
         if on_mark_seen:
             tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x", pady=(4, 0))
@@ -519,41 +517,31 @@ class NewTicketTooltip:
                       activebackground="#3d4f6e", activeforeground=_C["ok"]
                       ).pack(fill="x", padx=8, pady=(0, 4))
 
-    def _make_issue_row(self, url: str, key: str, summary: str,
-                        sugg: Optional[str] = None) -> None:
+    def _make_issue_row(self, url: str, key: str, summary: str) -> None:
         row = tk.Frame(self.win, bg=_C["input"], cursor="hand2")
         row.pack(fill="x", padx=8, pady=2)
-        top = tk.Frame(row, bg=_C["input"])
-        top.pack(fill="x")
-        lbl_key = tk.Label(top, text=key, font=("Segoe UI", 8, "bold"),
+        lbl_key = tk.Label(row, text=key, font=("Segoe UI", 8, "bold"),
                            fg=_C["accent"], bg=_C["input"], width=10, anchor="w")
         lbl_key.pack(side="left")
-        lbl_txt = tk.Label(top, text=summary, font=("Segoe UI", 8),
+        lbl_txt = tk.Label(row, text=summary, font=("Segoe UI", 8),
                            fg=_C["fg"], bg=_C["input"], anchor="w")
         lbl_txt.pack(side="left")
-        widgets = [row, top, lbl_key, lbl_txt]
-        if sugg:
-            lbl_sugg = tk.Label(row, text=f"        💡 {sugg}",
-                                font=("Segoe UI", 8), fg=_C["ok"],
-                                bg=_C["input"], anchor="w")
-            lbl_sugg.pack(fill="x")
-            widgets.append(lbl_sugg)
 
-        def _hover_in(_e: tk.Event) -> None:
-            for w in widgets:
+        def _hover_in(_e: tk.Event, r=row) -> None:
+            for w in [r, *r.winfo_children()]:
                 try:
                     w.configure(bg="#3d4f6e")
                 except tk.TclError:
                     pass
 
-        def _hover_out(_e: tk.Event) -> None:
-            for w in widgets:
+        def _hover_out(_e: tk.Event, r=row) -> None:
+            for w in [r, *r.winfo_children()]:
                 try:
                     w.configure(bg=_C["input"])
                 except tk.TclError:
                     pass
 
-        for widget in widgets:
+        for widget in (row, lbl_key, lbl_txt):
             widget.bind("<ButtonRelease-1>", lambda _e, u=url: webbrowser.open(u))
             widget.bind("<Enter>", _hover_in)
             widget.bind("<Leave>", _hover_out)
@@ -649,8 +637,6 @@ class JiraOverlay:
         self._show_job: Optional[str] = None
         self._picker_open      = False
         self._tooltip: Optional[NewTicketTooltip] = None
-        self._suggestions: dict = {}   # key -> {label, plan} from the (optional)
-                                       # local triage learner; display only
         self._refresh_job: Optional[str] = None
         self._tray: Optional[pystray.Icon] = None
         self._tray_last: tuple[int, bool, str] = (-1, False, "")
@@ -1005,7 +991,6 @@ class JiraOverlay:
             return
         self._tooltip = NewTicketTooltip(
             self.root, self.new_issues, self.config["domain"],
-            suggestions=self._suggestions,
             on_mark_seen=self._mark_all_seen)
         self._tooltip.place(self.root.winfo_x(), self.root.winfo_y(),
                             self._sw, self._sh)
@@ -1357,27 +1342,11 @@ class JiraOverlay:
 
     # ── Update UI ─────────────────────────────────────────────────────────────
 
-    def _load_suggestions(self) -> dict:
-        """Optional routing suggestions written by an external process
-        (e.g. a local triage learner). Display-only — the overlay never
-        acts on them. Ignored if the file is missing or stale."""
-        path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            self.config.get("suggestionsFile", "triage_suggestions.json"))
-        try:
-            if time.time() - os.path.getmtime(path) > 900:
-                return {}
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
-
     def _update_ui(self) -> None:
         if self._conn_error:
             # Transient network loss — keep existing rows, show subtle status
             self.lbl_status.config(text="Reconnecting…", fg=_C["warn"])
             return
-        self._suggestions = self._load_suggestions()
 
         if self.error_msg:
             # Hard error — wipe rows_frame completely then show single error label
@@ -1459,19 +1428,12 @@ class JiraOverlay:
                 summary = summaries.get(key, "")
                 title   = f"Jira — {key}"
                 body    = summary[:120] if summary else "New ticket in alert queue"
-                sugg    = self._suggestions.get(key, {}).get("label")
-                if sugg:
-                    body += f"\n💡 {sugg}"
             else:
                 title   = f"Jira — {len(truly_new)} new tickets"
                 lines   = []
                 for key in list(truly_new)[:3]:
-                    s    = summaries.get(key, "")
-                    line = f"{key}: {s[:60]}" if s else key
-                    sugg = self._suggestions.get(key, {}).get("label")
-                    if sugg:
-                        line += f" 💡 {sugg}"
-                    lines.append(line)
+                    s = summaries.get(key, "")
+                    lines.append(f"{key}: {s[:60]}" if s else key)
                 if len(truly_new) > 3:
                     lines.append(f"…and {len(truly_new) - 3} more")
                 body = "\n".join(lines)
