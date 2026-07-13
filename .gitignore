@@ -2,6 +2,13 @@
 jira_config.json
 jira_config.json.*
 
+# Triage learner data — contains internal ticket summaries, never commit
+triage_state.json
+triage_state.json.*
+triage_log.jsonl
+TRIAGE_REPORT.md
+triage_learner.log
+
 # Python
 __pycache__/
 *.pyc

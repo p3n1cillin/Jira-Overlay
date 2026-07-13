@@ -183,6 +183,23 @@ All other keys are populated automatically once the overlay has run.
 
 ---
 
+## Triage Shadow Learner (optional companion)
+
+`triage_learner.pyw` is a separate, **strictly read-only** background process that learns how your team triages tickets — it never transitions, clones, comments on, or edits anything.
+
+It watches for ITS tickets being routed to **With BI / With DATA / With DEV** (after the Elements Sync clone to BI-/DP-/DEVW- is created), and:
+
+- **Backfills** from the last 90 days of routing history to seed its model
+- **Predicts** a destination for every new ticket at intake and logs *"what I would have done"*
+- **Scores itself** when a human routes the ticket — comparing its prediction to the real decision teaches it what's right and wrong
+- Regenerates **`TRIAGE_REPORT.md`** with the learned routing map, per-team keywords, and running prediction accuracy
+
+Run it with **`launch_learner.bat`** — it lives as a purple tray icon (click to open the report, right-click → Quit). It shares `jira_config.json` with the overlay.
+
+Its data files (`triage_state.json`, `triage_log.jsonl`, `TRIAGE_REPORT.md`, `triage_learner.log`) contain internal ticket summaries and are gitignored — they stay on your machine.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
