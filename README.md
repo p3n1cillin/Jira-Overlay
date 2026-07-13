@@ -20,11 +20,13 @@ A lightweight Windows desktop overlay that monitors your **Jira Service Manageme
 | Feature | Detail |
 |---|---|
 | Live queue counts | Queue counts poll every **5 s** (always on). SLA & completed-today refresh every 1 min by default (configurable: 30 s → 5 min) |
-| Multiple alert queues | Tick as many queues as you like — any of them can trigger the overlay |
+| Multiple alert queues | Tick as many queues as you like — counts are summed and any of them can trigger the overlay, even if hidden from display |
 | Per-ticket deduplication | Each ticket key only fires one notification, no matter how many refreshes it sits there |
+| Dismiss | ⊟ hides the overlay until a **new** ticket arrives — it won't nag you about tickets you've already seen |
 | Snooze | 15 min / 30 min / 1 hour — accessible via the 💤 button |
+| Rate-limit aware | Honours `Retry-After` on HTTP 429 and treats 5xx as transient — your data never vanishes over a server hiccup |
 | Completed today | Count of tickets closed today with SLA compliance % |
-| Corner snapping | Drag the overlay anywhere; drag near a corner to snap. Double-click the header to snap to nearest corner |
+| Corner snapping | Drag near a corner to snap — on **any monitor**, respecting the taskbar. Double-click the header to snap to nearest corner |
 | Inline settings | Click ⚙ in the overlay header — expands with a smooth fade, no separate window |
 | System tray icon | Badge shows the count for whichever queue you choose; right-click for quick actions |
 | Always-visible mode | Optional dashboard mode that keeps the overlay on screen permanently |
@@ -91,7 +93,7 @@ Once running, the overlay lives in your **system tray**. It only appears on scre
 | **✓ Completed today — N** | Click → opens today's resolved tickets in Jira with the matching JQL |
 | **↻** | Refresh now |
 | **💤** | Snooze picker (15 min / 30 min / 1 hour). Click again while snoozed to cancel |
-| **⊟** | Hide the overlay |
+| **⊟** | Dismiss — hide until a **new** ticket arrives |
 | **✕** | Quit |
 | **⚙** | Open inline settings (expands overlay with a fade animation) |
 | Drag | Move the overlay anywhere on screen |
@@ -99,7 +101,7 @@ Once running, the overlay lives in your **system tray**. It only appears on scre
 
 ### Tray icon
 
-Right-click the tray icon for: Show/Hide, open service desk, Refresh, Settings, Quit.
+Click the tray icon to show/hide the overlay (a tray-shown overlay stays up until you hide it). Right-click for Show/Hide and Quit.
 
 The badge count shows whichever queue you designate in Settings → *Tray badge shows*.
 
@@ -174,9 +176,10 @@ All other keys are populated automatically once the overlay has run.
 - All API calls share a persistent `requests.Session` so TCP connections are reused between polls
 
 - All Jira calls run on a **daemon background thread** so the UI never blocks
+- HTTP 429 responses honour the server's `Retry-After`; 5xx and network errors keep the last data and show a subtle *Reconnecting…* status
 - The overlay uses `overrideredirect(True)` — no title bar, no taskbar entry
-- Show/hide transitions are **alpha fades** (GPU-composited, no layout redraws)
-- Settings open/close with a **fade-out → instant resize → fade-in** so there's no visible jitter
+- Show/hide/settings transitions share a **single alpha-fade animator** (GPU-composited, no layout redraws, no competing animations)
+- Config writes are **atomic** (temp file + rename) and a corrupt config file is quarantined to `.bad` instead of crashing the app
 
 ---
 

@@ -1,5 +1,6 @@
-# Jira credentials — never commit real config
+# Jira credentials — never commit real config (or its .tmp/.bad siblings)
 jira_config.json
+jira_config.json.*
 
 # Python
 __pycache__/

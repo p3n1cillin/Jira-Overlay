@@ -21,7 +21,6 @@ import functools
 import importlib.util
 import json
 import os
-import struct
 import subprocess
 import sys
 import threading
@@ -153,15 +152,26 @@ def _get_tray_font() -> ImageFont.ImageFont:
 # ---------------------------------------------------------------------------
 
 def load_config() -> Optional[dict]:
-    if os.path.exists(CONFIG_FILE):
+    try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
-    return None
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError):
+        # Corrupt config — move it aside so setup can run again instead of crashing
+        try:
+            os.replace(CONFIG_FILE, CONFIG_FILE + ".bad")
+        except OSError:
+            pass
+        return None
 
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    """Atomic write — a crash mid-save can't corrupt the existing config."""
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    os.replace(tmp, CONFIG_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +222,24 @@ def startup_enabled() -> bool:
         return False
 
 
+def _pythonw_exe() -> str:
+    """Absolute path to pythonw.exe (falls back to the current interpreter)."""
+    exe = sys.executable
+    head, tail = os.path.split(exe)
+    if tail.lower() == "python.exe":
+        cand = os.path.join(head, "pythonw.exe")
+        if os.path.exists(cand):
+            return cand
+    return exe
+
+
 def set_startup(enable: bool) -> None:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
                             winreg.KEY_SET_VALUE) as k:
             if enable:
                 winreg.SetValueEx(k, STARTUP_NAME, 0, winreg.REG_SZ,
-                                  f'pythonw "{os.path.abspath(__file__)}"')
+                                  f'"{_pythonw_exe()}" "{os.path.abspath(__file__)}"')
             else:
                 try:
                     winreg.DeleteValue(k, STARTUP_NAME)
@@ -238,15 +259,19 @@ class _MONITORINFO(ctypes.Structure):
     ]
 
 
-def get_monitor_rect(x: int, y: int) -> Optional[tuple[int, int, int, int]]:
-    """Return (left, top, right, bottom) of the monitor nearest to (x, y)."""
+def get_monitor_rect(x: int, y: int,
+                     work: bool = False) -> Optional[tuple[int, int, int, int]]:
+    """Return (left, top, right, bottom) of the monitor nearest to (x, y).
+
+    With work=True the work area is returned (excludes taskbar).
+    """
     try:
         pt  = ctypes.wintypes.POINT(x, y)
         mon = ctypes.windll.user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST
         info = _MONITORINFO()
         info.cbSize = ctypes.sizeof(_MONITORINFO)
         if ctypes.windll.user32.GetMonitorInfoW(mon, ctypes.byref(info)):
-            l, t, r, b = info.rcMonitor
+            l, t, r, b = info.rcWork if work else info.rcMonitor
             return l, t, r, b
     except Exception:
         pass
@@ -274,20 +299,6 @@ def _make_tray_image(count: int, alert: bool) -> Image.Image:
         text, fill=(255, 255, 255), font=font,
     )
     return img
-
-
-# ---------------------------------------------------------------------------
-# Corner positions helper (cached — avoids redundant dict construction)
-# ---------------------------------------------------------------------------
-
-@functools.lru_cache(maxsize=16)
-def _corner_positions(sw: int, sh: int, w: int, h: int) -> dict[str, tuple[int, int]]:
-    return {
-        "top-left":     (10,           10),
-        "top-right":    (sw - w - 10,  10),
-        "bottom-left":  (10,           sh - h - 60),
-        "bottom-right": (sw - w - 20,  sh - h - 60),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +510,7 @@ class NewTicketTooltip:
 
         if on_mark_seen:
             tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x", pady=(4, 0))
-            tk.Button(self.win, text="✓  Mark all as seen",
+            tk.Button(self.win, text="✓  Dismiss — hide until new tickets",
                       command=lambda: (on_mark_seen(), self.destroy()),
                       bg=_C["input"], fg=_C["ok"], font=("Segoe UI", 8),
                       relief="flat", pady=4, cursor="hand2",
@@ -544,7 +555,10 @@ class NewTicketTooltip:
         self.win.geometry(f"+{tx}+{ty}")
 
     def destroy(self) -> None:
-        self.win.destroy()
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass   # already destroyed (e.g. via the dismiss button)
 
 
 # ---------------------------------------------------------------------------
@@ -566,24 +580,30 @@ class JiraOverlay:
     _sla_unavailable  True once confirmed the SLA JQL field doesn't exist
     _settings_changed Re-fetch flag set when settings saved during an in-flight fetch
     _in_settings      True while the inline settings panel is showing
-    _anim_job         Pending root.after() id for the settings fade animation
     _queue_geom       (w,h,x,y) saved before settings panel expands
     loading           True while a background fetch is running
     error_msg         Last fetch error string or None
     _error_count      Consecutive error count (drives exponential back-off)
+    _retry_after_ms   Server-requested retry delay from a 429, or None
+    _alert_count      Total tickets across ALL alert queues (unfiltered list)
     _prev_newly       Alert-queue count from the previous cycle (None = first)
     _seen_newly_ids   Set of ticket keys already notified (deduplication)
+    _dismissed        User hid the overlay; stay hidden until a NEW ticket lands
+    _manual_show      User explicitly showed via tray; keep visible until hidden
     _snooze_until     Datetime when snooze expires, or None
     _prev_counts      {queue_name: last_count} for flash-on-change detection
     _last_refresh     Datetime of the last successful fetch
     _visible          True when the overlay window is shown (not withdrawn)
-    _fading           True while a show/hide alpha fade is running
+    _fade_job         Pending root.after() id for the alpha-fade animation
     _show_job         Pending root.after() id for a delayed _do_show call
+    _picker_open      Guard so the alert-queue picker can't stack duplicates
     _tooltip          Active NewTicketTooltip, or None
     _refresh_job      Pending root.after() id for the next auto-refresh
     _tray             pystray.Icon instance
-    _tray_last        (count, alert) tuple from last tray update (skip dup redraws)
-    _sw / _sh         Screen width / height (pixels)
+    _tray_last        (count, alert, name) from last tray update (skip dup redraws)
+    _session          Persistent requests.Session (connection reuse, auth preset)
+    _last_full_fetch  Epoch when SLA/completed stats were last fetched
+    _sw / _sh         Primary screen width / height (pixels)
     """
 
     _SETTINGS_W = 420   # overlay width when inline settings are open
@@ -598,25 +618,32 @@ class JiraOverlay:
         self._sla_unavailable  = False
         self._settings_changed = False
         self._in_settings      = False
-        self._anim_job: Optional[str] = None
         self._queue_geom: Optional[tuple[int, int, int, int]] = None
         self.loading           = False
         self.error_msg: Optional[str] = None   # hard error requiring user action
         self._conn_error: bool = False          # transient network error (keep last data)
         self._error_count      = 0
+        self._retry_after_ms: Optional[int] = None
+        self._alert_count      = 0
         self._prev_newly: Optional[int] = None
         self._seen_newly_ids: set[str]  = set()
+        self._dismissed        = False
+        self._manual_show      = False
         self._snooze_until: Optional[datetime] = None
         self._prev_counts: dict[str, int] = {}
         self._last_refresh: Optional[datetime] = None
         self._visible          = False
-        self._fading           = False
+        self._fade_job: Optional[str] = None
         self._show_job: Optional[str] = None
+        self._picker_open      = False
         self._tooltip: Optional[NewTicketTooltip] = None
         self._refresh_job: Optional[str] = None
         self._tray: Optional[pystray.Icon] = None
-        self._tray_last: tuple[int, bool] = (-1, False)
+        self._tray_last: tuple[int, bool, str] = (-1, False, "")
         self._session = requests.Session()   # persistent connection for live polling
+        self._session.auth = HTTPBasicAuth(config.get("email", ""),
+                                           config.get("token", ""))
+        self._session.headers["Accept"] = "application/json"
         self._last_full_fetch: float = 0.0   # epoch when stats were last fetched
         # Drag state
         self._drag_x0 = self._drag_y0 = 0
@@ -655,12 +682,6 @@ class JiraOverlay:
     # ── Tray ─────────────────────────────────────────────────────────────────
 
     def _start_tray(self) -> None:
-        pk        = self.config.get("projectKey", "")
-        desk_name = self.config.get("serviceDeskName", "Service Desk")
-        sd_path   = (f"/jira/servicedesk/projects/{pk}/queues" if pk
-                     else "/jira/servicedesk")
-        sd_url    = self._jira_url(sd_path)
-
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
             pystray.Menu.SEPARATOR,
@@ -672,16 +693,16 @@ class JiraOverlay:
 
     def _tray_toggle(self) -> None:
         if self._visible:
-            self.root.after(0, self._do_hide)
+            self.root.after(0, self._user_hide)
         else:
-            self.root.after(0, self._do_show)
+            self.root.after(0, self._user_show)
 
     def _update_tray(self, count: int, alert: bool,
                      queue_name: str = "Newly Opened") -> None:
         """Refresh tray icon and tooltip; skips if state is unchanged."""
-        if not self._tray or (count, alert) == self._tray_last:
+        if not self._tray or (count, alert, queue_name) == self._tray_last:
             return
-        self._tray_last = (count, alert)
+        self._tray_last = (count, alert, queue_name)
         self._tray.icon  = _make_tray_image(count, alert)
         noun = "ticket" if count == 1 else "tickets"
         self._tray.title = (f"Jira — {queue_name}: {count} {noun}"
@@ -758,8 +779,8 @@ class JiraOverlay:
         self._footer_btn(footer, "↻", self._fetch,
                          tip="Refresh now").pack(side="left", padx=(0, 8))
         self.btn_snooze_icon.pack(side="left", padx=(0, 8))
-        self._footer_btn(footer, "⊟", self._do_hide,
-                         tip="Hide overlay").pack(side="left", padx=(0, 8))
+        self._footer_btn(footer, "⊟", self._user_hide,
+                         tip="Hide until new tickets arrive").pack(side="left", padx=(0, 8))
         self._footer_btn(footer, "✕", self.root.destroy,
                          color=_C["alert"], tip="Quit").pack(side="left")
         self.lbl_status = tk.Label(footer, text="Connecting…",
@@ -791,7 +812,6 @@ class JiraOverlay:
         btn.bind("<ButtonRelease-1>", lambda _e: cmd())
         btn.bind("<Enter>",  lambda _e: btn.config(fg=_C["fg_bright"]))
         btn.bind("<Leave>",  lambda _e: btn.config(fg=color))
-        btn.bind("<ButtonPress-1>",   lambda e: None)
         if tip:
             _Tooltip(btn, tip)
         return btn
@@ -861,13 +881,30 @@ class JiraOverlay:
             self._did_drag = True
         self.root.geometry(f"+{self._drag_win_x + dx}+{self._drag_win_y + dy}")
 
+    def _corners(self, w: int, h: int) -> dict[str, tuple[int, int]]:
+        """Corner coordinates on the monitor the overlay currently occupies.
+
+        Uses the work area, so 'bottom' corners sit above the taskbar and
+        snapping works on any monitor, not just the primary.
+        """
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        rect = get_monitor_rect(x + w // 2, y + h // 2, work=True)
+        l, t, r, b = rect if rect else (0, 0, self._sw, self._sh - 50)
+        m = 10
+        return {
+            "top-left":     (l + m,     t + m),
+            "top-right":    (r - w - m, t + m),
+            "bottom-left":  (l + m,     b - h - m),
+            "bottom-right": (r - w - m, b - h - m),
+        }
+
     def _drag_release(self, e: tk.Event) -> None:
         if not self._did_drag:
             self._did_drag = False
             return
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self.root.winfo_width(), self.root.winfo_height()
-        corners = _corner_positions(self._sw, self._sh, w, h)
+        corners = self._corners(w, h)
         snapped = next(
             (name for name, (cx, cy) in corners.items()
              if abs(x - cx) < _SNAP_MARGIN and abs(y - cy) < _SNAP_MARGIN),
@@ -927,6 +964,8 @@ class JiraOverlay:
         popup.focus_force()
         popup.bind("<FocusOut>",
                    lambda _e: popup.destroy() if popup.winfo_exists() else None)
+        popup.bind("<Escape>",
+                   lambda _e: popup.destroy() if popup.winfo_exists() else None)
 
     # ── Corner snapping ───────────────────────────────────────────────────────
 
@@ -934,7 +973,7 @@ class JiraOverlay:
         self.root.update_idletasks()
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self.root.winfo_width(), self.root.winfo_height()
-        corners = _corner_positions(self._sw, self._sh, w, h)
+        corners = self._corners(w, h)
         name, (cx, cy) = min(
             corners.items(),
             key=lambda kv: (x - kv[1][0]) ** 2 + (y - kv[1][1]) ** 2,
@@ -967,7 +1006,14 @@ class JiraOverlay:
                 self._tooltip = None
 
     def _mark_all_seen(self) -> None:
-        self._seen_newly_ids = set()
+        """Dismiss the current alert: hide the overlay until a NEW ticket lands.
+
+        Displayed tickets are already in the seen-set, so nothing to add —
+        clearing it (the old behaviour) re-notified every ticket, which was
+        the opposite of the button's intent.
+        """
+        self._tooltip = None   # popup destroys itself after calling us
+        self._user_hide()
 
     def _open_service_desk(self) -> None:
         if self._did_drag:
@@ -991,12 +1037,10 @@ class JiraOverlay:
 
     def _discover_service_desk(self) -> Optional[dict]:
         """Probe accessible service desks; shows picker if multiple found."""
-        cfg  = self.config
-        auth = HTTPBasicAuth(cfg["email"], cfg["token"])
         try:
             r = self._session.get(
                 self._jira_url("/rest/servicedeskapi/servicedesk"),
-                auth=auth, timeout=10)
+                timeout=10)
             r.raise_for_status()
             desks = r.json().get("values", [])
         except Exception:
@@ -1006,7 +1050,7 @@ class JiraOverlay:
             d for d in desks
             if self._session.get(
                 self._jira_url(f"/rest/servicedeskapi/servicedesk/{d['id']}/queue"),
-                params={"limit": 1}, auth=auth, timeout=5
+                params={"limit": 1}, timeout=5
             ).ok
         ]
 
@@ -1029,8 +1073,21 @@ class JiraOverlay:
         return self._desk_pick
 
     def _show_alert_queue_picker(self) -> None:
-        """Modal queue picker — runs on main thread; re-fetches on selection."""
-        win = tk.Toplevel()
+        """Modal queue picker — runs on main thread; re-fetches on selection.
+
+        Guarded so the 5-second poll loop can't stack duplicate pickers while
+        one is already waiting for the user.
+        """
+        if self._picker_open:
+            return
+        self._picker_open = True
+        try:
+            self._show_alert_queue_picker_inner()
+        finally:
+            self._picker_open = False
+
+    def _show_alert_queue_picker_inner(self) -> None:
+        win = tk.Toplevel(self.root)
         win.title("Jira Overlay — Choose Alert Queue")
         win.configure(bg=_C["bg_dark"])
         win.resizable(False, False)
@@ -1096,13 +1153,25 @@ class JiraOverlay:
         threading.Thread(target=self._fetch_worker, daemon=True).start()
 
     def _fetch_worker(self) -> None:
+        self._retry_after_ms = None
         try:
             self._fetch_data()
         except requests.HTTPError as exc:
-            self._error_count += 1
-            self.error_msg  = f"HTTP {exc.response.status_code} — check credentials"
-            self._conn_error = False
-            self.queues      = []
+            resp   = exc.response
+            status = resp.status_code if resp is not None else 0
+            if status == 429 or status >= 500:
+                # Rate-limited or server hiccup — transient, keep last data
+                self._conn_error = True
+                ra = resp.headers.get("Retry-After", "") if resp is not None else ""
+                if ra.isdigit():
+                    self._retry_after_ms = max(int(ra) * 1_000, _LIVE_POLL_MS)
+            else:
+                self._error_count += 1
+                hint = ("check credentials" if status in (401, 403)
+                        else "request failed")
+                self.error_msg   = f"HTTP {status} — {hint}"
+                self._conn_error = False
+                self.queues      = []
         except (requests.ConnectionError, requests.Timeout):
             # Transient (network drop, timeout) — keep last data, retry at normal rate
             self._conn_error = True
@@ -1118,18 +1187,20 @@ class JiraOverlay:
                 self._settings_changed = False
                 self._last_full_fetch = 0.0   # force stats refresh on next cycle
                 delay = 0                     # immediate
+            elif self._retry_after_ms:
+                delay = self._retry_after_ms  # honour the server's Retry-After
             elif self._conn_error:
                 delay = _LIVE_POLL_MS         # retry at live rate during reconnect
             elif self._error_count > 0:
-                delay = min(_LIVE_POLL_MS * (2 ** self._error_count), 5 * 60 * 1_000)
+                delay = min(_LIVE_POLL_MS * (2 ** min(self._error_count, 6)),
+                            5 * 60 * 1_000)
             else:
                 delay = _LIVE_POLL_MS         # always poll counts every 5 s
             self._refresh_job = self.root.after(delay, self._fetch)
 
     def _fetch_data(self) -> None:
         """Core data-fetch logic (called from worker thread)."""
-        cfg  = self.config
-        auth = HTTPBasicAuth(cfg["email"], cfg["token"])
+        cfg = self.config
 
         # Discover service desk on first run
         if not cfg.get("serviceDeskId"):
@@ -1153,7 +1224,7 @@ class JiraOverlay:
             try:
                 ri = self._session.get(
                     self._jira_url(f"/rest/servicedeskapi/servicedesk/{sd_id}"),
-                    auth=auth, timeout=10)
+                    timeout=10)
                 if ri.ok:
                     cfg["projectKey"] = ri.json().get("projectKey", "")
                     save_config(cfg)
@@ -1163,7 +1234,7 @@ class JiraOverlay:
         # --- Fast path: queue counts (runs every 5 s) ---
         r = self._session.get(
             self._jira_url(f"/rest/servicedeskapi/servicedesk/{sd_id}/queue"),
-            params={"includeCount": "true"}, auth=auth, timeout=10)
+            params={"includeCount": "true"}, timeout=10)
         r.raise_for_status()
 
         skip_kw   = {k.strip().upper() for k in cfg.get("skipKeywords", []) if k.strip()}
@@ -1184,28 +1255,41 @@ class JiraOverlay:
             self.root.after(0, self._show_alert_queue_picker)
             return
 
-        # Fetch issues inside the alert queue (for new-ticket tooltips / notifications)
-        nq = next((q for q in self.queues if q["name"] in alert_qs), None)
-        if nq and nq.get("issueCount", 0) > 0:
+        # Alert data comes from the UNFILTERED list — hiding a queue from
+        # display must not silently disable its alerts
+        alert_objs = [q for q in all_queues if q["name"] in alert_qs]
+        self._alert_count = sum(q.get("issueCount", 0) for q in alert_objs)
+
+        # Fetch issues in every alert queue (tooltips + notifications)
+        issues: list[dict] = []
+        complete = True
+        for q in alert_objs:
+            if q.get("issueCount", 0) <= 0:
+                continue
             ir = self._session.get(
                 self._jira_url(
-                    f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{nq['id']}/issue"),
-                params={"start": 0, "limit": 15}, auth=auth, timeout=10)
-            self.new_issues = ir.json().get("values", []) if ir.ok else []
-        else:
-            self.new_issues = []
+                    f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{q['id']}/issue"),
+                params={"start": 0, "limit": 15}, timeout=10)
+            if ir.ok:
+                issues.extend(ir.json().get("values", []))
+            else:
+                complete = False
+        if complete:
+            self.new_issues = issues
+        # On partial failure keep the previous snapshot — replacing it would
+        # wipe the seen-set and re-notify every ticket once the fetch recovers
 
         # --- Slow path: SLA & completed-today (runs every refreshSeconds) ---
         stats_interval = cfg.get("refreshSeconds", 60)
         if time.time() - self._last_full_fetch >= stats_interval:
-            self._fetch_completion_stats(cfg, auth)
+            self._fetch_completion_stats(cfg)
             self._last_full_fetch = time.time()
 
         self.error_msg    = None
         self._conn_error  = False
         self._error_count = 0
 
-    def _fetch_completion_stats(self, cfg: dict, auth: HTTPBasicAuth) -> None:
+    def _fetch_completion_stats(self, cfg: dict) -> None:
         """Fetch completed-today count and optional SLA compliance."""
         pk = cfg.get("projectKey", "")
         if not pk:
@@ -1222,7 +1306,7 @@ class JiraOverlay:
             cr = self._session.post(
                 self._jira_url("/rest/api/3/search/jql"),
                 json={"jql": base_jql, "maxResults": 200, "fields": ["status"]},
-                auth=auth, timeout=10)
+                timeout=10)
             if not cr.ok:
                 self.completed_today = 0
                 self.sla_compliance  = None
@@ -1242,7 +1326,7 @@ class JiraOverlay:
             sr = self._session.post(
                 self._jira_url("/rest/api/3/search/jql"),
                 json={"jql": sla_jql, "maxResults": 200, "fields": ["status"]},
-                auth=auth, timeout=10)
+                timeout=10)
             if sr.ok:
                 breached = len(sr.json().get("issues", []))
                 self.sla_compliance = round((total_n - breached) / total_n * 100)
@@ -1290,8 +1374,7 @@ class JiraOverlay:
                 self.row_widgets[name]["row"].destroy()
                 del self.row_widgets[name]
 
-        alert_qs    = self._alert_queues
-        newly_count = 0
+        alert_qs = self._alert_queues
 
         for q in self.queues:
             name   = q["name"]
@@ -1305,7 +1388,6 @@ class JiraOverlay:
             rw["lbl_count"].config(text=str(count))
 
             if is_new:
-                newly_count = count
                 rw["lbl_count"].config(fg=_C["alert"] if count > 0 else _C["info"])
                 rw["dot"].config(text="●" if count > 0 else "")
 
@@ -1314,10 +1396,18 @@ class JiraOverlay:
                 self._flash_row(rw)
             self._prev_counts[name] = count
 
+        # Total across ALL alert queues (computed in the fetch from the
+        # unfiltered list, so hidden alert queues still count)
+        newly_count = self._alert_count
+
         # Deduplication — notify only for genuinely new ticket IDs
         current_ids = {i.get("issueKey") or i.get("key", "") for i in self.new_issues}
         truly_new   = current_ids - self._seen_newly_ids
         self._seen_newly_ids = current_ids
+
+        # A genuinely new ticket cancels any manual dismissal
+        if truly_new:
+            self._dismissed = False
 
         snoozed       = self._is_snoozed()
         has_new_alert = bool(truly_new) and self._prev_newly is not None
@@ -1376,11 +1466,15 @@ class JiraOverlay:
             until = self._snooze_until.strftime("%H:%M")  # type: ignore[union-attr]
             self.lbl_status.config(text=f"Snoozed until {until}", fg=_C["warn"])
         else:
-            self.lbl_status.config(text="Updated just now", fg=_C["fg_dim"])
+            self.lbl_status.config(text=f"● Live · {datetime.now():%H:%M:%S}",
+                                   fg=_C["fg_dim"])
 
         # Don't resize or show/hide while the settings panel is open — it has its own geometry
         if not self._in_settings:
-            show = (newly_count > 0 or self.config.get("alwaysVisible", False)) and not snoozed
+            show = self._manual_show or (
+                ((newly_count > 0 and not self._dismissed)
+                 or self.config.get("alwaysVisible", False))
+                and not snoozed)
             if show:
                 self.root.after(10, self._resize)
                 if not self._visible and not self._show_job:
@@ -1414,21 +1508,21 @@ class JiraOverlay:
     # ── Relative time ──────────────────────────────────────────────────────────
 
     def _update_relative_time(self) -> None:
+        """Flag stale data — with 5 s live polling the status is normally
+        rewritten every cycle, so only override it when updates have stopped."""
         if self._last_refresh and not self.error_msg and not self._conn_error and not self._is_snoozed():
             secs = (datetime.now() - self._last_refresh).total_seconds()
-            if secs < 60:
-                rel = "just now"
-            elif secs < 3_600:
-                rel = f"{int(secs // 60)}m ago"
-            else:
-                rel = f"{int(secs // 3_600)}h ago"
-            self.lbl_status.config(text=f"Updated {rel}", fg=_C["fg_dim"])
+            if secs >= 90:
+                rel = (f"{int(secs // 60)}m" if secs < 3_600
+                       else f"{int(secs // 3_600)}h")
+                self.lbl_status.config(text=f"Updated {rel} ago", fg=_C["warn"])
         self.root.after(30_000, self._update_relative_time)
 
     # ── Snooze ────────────────────────────────────────────────────────────────
 
     def _snooze(self, minutes: int) -> None:
         self._snooze_until = datetime.now() + timedelta(minutes=minutes)
+        self._manual_show  = False   # snoozing means "get out of my way"
         self._update_ui()   # immediate: amber button, status text, hide if needed
 
     def _cancel_snooze(self) -> None:
@@ -1443,44 +1537,77 @@ class JiraOverlay:
 
     # ── Show / hide with alpha fade ───────────────────────────────────────────
 
+    def _user_show(self) -> None:
+        """Explicit show (tray click) — stays visible until manually hidden."""
+        self._manual_show = True
+        self._dismissed   = False
+        self._do_show()
+
+    def _user_hide(self) -> None:
+        """Explicit hide (⊟ / tray / dismiss) — stays hidden until a NEW ticket."""
+        self._manual_show = False
+        self._dismissed   = True
+        self._do_hide()
+
     def _do_show(self) -> None:
         self._show_job = None
-        if self._visible or self._fading:
+        if self._in_settings:
+            return   # settings panel manages its own visibility and geometry
+        if self._visible and not self._fade_job:
             return
-        self._fading  = True
         self._visible = True
-        target = self.config.get("alpha", 0.93)
-        self.root.attributes("-alpha", 0)
         self.root.deiconify()
         self._resize()
-        self._fade(0.0, target, target / 14)
+        self._animate_alpha(self.config.get("alpha", 0.93))
 
     def _do_hide(self) -> None:
-        if not self._visible or self._fading:
+        if self._show_job:
+            self.root.after_cancel(self._show_job)
+            self._show_job = None
+        if not self._visible and not self._fade_job:
             return
         if self._tooltip:
             self._tooltip.destroy()
             self._tooltip = None
-        self._fading  = True
         self._visible = False
-        alpha = float(self.root.attributes("-alpha"))
-        self._fade(alpha, 0.0, -(alpha / 14), on_done=self.root.withdraw)
+        self._animate_alpha(0.0, on_done=self.root.withdraw)
 
-    def _fade(self, current: float, target: float,
-              step: float, on_done=None) -> None:
-        nxt  = current + step
-        done = (step > 0 and nxt >= target) or (step < 0 and nxt <= target)
-        self.root.attributes("-alpha", max(0.0, min(1.0, target if done else nxt)))
-        if done:
-            self._fading = False
+    def _animate_alpha(self, target: float, on_done=None, frames: int = 12) -> None:
+        """Fade the window alpha to `target`, cancelling any fade in flight.
+
+        Single animator for show, hide and the settings transition — two
+        independent fades can no longer fight over the alpha channel.
+        """
+        if self._fade_job:
+            self.root.after_cancel(self._fade_job)
+            self._fade_job = None
+        current = float(self.root.attributes("-alpha"))
+        step = (target - current) / frames
+        if abs(step) < 0.001:
+            self.root.attributes("-alpha", target)
             if on_done:
                 on_done()
-        else:
-            self.root.after(14, lambda: self._fade(nxt, target, step, on_done))
+            return
+
+        def tick(cur: float) -> None:
+            nxt  = cur + step
+            done = (step > 0 and nxt >= target) or (step < 0 and nxt <= target)
+            self.root.attributes("-alpha",
+                                 target if done else max(0.0, min(1.0, nxt)))
+            if done:
+                self._fade_job = None
+                if on_done:
+                    on_done()
+            else:
+                self._fade_job = self.root.after(14, lambda: tick(nxt))
+
+        tick(current)
 
     # ── Resize / reposition ───────────────────────────────────────────────────
 
     def _resize(self) -> None:
+        if self._in_settings:
+            return   # settings geometry is managed by _apply_settings_geom
         self.root.update_idletasks()
         w = self.config.get("overlayWidth", 260)
         self.root.geometry(f"{w}x{self.frame.winfo_reqheight() + 4}")
@@ -1490,7 +1617,7 @@ class JiraOverlay:
         self.root.update_idletasks()
         w = self.root.winfo_width()
         h = self.root.winfo_height()
-        corners = _corner_positions(self._sw, self._sh, w, h)
+        corners = self._corners(w, h)
 
         corner = self.config.get("snapCorner")
         if corner and corner in corners:
@@ -1500,11 +1627,11 @@ class JiraOverlay:
         else:
             x, y = corners["bottom-right"]
 
-        mr = get_monitor_rect(x + w // 2, y + h // 2)
+        mr = get_monitor_rect(x + w // 2, y + h // 2, work=True)
         if mr:
             ml, mt, mr2, mb = mr
             x = max(ml, min(x, mr2 - w))
-            y = max(mt, min(y, mb - h - 4))
+            y = max(mt, min(y, mb - h))
         else:
             x, y = corners["bottom-right"]
             self.config.pop("lastX", None)
@@ -1520,9 +1647,17 @@ class JiraOverlay:
             self._close_settings()
             return
         self._in_settings = True
-        if not self._visible:
+        if self._show_job:
+            self.root.after_cancel(self._show_job)
+            self._show_job = None
+        if self._tooltip:
+            self._tooltip.destroy()
+            self._tooltip = None
+
+        was_hidden = not self._visible
+        if was_hidden:
             self._visible = True
-            self.root.attributes("-alpha", self.config.get("alpha", 0.93))
+            self.root.attributes("-alpha", 0.0)
             self.root.deiconify()
             self.root.update_idletasks()
 
@@ -1535,21 +1670,25 @@ class JiraOverlay:
         self._build_settings_panel()
         self.settings_panel.pack(fill="both", expand=True)
 
-        alpha = float(self.root.attributes("-alpha"))
-        self._sfade(alpha, 0.0, on_done=self._apply_settings_geom)
+        if was_hidden:
+            self._apply_settings_geom()   # already invisible — no flash, just fade in
+        else:
+            self._animate_alpha(0.0, on_done=self._apply_settings_geom)
 
     def _apply_settings_geom(self) -> None:
+        """Expand to the settings size, anchored to the overlay's own monitor."""
         cw, ch, cx, cy = self._queue_geom  # type: ignore[misc]
-        tw  = self._SETTINGS_W
-        tx  = self._sw - tw - 20
-        bot = cy + ch
-        ty  = max(20, bot - int(self._sh * 0.9))
+        tw   = self._SETTINGS_W
+        rect = get_monitor_rect(cx + cw // 2, cy + ch // 2, work=True)
+        l, t, r, b = rect if rect else (0, 0, self._sw, self._sh - 50)
+        tx  = max(l + 10, min(cx + cw - tw, r - tw - 10))   # right edges aligned
+        bot = min(cy + ch, b - 10)
+        ty  = max(t + 20, bot - int((b - t) * 0.9))
         self.root.geometry(f"{tw}x{bot - ty}+{tx}+{ty}")
-        self._sfade(0.0, self.config.get("alpha", 0.93))
+        self._animate_alpha(self.config.get("alpha", 0.93))
 
     def _close_settings(self) -> None:
-        alpha = float(self.root.attributes("-alpha"))
-        self._sfade(alpha, 0.0, on_done=self._apply_queue_geom)
+        self._animate_alpha(0.0, on_done=self._apply_queue_geom)
 
     def _apply_queue_geom(self) -> None:
         self._in_settings = False
@@ -1559,28 +1698,7 @@ class JiraOverlay:
         if self._queue_geom:
             qw, qh, qx, qy = self._queue_geom
             self.root.geometry(f"{qw}x{qh}+{qx}+{qy}")
-        self._sfade(0.0, self.config.get("alpha", 0.93))
-
-    def _sfade(self, current: float, target: float, on_done=None) -> None:
-        """Settings-specific alpha fade (independent of the _fading overlay flag)."""
-        if self._anim_job:
-            self.root.after_cancel(self._anim_job)
-            self._anim_job = None
-        step = (target - current) / 10
-        self._sfade_step(current, target, step, on_done)
-
-    def _sfade_step(self, current: float, target: float,
-                    step: float, on_done) -> None:
-        nxt  = current + step
-        done = (step > 0 and nxt >= target) or (step < 0 and nxt <= target)
-        self.root.attributes("-alpha", max(0.0, min(1.0, target if done else nxt)))
-        if done:
-            self._anim_job = None
-            if on_done:
-                on_done()
-        else:
-            self._anim_job = self.root.after(
-                16, lambda: self._sfade_step(nxt, target, step, on_done))
+        self._animate_alpha(self.config.get("alpha", 0.93))
 
     def _build_settings_panel(self) -> None:
         """Rebuild inline settings content from current config."""
@@ -1741,6 +1859,10 @@ class JiraOverlay:
         def _save() -> None:
             set_startup(s_startup.get())
             alert_list = [n for n, v in s_alert_vars.items() if v.get()]
+            try:
+                max_q = max(0, int(s_max_q.get()))
+            except (tk.TclError, ValueError):
+                max_q = 0   # junk typed into the spinbox — treat as no limit
             self.config.update({
                 "refreshSeconds":       s_refresh.get(),
                 "notificationsEnabled": s_notif.get(),
@@ -1756,7 +1878,7 @@ class JiraOverlay:
                 "completedTodayFilter": s_completed_filter.get().strip(),
                 "skipKeywords":         [k.strip() for k in s_skip_kw.get().split(",")
                                          if k.strip()],
-                "maxQueueSize":         int(s_max_q.get()),
+                "maxQueueSize":         max_q,
             })
             save_config(self.config)
             for rw in self.row_widgets.values():
@@ -1786,14 +1908,22 @@ class JiraOverlay:
                                parent=self.root):
             if self._tray:
                 self._tray.stop()
-            if os.path.exists(CONFIG_FILE):
+            try:
                 os.remove(CONFIG_FILE)
+            except OSError:
+                pass
+            # Relaunch so the setup window actually appears (previously this
+            # just quit and the user had to start the app again by hand)
+            subprocess.Popen([_pythonw_exe(), os.path.abspath(__file__)],
+                             creationflags=0x08000000)
             self.root.destroy()
 
     def run(self) -> None:
-        self.root.mainloop()
-        if self._tray:
-            self._tray.stop()
+        try:
+            self.root.mainloop()
+        finally:
+            if self._tray:
+                self._tray.stop()
 
 
 # ---------------------------------------------------------------------------
