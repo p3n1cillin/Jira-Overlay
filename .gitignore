@@ -2,7 +2,11 @@
 jira_config.json
 jira_config.json.*
 
-# Triage learner data — contains internal ticket summaries, never commit
+# Triage learner — team-specific local tooling, never commit (script or data)
+triage_learner.pyw
+launch_learner.bat
+triage_eval.py
+triage_dataset.jsonl
 triage_state.json
 triage_state.json.*
 triage_log.jsonl
