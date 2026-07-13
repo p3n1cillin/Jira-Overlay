@@ -31,6 +31,7 @@ A lightweight Windows desktop overlay that monitors your **Jira Service Manageme
 | System tray icon | Badge shows the count for whichever queue you choose; right-click for quick actions |
 | Always-visible mode | Optional dashboard mode that keeps the overlay on screen permanently |
 | Multi-monitor aware | Clamps position to whichever monitor it's on; detects if it's been moved off-screen |
+| Routing suggestions (optional) | If a `triage_suggestions.json` file sits next to the script (written by any external process of yours), each ticket in the alert-queue popup and toast shows a 💡 suggestion label. Display-only — the overlay never acts on them |
 | Auto-installs dependencies | First run installs `requests`, `Pillow`, and `pystray` automatically |
 | Windows startup | Optional — toggle in Settings |
 | Fully configurable | Every filter, threshold, SLA field name, and queue is configurable per-user |
