@@ -104,6 +104,7 @@ CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_co
 STARTUP_NAME = "JiraOverlay"
 STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SNAP_MARGIN  = 60   # px from a corner to snap
+_LIVE_POLL_MS = 5_000   # queue-count poll interval — always 5 s regardless of settings
 
 # UI colour palette
 _C = {
@@ -615,6 +616,8 @@ class JiraOverlay:
         self._refresh_job: Optional[str] = None
         self._tray: Optional[pystray.Icon] = None
         self._tray_last: tuple[int, bool] = (-1, False)
+        self._session = requests.Session()   # persistent connection for live polling
+        self._last_full_fetch: float = 0.0   # epoch when stats were last fetched
         # Drag state
         self._drag_x0 = self._drag_y0 = 0
         self._drag_win_x = self._drag_win_y = 0
@@ -991,7 +994,7 @@ class JiraOverlay:
         cfg  = self.config
         auth = HTTPBasicAuth(cfg["email"], cfg["token"])
         try:
-            r = requests.get(
+            r = self._session.get(
                 self._jira_url("/rest/servicedeskapi/servicedesk"),
                 auth=auth, timeout=10)
             r.raise_for_status()
@@ -1001,7 +1004,7 @@ class JiraOverlay:
 
         accessible = [
             d for d in desks
-            if requests.get(
+            if self._session.get(
                 self._jira_url(f"/rest/servicedeskapi/servicedesk/{d['id']}/queue"),
                 params={"limit": 1}, auth=auth, timeout=5
             ).ok
@@ -1111,14 +1114,16 @@ class JiraOverlay:
         finally:
             self.loading = False
             self.root.after(0, self._update_ui)
-            base = self.config.get("refreshSeconds", 30) * 1_000
             if self._settings_changed:
                 self._settings_changed = False
-                delay = 0                                           # immediate
+                self._last_full_fetch = 0.0   # force stats refresh on next cycle
+                delay = 0                     # immediate
             elif self._conn_error:
-                delay = base                                        # normal rate — no backoff
+                delay = _LIVE_POLL_MS         # retry at live rate during reconnect
+            elif self._error_count > 0:
+                delay = min(_LIVE_POLL_MS * (2 ** self._error_count), 5 * 60 * 1_000)
             else:
-                delay = min(base * (2 ** self._error_count), 5 * 60 * 1_000)  # backoff for hard errors only
+                delay = _LIVE_POLL_MS         # always poll counts every 5 s
             self._refresh_job = self.root.after(delay, self._fetch)
 
     def _fetch_data(self) -> None:
@@ -1146,7 +1151,7 @@ class JiraOverlay:
         # Backfill projectKey if absent (e.g. settings save stripped it)
         if not cfg.get("projectKey"):
             try:
-                ri = requests.get(
+                ri = self._session.get(
                     self._jira_url(f"/rest/servicedeskapi/servicedesk/{sd_id}"),
                     auth=auth, timeout=10)
                 if ri.ok:
@@ -1155,8 +1160,8 @@ class JiraOverlay:
             except Exception:
                 pass
 
-        # Queue counts
-        r = requests.get(
+        # --- Fast path: queue counts (runs every 5 s) ---
+        r = self._session.get(
             self._jira_url(f"/rest/servicedeskapi/servicedesk/{sd_id}/queue"),
             params={"includeCount": "true"}, auth=auth, timeout=10)
         r.raise_for_status()
@@ -1179,10 +1184,10 @@ class JiraOverlay:
             self.root.after(0, self._show_alert_queue_picker)
             return
 
-        # Fetch issues inside the alert queue (for tooltip)
+        # Fetch issues inside the alert queue (for new-ticket tooltips / notifications)
         nq = next((q for q in self.queues if q["name"] in alert_qs), None)
         if nq and nq.get("issueCount", 0) > 0:
-            ir = requests.get(
+            ir = self._session.get(
                 self._jira_url(
                     f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{nq['id']}/issue"),
                 params={"start": 0, "limit": 15}, auth=auth, timeout=10)
@@ -1190,8 +1195,11 @@ class JiraOverlay:
         else:
             self.new_issues = []
 
-        # Completed today + SLA compliance
-        self._fetch_completion_stats(cfg, auth)
+        # --- Slow path: SLA & completed-today (runs every refreshSeconds) ---
+        stats_interval = cfg.get("refreshSeconds", 60)
+        if time.time() - self._last_full_fetch >= stats_interval:
+            self._fetch_completion_stats(cfg, auth)
+            self._last_full_fetch = time.time()
 
         self.error_msg    = None
         self._conn_error  = False
@@ -1211,7 +1219,7 @@ class JiraOverlay:
             base_jql += f" AND {extra}"
 
         try:
-            cr = requests.post(
+            cr = self._session.post(
                 self._jira_url("/rest/api/3/search/jql"),
                 json={"jql": base_jql, "maxResults": 200, "fields": ["status"]},
                 auth=auth, timeout=10)
@@ -1231,7 +1239,7 @@ class JiraOverlay:
 
             sla_field = cfg.get("slaField", "Time to resolution")
             sla_jql   = base_jql + f' AND "{sla_field}" = slaBreached()'
-            sr = requests.post(
+            sr = self._session.post(
                 self._jira_url("/rest/api/3/search/jql"),
                 json={"jql": sla_jql, "maxResults": 200, "fields": ["status"]},
                 auth=auth, timeout=10)
@@ -1613,13 +1621,15 @@ class JiraOverlay:
                            activeforeground=_C["fg_bright"], activebackground=BG,
                            font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=1)
 
-        # Refresh interval
-        section("Refresh interval")
+        # Stats refresh interval
+        section("Stats refresh interval")
+        tk.Label(body, text="Queue counts update live every 5 s.  This controls how often\nSLA % and Completed Today refresh (heavier queries).",
+                 font=("Segoe UI", 8), fg=_C["fg_dim"], bg=BG,
+                 justify="left").pack(anchor="w", padx=16, pady=(0, 4))
         rf = tk.Frame(body, bg=BG)
         rf.pack(fill="x", padx=16, pady=(0, 4))
-        s_refresh = tk.IntVar(value=cfg.get("refreshSeconds", 30))
-        for secs, lbl in [(15, "15 s"), (30, "30 s"), (60, "1 min"),
-                          (120, "2 min"), (300, "5 min")]:
+        s_refresh = tk.IntVar(value=cfg.get("refreshSeconds", 60))
+        for secs, lbl in [(30, "30 s"), (60, "1 min"), (120, "2 min"), (300, "5 min")]:
             tk.Radiobutton(rf, text=lbl, variable=s_refresh, value=secs,
                            fg=FG, bg=BG, selectcolor=SEL,
                            activeforeground=_C["fg_bright"], activebackground=BG,

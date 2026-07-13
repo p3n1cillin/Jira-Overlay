@@ -19,7 +19,7 @@ A lightweight Windows desktop overlay that monitors your **Jira Service Manageme
 
 | Feature | Detail |
 |---|---|
-| Live queue counts | Auto-refreshes every 30 s by default (configurable: 15 s → 5 min) |
+| Live queue counts | Queue counts poll every **5 s** (always on). SLA & completed-today refresh every 1 min by default (configurable: 30 s → 5 min) |
 | Multiple alert queues | Tick as many queues as you like — any of them can trigger the overlay |
 | Per-ticket deduplication | Each ticket key only fires one notification, no matter how many refreshes it sits there |
 | Snooze | 15 min / 30 min / 1 hour — accessible via the 💤 button |
@@ -111,7 +111,7 @@ Click **⚙** in the overlay to open Settings inline. All changes take effect on
 
 | Setting | Description |
 |---|---|
-| **Refresh interval** | How often to poll Jira (15 s – 5 min) |
+| **Stats refresh interval** | How often SLA % and Completed Today update (30 s – 5 min). Queue counts are always live at 5 s. |
 | **Desktop notification** | Toast when a new ticket arrives in an alert queue |
 | **Sound alert** | System beep alongside the notification |
 | **Transparency** | Overlay alpha (0.3 – 1.0) |
@@ -147,25 +147,31 @@ All other keys are populated automatically once the overlay has run.
 ## How it works
 
 ```
-┌─────────────────────────────────────┐
-│  Background thread (every N seconds) │
-│                                     │
-│  GET /servicedeskapi/.../queue      │  ← queue counts + issue counts
-│  GET .../queue/{id}/issue           │  ← issues in alert queue (for tooltip)
-│  POST /api/3/search/jql             │  ← completed today + SLA breach count
-└────────────────┬────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Background thread — two-tier polling                 │
+│                                                      │
+│  Every 5 s (always):                                 │
+│    GET /servicedeskapi/.../queue?includeCount=true    │  ← live counts
+│    GET .../queue/{id}/issue                          │  ← alert queue issues
+│                                                      │
+│  Every N min (configurable, default 1 min):          │
+│    POST /api/3/search/jql   ← completed today        │
+│    POST /api/3/search/jql   ← SLA breach count       │
+└────────────────┬─────────────────────────────────────┘
                  │ root.after(0, _update_ui)
                  ▼
-┌─────────────────────────────────────┐
-│  Main thread (tkinter)              │
-│                                     │
-│  • Update queue row counts          │
-│  • Dedup new ticket IDs             │
-│  • Fire toast / sound if new        │
-│  • Show/hide overlay via alpha fade │
-│  • Update tray badge                │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Main thread (tkinter)                               │
+│                                                      │
+│  • Update queue row counts                           │
+│  • Dedup new ticket IDs                              │
+│  • Fire toast / sound if new                         │
+│  • Show/hide overlay via alpha fade                  │
+│  • Update tray badge                                 │
+└──────────────────────────────────────────────────────┘
 ```
+
+- All API calls share a persistent `requests.Session` so TCP connections are reused between polls
 
 - All Jira calls run on a **daemon background thread** so the UI never blocks
 - The overlay uses `overrideredirect(True)` — no title bar, no taskbar entry
