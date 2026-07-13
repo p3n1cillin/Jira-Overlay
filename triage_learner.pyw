@@ -13,6 +13,12 @@ Flow being observed:
      and stays in the TAC
   4. Plain-IT tickets are the fourth outcome: they are never cloned or
      moved — they stay in the TAC and are simply Resolved there
+  5. Proclaim issues are the fifth outcome: the ITS ticket itself is MOVED
+     to the Proclaim Problem solve project (key becomes PPS-xxx), converted
+     to a Bug under the 'Proclaim Bug' parent, and given a time-lost value
+     (10 min = £65). Not everything mentioning Proclaim goes there —
+     e.g. password resets stay plain IT — so wording decides, learned from
+     the team's real decisions
 
 What this script does:
   * Backfills from the last 90 days of routing history to seed its model
@@ -71,6 +77,9 @@ RESOLVED_STATUS = "Resolved"          # the real Jira status plain-IT tickets en
 # Internal label only (NOT a Jira status): tickets resolved in the TAC that
 # were never cloned or moved — just IT work.
 TAC_DEST        = "IT (resolved in TAC)"
+# Proclaim bugs: the ITS ticket is moved into this project and becomes a Bug
+PROCLAIM_PROJECT = "PPS"
+PROCLAIM_DEST    = "Proclaim bug (moved to PPS)"
 
 _STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that", "have", "has",
@@ -239,6 +248,9 @@ class Learner:
         conf  = int(round(100 * exps[best] / sum(exps.values())))
         if best == TAC_DEST:
             note = "keep in TAC — plain IT, resolve here, no clone"
+        elif best == PROCLAIM_DEST:
+            note = ("move to PPS (Proclaim Problem solve), convert to Bug "
+                    "under parent 'Proclaim Bug', log time lost 10 min / £65")
         else:
             proj = self.clone_project_for(best)
             note = (f"clone to {proj} then move master to {best}"
@@ -266,6 +278,7 @@ class ShadowWatcher:
         self.project  = self.cfg.get("projectKey", "ITS")
         self.dests    = self.cfg.get("triageStatuses", DEFAULT_DESTS)
         self.resolved = self.cfg.get("resolvedStatus", RESOLVED_STATUS)
+        self.pps      = self.cfg.get("proclaimProject", PROCLAIM_PROJECT)
         self.jira    = Jira(self.cfg)
         self.state   = self._load_state()
         self.learner = Learner(self.state)
@@ -347,6 +360,28 @@ class ShadowWatcher:
                     resolved.append(rec)
         return routed, resolved
 
+    def _proclaim_moves(self, key: str) -> tuple[list[dict], str]:
+        """(moves of an ITS ticket into the Proclaim project, original ITS
+        summary). Proclaim tickets aren't cloned — the ITS issue itself is
+        MOVED (key change to PPS-xxx) and converted to a Bug, so the PPS
+        changelog holds the old ITS key and any later renames."""
+        moves: list[dict] = []
+        first_summary = ""
+        for h in self.jira.changelog(key):
+            for item in h.get("items", []):
+                field = item.get("field", "")
+                if field == "Key" and (item.get("fromString") or "") \
+                        .startswith(self.project + "-"):
+                    moves.append({
+                        "id":     f"{key}:{h.get('id', '')}",
+                        "oldKey": item.get("fromString", ""),
+                        "by":     (h.get("author") or {}).get("displayName", ""),
+                        "when":   h.get("created", "")[:16].replace("T", " "),
+                    })
+                elif field == "summary" and not first_summary:
+                    first_summary = item.get("fromString") or ""
+        return moves, first_summary
+
     # -- backfill --------------------------------------------------------------
 
     def backfill(self) -> None:
@@ -402,6 +437,31 @@ class ShadowWatcher:
                            "summary": det["summary"], "dest": TAC_DEST,
                            "by": tr["by"], "when": tr["when"],
                            "requestType": req_type, "clones": []})
+
+        # Phase 3: Proclaim bugs — ITS tickets moved into the PPS project
+        # and converted to Bug under the 'Proclaim Bug' parent
+        jql3 = (f'project = {self.pps} AND issuetype = Bug '
+                f'ORDER BY created DESC')
+        for issue in self.jira.search(jql3, self._FIELDS, cap=BACKFILL_CAP):
+            if self.stop.is_set():
+                return
+            det = self._issue_details(issue)
+            moves, orig_summary = self._proclaim_moves(det["key"])
+            if not moves:
+                continue
+            if orig_summary:    # learn from the intake wording, not the rename
+                det["summary"] = f"{orig_summary} — {det['summary']}"
+            toks = self._tokens_for(det, "")
+            for mv in moves:
+                if mv["id"] in seen:
+                    continue
+                seen.add(mv["id"])
+                self.learner.learn(PROCLAIM_DEST, toks, "", [])
+                learned += 1
+                self._log({"event": "backfill", "key": mv["oldKey"],
+                           "summary": det["summary"], "dest": PROCLAIM_DEST,
+                           "by": mv["by"], "when": mv["when"],
+                           "requestType": "", "clones": [det["key"]]})
         self.state["seenTransitions"] = list(seen)
         self.state["backfillDone"]    = True
         self.state["backfillCount"]   = learned
@@ -478,6 +538,29 @@ class ShadowWatcher:
                 self._resolve_prediction(det, TAC_DEST, tr, req_type,
                                          predicted, stats, clones=[])
 
+        # 4. Proclaim bugs — ITS tickets moved into PPS and converted to
+        #    Bug (key change recorded in the PPS-side changelog)
+        for issue in self.jira.search(
+                f'project = {self.pps} AND issuetype = Bug AND '
+                f'updated >= {since}', self._FIELDS, cap=50):
+            det = self._issue_details(issue)
+            moves, orig_summary = self._proclaim_moves(det["key"])
+            if not moves:
+                continue
+            if orig_summary:
+                det["summary"] = f"{orig_summary} — {det['summary']}"
+            toks = self._tokens_for(det, "")
+            for mv in moves:
+                if mv["id"] in seen:
+                    continue
+                seen.add(mv["id"])
+                self.learner.learn(PROCLAIM_DEST, toks, "", [])
+                # score against the prediction made under the old ITS key
+                self._resolve_prediction(
+                    dict(det, key=mv["oldKey"]), PROCLAIM_DEST,
+                    {"by": mv["by"], "when": mv["when"]}, "",
+                    predicted, stats, clones=[det["key"]])
+
         # housekeeping
         self.state["seenTransitions"] = list(seen)[-8000:]
         cutoff = f"{datetime.now() - timedelta(days=30):%Y-%m-%d}"
@@ -528,10 +611,13 @@ class ShadowWatcher:
             lines.append(f"| {dest} | `{proj}-…` | {m['priors'].get(dest, 0)} |")
         lines.append(f"| {TAC_DEST} | stays in TAC — no clone | "
                      f"{m['priors'].get(TAC_DEST, 0)} |")
+        lines.append(f"| {PROCLAIM_DEST} | ticket moved & becomes Bug under "
+                     f"'Proclaim Bug' (+10 min / £65 time lost) | "
+                     f"{m['priors'].get(PROCLAIM_DEST, 0)} |")
 
         lines += ["", f"## Prediction accuracy: {acc}", "",
                   "## Signals per destination", ""]
-        for dest in self.dests + [TAC_DEST]:
+        for dest in self.dests + [TAC_DEST, PROCLAIM_DEST]:
             kws = ", ".join(self.learner.top_keywords(dest)) or "—"
             rts = m["reqTypes"].get(dest, {})
             top_rt = ", ".join(f"{k} ({v})" for k, v in
