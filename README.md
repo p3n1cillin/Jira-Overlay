@@ -187,7 +187,7 @@ All other keys are populated automatically once the overlay has run.
 
 `triage_learner.pyw` is a separate, **strictly read-only** background process that learns how your team triages tickets — it never transitions, clones, comments on, or edits anything.
 
-It watches for ITS tickets being routed to **With BI / With DATA / With DEV** (after the Elements Sync clone to BI-/DP-/DEVW- is created), and:
+It watches for ITS tickets being routed to **With BI / With DATA / With DEV** (after the Elements Sync clone to BI-/DP-/DEVW- is created) — plus the fourth outcome: **plain IT tickets** that are never cloned or moved and are simply resolved inside the TAC. For each new ticket it:
 
 - **Backfills** from the last 90 days of routing history to seed its model
 - **Predicts** a destination for every new ticket at intake and logs *"what I would have done"*

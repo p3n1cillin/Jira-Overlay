@@ -11,6 +11,8 @@ Flow being observed:
      (BI-xxxx / DP-xxxxx / DEVW-xxxxx, linked as "Developer Escalations")
   3. Once the clone exists, the ITS master is moved to With BI/DATA/DEV
      and stays in the TAC
+  4. Plain-IT tickets are the fourth outcome: they are never cloned or
+     moved — they stay in the TAC and are simply Resolved there
 
 What this script does:
   * Backfills from the last 90 days of routing history to seed its model
@@ -64,7 +66,11 @@ OVERLAP_SECS   = 600         # re-scan overlap so nothing is missed
 MIN_EXAMPLES   = 8           # per-destination examples needed before predicting
 
 # Destination statuses on the ITS master ticket (overridable in config)
-DEFAULT_DESTS  = ["With BI", "With DATA", "With DEV"]
+DEFAULT_DESTS   = ["With BI", "With DATA", "With DEV"]
+RESOLVED_STATUS = "Resolved"          # the real Jira status plain-IT tickets end on
+# Internal label only (NOT a Jira status): tickets resolved in the TAC that
+# were never cloned or moved — just IT work.
+TAC_DEST        = "IT (resolved in TAC)"
 
 _STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that", "have", "has",
@@ -231,9 +237,12 @@ class Learner:
         mx    = scores[best]
         exps  = {d: math.exp(s - mx) for d, s in scores.items()}
         conf  = int(round(100 * exps[best] / sum(exps.values())))
-        proj  = self.clone_project_for(best)
-        note  = f"clone to {proj} then move master to {best}" if proj else \
-                f"move master to {best}"
+        if best == TAC_DEST:
+            note = "keep in TAC — plain IT, resolve here, no clone"
+        else:
+            proj = self.clone_project_for(best)
+            note = (f"clone to {proj} then move master to {best}"
+                    if proj else f"move master to {best}")
         return best, conf, note
 
     def clone_project_for(self, dest: str) -> str:
@@ -254,8 +263,9 @@ class ShadowWatcher:
     def __init__(self) -> None:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             self.cfg = json.load(f)
-        self.project = self.cfg.get("projectKey", "ITS")
-        self.dests   = self.cfg.get("triageStatuses", DEFAULT_DESTS)
+        self.project  = self.cfg.get("projectKey", "ITS")
+        self.dests    = self.cfg.get("triageStatuses", DEFAULT_DESTS)
+        self.resolved = self.cfg.get("resolvedStatus", RESOLVED_STATUS)
         self.jira    = Jira(self.cfg)
         self.state   = self._load_state()
         self.learner = Learner(self.state)
@@ -314,20 +324,28 @@ class ShadowWatcher:
                          " ".join(det["labels"]), " ".join(det["components"])])
         return tokenize(text)
 
-    def _routing_from_changelog(self, key: str) -> list[dict]:
-        """Status transitions into a destination status, with author + id."""
-        out = []
+    def _transitions(self, key: str) -> tuple[list[dict], list[dict]]:
+        """(transitions into a destination status, transitions into Resolved)
+        from the full changelog — a ticket that was ever routed to a team is
+        never counted as a plain-TAC resolution."""
+        routed: list[dict] = []
+        resolved: list[dict] = []
         for h in self.jira.changelog(key):
             for item in h.get("items", []):
-                if item.get("field") == "status" and \
-                        item.get("toString") in self.dests:
-                    out.append({
-                        "id":     f"{key}:{h.get('id', '')}",
-                        "dest":   item["toString"],
-                        "by":     (h.get("author") or {}).get("displayName", ""),
-                        "when":   h.get("created", "")[:16].replace("T", " "),
-                    })
-        return out
+                if item.get("field") != "status":
+                    continue
+                to = item.get("toString", "")
+                rec = {
+                    "id":   f"{key}:{h.get('id', '')}",
+                    "dest": to,
+                    "by":   (h.get("author") or {}).get("displayName", ""),
+                    "when": h.get("created", "")[:16].replace("T", " "),
+                }
+                if to in self.dests:
+                    routed.append(rec)
+                elif to == self.resolved:
+                    resolved.append(rec)
+        return routed, resolved
 
     # -- backfill --------------------------------------------------------------
 
@@ -344,7 +362,8 @@ class ShadowWatcher:
             if self.stop.is_set():
                 return
             det = self._issue_details(issue)
-            for tr in self._routing_from_changelog(det["key"]):
+            routed, _ = self._transitions(det["key"])
+            for tr in routed:
                 if tr["id"] in seen:
                     continue
                 seen.add(tr["id"])
@@ -358,6 +377,31 @@ class ShadowWatcher:
                            "by": tr["by"], "when": tr["when"],
                            "requestType": req_type,
                            "clones": [c["key"] for c in det["clones"]]})
+
+        # Phase 2: plain-IT tickets — resolved inside the TAC, never
+        # cloned or moved to a team
+        jql2 = (f'project = {self.project} AND status CHANGED TO '
+                f'"{self.resolved}" AFTER -{BACKFILL_DAYS}d '
+                f'ORDER BY updated DESC')
+        for issue in self.jira.search(jql2, self._FIELDS, cap=BACKFILL_CAP):
+            if self.stop.is_set():
+                return
+            det = self._issue_details(issue)
+            routed, resolutions = self._transitions(det["key"])
+            if routed:      # went to a team at some point — learned above
+                continue
+            for tr in resolutions:
+                if tr["id"] in seen:
+                    continue
+                seen.add(tr["id"])
+                req_type = self.jira.request_type(det["key"])
+                toks     = self._tokens_for(det, req_type)
+                self.learner.learn(TAC_DEST, toks, req_type, [])
+                learned += 1
+                self._log({"event": "backfill", "key": det["key"],
+                           "summary": det["summary"], "dest": TAC_DEST,
+                           "by": tr["by"], "when": tr["when"],
+                           "requestType": req_type, "clones": []})
         self.state["seenTransitions"] = list(seen)
         self.state["backfillDone"]    = True
         self.state["backfillCount"]   = learned
@@ -402,7 +446,8 @@ class ShadowWatcher:
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
                 f'AFTER {since}', self._FIELDS, cap=50):
             det = self._issue_details(issue)
-            for tr in self._routing_from_changelog(det["key"]):
+            routed, _ = self._transitions(det["key"])
+            for tr in routed:
                 if tr["id"] in seen:
                     continue
                 seen.add(tr["id"])
@@ -410,21 +455,28 @@ class ShadowWatcher:
                 toks     = self._tokens_for(det, req_type)
                 projs    = [c["key"].split("-")[0] for c in det["clones"]]
                 self.learner.learn(tr["dest"], toks, req_type, projs)
+                self._resolve_prediction(det, tr["dest"], tr, req_type,
+                                         predicted, stats,
+                                         clones=[c["key"] for c in det["clones"]])
 
-                pred    = predicted.get(det["key"], {})
-                p_dest  = pred.get("dest")
-                correct = None
-                if p_dest is not None:
-                    correct = (p_dest == tr["dest"])
-                    stats["predictions"] += 1
-                    stats["correct"]     += int(correct)
-                self._log({"event": "routed", "key": det["key"],
-                           "summary": det["summary"], "dest": tr["dest"],
-                           "by": tr["by"], "when": tr["when"],
-                           "requestType": req_type,
-                           "clones": [c["key"] for c in det["clones"]],
-                           "predicted": p_dest,
-                           "predictionCorrect": correct})
+        # 3. Plain-IT tickets resolved inside the TAC (never cloned/moved)
+        #    — the fourth outcome we learn from
+        for issue in self.jira.search(
+                f'project = {self.project} AND status CHANGED TO '
+                f'"{self.resolved}" AFTER {since}', self._FIELDS, cap=50):
+            det = self._issue_details(issue)
+            routed, resolutions = self._transitions(det["key"])
+            if routed:      # team ticket — handled by the routing pass
+                continue
+            for tr in resolutions:
+                if tr["id"] in seen:
+                    continue
+                seen.add(tr["id"])
+                req_type = self.jira.request_type(det["key"])
+                toks     = self._tokens_for(det, req_type)
+                self.learner.learn(TAC_DEST, toks, req_type, [])
+                self._resolve_prediction(det, TAC_DEST, tr, req_type,
+                                         predicted, stats, clones=[])
 
         # housekeeping
         self.state["seenTransitions"] = list(seen)[-8000:]
@@ -434,6 +486,23 @@ class ShadowWatcher:
         self.state["lastPollEpoch"] = datetime.now().timestamp()
         self._save_state()
         self.write_report()
+
+    def _resolve_prediction(self, det: dict, dest: str, tr: dict,
+                            req_type: str, predicted: dict, stats: dict,
+                            clones: list[str]) -> None:
+        """Score our earlier guess against the human decision and log it."""
+        pred    = predicted.get(det["key"], {})
+        p_dest  = pred.get("dest")
+        correct = None
+        if p_dest is not None:
+            correct = (p_dest == dest)
+            stats["predictions"] += 1
+            stats["correct"]     += int(correct)
+        self._log({"event": "routed", "key": det["key"],
+                   "summary": det["summary"], "dest": dest,
+                   "by": tr["by"], "when": tr["when"],
+                   "requestType": req_type, "clones": clones,
+                   "predicted": p_dest, "predictionCorrect": correct})
 
     # -- report --------------------------------------------------------------
 
@@ -451,16 +520,18 @@ class ShadowWatcher:
             "",
             "## Learned routing map",
             "",
-            "| ITS master status | Clone goes to | Observed examples |",
+            "| Outcome | Clone goes to | Observed examples |",
             "|---|---|---|",
         ]
         for dest in self.dests:
             proj = self.learner.clone_project_for(dest) or "?"
             lines.append(f"| {dest} | `{proj}-…` | {m['priors'].get(dest, 0)} |")
+        lines.append(f"| {TAC_DEST} | stays in TAC — no clone | "
+                     f"{m['priors'].get(TAC_DEST, 0)} |")
 
         lines += ["", f"## Prediction accuracy: {acc}", "",
                   "## Signals per destination", ""]
-        for dest in self.dests:
+        for dest in self.dests + [TAC_DEST]:
             kws = ", ".join(self.learner.top_keywords(dest)) or "—"
             rts = m["reqTypes"].get(dest, {})
             top_rt = ", ".join(f"{k} ({v})" for k, v in
