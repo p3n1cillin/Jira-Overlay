@@ -105,23 +105,36 @@ STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SNAP_MARGIN  = 60   # px from a corner to snap
 _LIVE_POLL_MS = 5_000   # queue-count poll interval — always 5 s regardless of settings
 
-# UI colour palette
+# UI colour palette — refined dark "slate + indigo" theme
 _C = {
-    "bg":        "#16213e",
-    "bg_dark":   "#1a1a2e",
-    "border":    "#0052cc",
-    "divider":   "#2d3748",
-    "input":     "#2d3748",
-    "fg":        "#a0aec0",
-    "fg_bright": "#e2e8f0",
-    "fg_dim":    "#4a5568",
-    "accent":    "#0052cc",
-    "accent_hi": "#0040a0",
-    "alert":     "#fc8181",
-    "warn":      "#fbd38d",
-    "ok":        "#68d391",
-    "info":      "#7ec8e3",
+    "bg":        "#1b2233",   # main surface
+    "bg_dark":   "#141a27",   # deeper (setup dialogs)
+    "border":    "#3d5573",   # subtle 1-px window edge
+    "divider":   "#28324a",   # hairline separators
+    "input":     "#232c40",   # input / elevated surfaces
+    "fg":        "#aab4c5",    # body text
+    "fg_bright": "#eef2f8",    # emphasis text
+    "fg_dim":    "#5b6478",    # muted / inactive
+    "accent":    "#4c8dff",    # friendly Jira-blue accent
+    "accent_hi": "#6ba1ff",    # accent hover
+    "alert":     "#ff6b6b",    # alert / breach
+    "warn":      "#f5c56b",    # snooze / stale
+    "ok":        "#4fd18b",    # completed / healthy
+    "info":      "#6cc6e8",    # alert-queue accent
+    "hover":     "#263250",    # row hover background
+    "chip":      "#2b3a55",    # button hover chip
+    "badge":     "#2b3550",    # count badge background
 }
+
+def _lerp_hex(a: str, b: str, t: float) -> str:
+    """Linear-interpolate between two #rrggbb colours (t in 0..1)."""
+    t = max(0.0, min(1.0, t))
+    ar, ag, ab = int(a[1:3], 16), int(a[3:5], 16), int(a[5:7], 16)
+    br, bg, bb = int(b[1:3], 16), int(b[3:5], 16), int(b[5:7], 16)
+    return (f"#{int(ar + (br - ar) * t):02x}"
+            f"{int(ag + (bg - ag) * t):02x}"
+            f"{int(ab + (bb - ab) * t):02x}")
+
 
 # Tray icon font — loaded once, reused on every badge update
 _tray_font: Optional[ImageFont.FreeTypeFont] = None
@@ -520,28 +533,31 @@ class NewTicketTooltip:
     def _make_issue_row(self, url: str, key: str, summary: str) -> None:
         row = tk.Frame(self.win, bg=_C["input"], cursor="hand2")
         row.pack(fill="x", padx=8, pady=2)
-        lbl_key = tk.Label(row, text=key, font=("Segoe UI", 8, "bold"),
+        top = tk.Frame(row, bg=_C["input"])
+        top.pack(fill="x")
+        lbl_key = tk.Label(top, text=key, font=("Segoe UI", 8, "bold"),
                            fg=_C["accent"], bg=_C["input"], width=10, anchor="w")
         lbl_key.pack(side="left")
-        lbl_txt = tk.Label(row, text=summary, font=("Segoe UI", 8),
+        lbl_txt = tk.Label(top, text=summary, font=("Segoe UI", 8),
                            fg=_C["fg"], bg=_C["input"], anchor="w")
         lbl_txt.pack(side="left")
+        widgets = [row, top, lbl_key, lbl_txt]
 
-        def _hover_in(_e: tk.Event, r=row) -> None:
-            for w in [r, *r.winfo_children()]:
+        def _hover_in(_e: tk.Event) -> None:
+            for w in widgets:
                 try:
                     w.configure(bg="#3d4f6e")
                 except tk.TclError:
                     pass
 
-        def _hover_out(_e: tk.Event, r=row) -> None:
-            for w in [r, *r.winfo_children()]:
+        def _hover_out(_e: tk.Event) -> None:
+            for w in widgets:
                 try:
                     w.configure(bg=_C["input"])
                 except tk.TclError:
                     pass
 
-        for widget in (row, lbl_key, lbl_txt):
+        for widget in widgets:
             widget.bind("<ButtonRelease-1>", lambda _e, u=url: webbrowser.open(u))
             widget.bind("<Enter>", _hover_in)
             widget.bind("<Leave>", _hover_out)
@@ -625,6 +641,7 @@ class JiraOverlay:
         self._error_count      = 0
         self._retry_after_ms: Optional[int] = None
         self._alert_count      = 0
+        self._reconciled_counts: dict[str, int] = {}   # alert queue → live count
         self._prev_newly: Optional[int] = None
         self._seen_newly_ids: set[str]  = set()
         self._dismissed        = False
@@ -727,12 +744,15 @@ class JiraOverlay:
         self.lbl_title.bind("<Leave>", lambda _e: self.lbl_title.config(fg=_C["accent"]))
         self.lbl_title.bind("<ButtonRelease-1>", lambda _e: self._open_service_desk())
         _Tooltip(self.lbl_title, "Open service desk in Jira")
-        self.btn_gear = tk.Label(hdr, text="⚙", font=("Segoe UI", 10),
-                                 fg=_C["fg_dim"], bg=BG, cursor="hand2")
+        self.btn_gear = tk.Label(hdr, text="⚙", font=("Segoe UI", 11),
+                                 fg=_C["fg_dim"], bg=BG, cursor="hand2",
+                                 padx=6, pady=1)
         self.btn_gear.pack(side="right")
         self.btn_gear.bind("<ButtonRelease-1>", lambda _e: self._toggle_settings())
-        self.btn_gear.bind("<Enter>", lambda _e: self.btn_gear.config(fg=_C["fg"]))
-        self.btn_gear.bind("<Leave>", lambda _e: self.btn_gear.config(fg=_C["fg_dim"]))
+        self.btn_gear.bind("<Enter>", lambda _e: self.btn_gear.config(
+            fg=_C["fg_bright"], bg=_C["chip"]))
+        self.btn_gear.bind("<Leave>", lambda _e: self.btn_gear.config(
+            fg=_C["fg_dim"], bg=BG))
         _Tooltip(self.btn_gear, "Settings")
 
         tk.Frame(self.frame, bg=_C["divider"], height=1).pack(fill="x", pady=(4, 4))
@@ -807,11 +827,19 @@ class JiraOverlay:
     def _footer_btn(parent: tk.Frame, text: str, cmd,
                     color: str = _C["fg_dim"],
                     tip: str = "") -> tk.Label:
-        btn = tk.Label(parent, text=text, font=("Segoe UI", 10),
-                       fg=color, bg=_C["bg"], cursor="hand2")
+        btn = tk.Label(parent, text=text, font=("Segoe UI", 11),
+                       fg=color, bg=_C["bg"], cursor="hand2",
+                       padx=6, pady=1)
+
+        def _enter(_e: tk.Event) -> None:
+            btn.config(fg=_C["fg_bright"], bg=_C["chip"])
+
+        def _leave(_e: tk.Event) -> None:
+            btn.config(fg=color, bg=_C["bg"])
+
         btn.bind("<ButtonRelease-1>", lambda _e: cmd())
-        btn.bind("<Enter>",  lambda _e: btn.config(fg=_C["fg_bright"]))
-        btn.bind("<Leave>",  lambda _e: btn.config(fg=color))
+        btn.bind("<Enter>", _enter)
+        btn.bind("<Leave>", _leave)
         if tip:
             _Tooltip(btn, tip)
         return btn
@@ -834,16 +862,17 @@ class JiraOverlay:
         label = name if len(name) <= max_chars else name[:max_chars - 1] + "…"
 
         row = tk.Frame(self.rows_frame, bg=BG, cursor="hand2")
-        row.pack(fill="x", pady=1)
+        row.pack(fill="x", pady=2)
         lbl_name  = tk.Label(row, text=label, font=("Segoe UI", 9),
                              fg=nc, bg=BG, anchor="w")
-        lbl_name.pack(side="left")
-        dot = tk.Label(row, text="", font=("Segoe UI", 9),
-                       fg=_C["alert"], bg=BG)
-        dot.pack(side="right")
-        lbl_count = tk.Label(row, text="—", font=("Segoe UI", 9, "bold"),
-                             fg=cc, bg=BG, width=5, anchor="e")
-        lbl_count.pack(side="right")
+        lbl_name.pack(side="left", padx=(2, 0))
+        # count shown as a small chip so it reads as a discrete badge
+        lbl_count = tk.Label(row, text="—", font=("Segoe UI", 8, "bold"),
+                             fg=cc, bg=_C["badge"], padx=7, pady=0)
+        lbl_count.pack(side="right", padx=(0, 2))
+        dot = tk.Label(row, text="", font=("Segoe UI", 8),
+                       fg=_C["info"], bg=BG)
+        dot.pack(side="right", padx=(0, 4))
 
         pk  = self.config.get("projectKey", "")
         url = (self._jira_url(f"/jira/servicedesk/projects/{pk}/queues/custom/{qid}")
@@ -854,16 +883,34 @@ class JiraOverlay:
             w.bind("<B1-Motion>",       self._drag_move)
             w.bind("<ButtonRelease-1>", lambda e, u=url: self._row_click(e, u))
 
+        # subtle row hover; the count chip keeps its own background
+        hover_targets = (row, lbl_name, dot)
+
+        def _hover_in(_e: tk.Event) -> None:
+            for w in hover_targets:
+                try: w.configure(bg=_C["hover"])
+                except tk.TclError: pass
+
+        def _hover_out(_e: tk.Event) -> None:
+            for w in hover_targets:
+                try: w.configure(bg=BG)
+                except tk.TclError: pass
+
         if is_new:
+            def _enter(e: tk.Event) -> None:
+                _hover_in(e); self._tooltip_show(e)
+            def _leave(e: tk.Event) -> None:
+                _hover_out(e); self._tooltip_hide(e)
             for w in (row, lbl_name, lbl_count, dot):
-                w.bind("<Enter>", self._tooltip_show)
-                w.bind("<Leave>", self._tooltip_hide)
+                w.bind("<Enter>", _enter)
+                w.bind("<Leave>", _leave)
         else:
-            _Tooltip(row, "Click to open queue in Jira")
+            for w in (row, lbl_name, lbl_count, dot):
+                w.bind("<Enter>", _hover_in)
+                w.bind("<Leave>", _hover_out)
 
         return {"row": row, "lbl_name": lbl_name,
-                "lbl_count": lbl_count, "dot": dot,
-                "is_new": is_new, "base_cc": cc}
+                "lbl_count": lbl_count, "dot": dot}
 
     # ── Drag ─────────────────────────────────────────────────────────────────
 
@@ -1258,26 +1305,39 @@ class JiraOverlay:
         # Alert data comes from the UNFILTERED list — hiding a queue from
         # display must not silently disable its alerts
         alert_objs = [q for q in all_queues if q["name"] in alert_qs]
-        self._alert_count = sum(q.get("issueCount", 0) for q in alert_objs)
 
-        # Fetch issues in every alert queue (tooltips + notifications)
+        # Fetch issues in every alert queue (tooltips + notifications).
+        # includeCount is cached by JSM and can report a stale non-zero for an
+        # empty queue, so we treat the live issue list as authoritative and
+        # reconcile each queue's displayed count against what we actually pull.
+        _ISSUE_LIMIT = 50
         issues: list[dict] = []
         complete = True
+        reconciled: dict[str, int] = {}
         for q in alert_objs:
-            if q.get("issueCount", 0) <= 0:
+            cached = q.get("issueCount", 0)
+            if cached <= 0:
+                reconciled[q["name"]] = 0
                 continue
             ir = self._session.get(
                 self._jira_url(
                     f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{q['id']}/issue"),
-                params={"start": 0, "limit": 15}, timeout=10)
+                params={"start": 0, "limit": _ISSUE_LIMIT}, timeout=10)
             if ir.ok:
-                issues.extend(ir.json().get("values", []))
+                vals = ir.json().get("values", [])
+                issues.extend(vals)
+                # Exact when the whole queue fits in one page; else trust cache
+                reconciled[q["name"]] = len(vals) if cached <= _ISSUE_LIMIT else cached
             else:
                 complete = False
+                reconciled[q["name"]] = cached   # fall back to cached on failure
         if complete:
             self.new_issues = issues
         # On partial failure keep the previous snapshot — replacing it would
         # wipe the seen-set and re-notify every ticket once the fetch recovers
+        self._reconciled_counts = reconciled
+        self._alert_count = sum(reconciled.get(q["name"], q.get("issueCount", 0))
+                                for q in alert_objs)
 
         # --- Slow path: SLA & completed-today (runs every refreshSeconds) ---
         stats_interval = cfg.get("refreshSeconds", 60)
@@ -1378,8 +1438,11 @@ class JiraOverlay:
 
         for q in self.queues:
             name   = q["name"]
-            count  = q.get("issueCount", 0)
             is_new = name in alert_qs
+            # alert queues use the live reconciled count (cached count can be
+            # a stale non-zero for an empty queue); others use includeCount
+            count  = (self._reconciled_counts.get(name, q.get("issueCount", 0))
+                      if is_new else q.get("issueCount", 0))
 
             if name not in self.row_widgets:
                 self.row_widgets[name] = self._make_row(q)
@@ -1388,8 +1451,17 @@ class JiraOverlay:
             rw["lbl_count"].config(text=str(count))
 
             if is_new:
-                rw["lbl_count"].config(fg=_C["alert"] if count > 0 else _C["info"])
-                rw["dot"].config(text="●" if count > 0 else "")
+                if count > 0:
+                    # active alert queue — solid accent chip + live dot
+                    rw["lbl_count"].config(fg="#ffffff", bg=_C["accent"])
+                    rw["dot"].config(text="●", fg=_C["info"])
+                else:
+                    rw["lbl_count"].config(fg=_C["fg_dim"], bg=_C["badge"])
+                    rw["dot"].config(text="")
+            else:
+                rw["lbl_count"].config(
+                    fg=_C["fg_bright"] if count > 0 else _C["fg_dim"],
+                    bg=_C["badge"])
 
             prev = self._prev_counts.get(name)
             if prev is not None and count != prev:
@@ -1432,7 +1504,7 @@ class JiraOverlay:
                 title   = f"Jira — {len(truly_new)} new tickets"
                 lines   = []
                 for key in list(truly_new)[:3]:
-                    s = summaries.get(key, "")
+                    s    = summaries.get(key, "")
                     lines.append(f"{key}: {s[:60]}" if s else key)
                 if len(truly_new) > 3:
                     lines.append(f"…and {len(truly_new) - 3} more")
@@ -1490,20 +1562,25 @@ class JiraOverlay:
     # ── Row flash ─────────────────────────────────────────────────────────────
 
     def _flash_row(self, rw: dict) -> None:
-        row      = rw["row"]
-        children = list(row.winfo_children())
+        """Smoothly fade a row's background from an accent tint back to base
+        when its count changes — a gentle highlight rather than a hard blink.
+        The count chip keeps its own background."""
+        targets = [rw["row"], rw["lbl_name"], rw["dot"]]
+        highlight, base = "#33507a", _C["bg"]
+        steps = 14
 
-        def pulse(step: int = 0) -> None:
-            bg = "#2a3f5f" if step % 2 == 0 else _C["bg"]
+        def tick(i: int) -> None:
+            t   = i / steps
+            col = _lerp_hex(highlight, base, t)
             try:
-                for w in [row, *children]:
-                    w.configure(bg=bg)
+                for w in targets:
+                    w.configure(bg=col)
             except tk.TclError:
                 return
-            if step < 5:
-                self.root.after(100, lambda: pulse(step + 1))
+            if i < steps:
+                self.root.after(28, lambda: tick(i + 1))
 
-        pulse()
+        tick(0)
 
     # ── Relative time ──────────────────────────────────────────────────────────
 
@@ -1572,42 +1649,48 @@ class JiraOverlay:
         self._visible = False
         self._animate_alpha(0.0, on_done=self.root.withdraw)
 
-    def _animate_alpha(self, target: float, on_done=None, frames: int = 12) -> None:
-        """Fade the window alpha to `target`, cancelling any fade in flight.
+    def _animate_alpha(self, target: float, on_done=None,
+                       duration_ms: int = 190) -> None:
+        """Ease the window alpha to `target`, cancelling any fade in flight.
 
         Single animator for show, hide and the settings transition — two
-        independent fades can no longer fight over the alpha channel.
+        independent fades can no longer fight over the alpha channel. Uses a
+        cubic ease-out so fades start briskly and settle gently (~60 fps).
         """
         if self._fade_job:
             self.root.after_cancel(self._fade_job)
             self._fade_job = None
-        current = float(self.root.attributes("-alpha"))
-        step = (target - current) / frames
-        if abs(step) < 0.001:
+        start = float(self.root.attributes("-alpha"))
+        delta = target - start
+        if abs(delta) < 0.001:
             self.root.attributes("-alpha", target)
             if on_done:
                 on_done()
             return
 
-        def tick(cur: float) -> None:
-            nxt  = cur + step
-            done = (step > 0 and nxt >= target) or (step < 0 and nxt <= target)
-            self.root.attributes("-alpha",
-                                 target if done else max(0.0, min(1.0, nxt)))
-            if done:
+        steps = max(1, duration_ms // 16)
+
+        def ease_out(t: float) -> float:
+            return 1.0 - (1.0 - t) ** 3
+
+        def tick(i: int) -> None:
+            if i >= steps:
+                self.root.attributes("-alpha", target)
                 self._fade_job = None
                 if on_done:
                     on_done()
-            else:
-                self._fade_job = self.root.after(14, lambda: tick(nxt))
+                return
+            val = start + delta * ease_out(i / steps)
+            self.root.attributes("-alpha", max(0.0, min(1.0, val)))
+            self._fade_job = self.root.after(16, lambda: tick(i + 1))
 
-        tick(current)
+        tick(1)
 
     # ── Resize / reposition ───────────────────────────────────────────────────
 
     def _resize(self) -> None:
         if self._in_settings:
-            return   # settings geometry is managed by _apply_settings_geom
+            return   # settings geometry is managed by the settings transition
         self.root.update_idletasks()
         w = self.config.get("overlayWidth", 260)
         self.root.geometry(f"{w}x{self.frame.winfo_reqheight() + 4}")
@@ -1670,13 +1753,24 @@ class JiraOverlay:
         self._build_settings_panel()
         self.settings_panel.pack(fill="both", expand=True)
 
+        target = self._settings_target()
         if was_hidden:
-            self._apply_settings_geom()   # already invisible — no flash, just fade in
+            # invisible → snap to size and simply fade in, no motion needed
+            self.root.geometry("{}x{}+{}+{}".format(*target))
+            self._animate_alpha(self.config.get("alpha", 0.93))
         else:
-            self._animate_alpha(0.0, on_done=self._apply_settings_geom)
+            # visible → crossfade: fade out fast, resize while invisible (so
+            # the panel never re-flows on screen), then fade back in
+            self._animate_alpha(0.0, duration_ms=120,
+                                on_done=lambda: self._reveal_at(target))
 
-    def _apply_settings_geom(self) -> None:
-        """Expand to the settings size, anchored to the overlay's own monitor."""
+    def _reveal_at(self, target: tuple[int, int, int, int]) -> None:
+        self.root.geometry("{}x{}+{}+{}".format(*target))
+        self._animate_alpha(self.config.get("alpha", 0.93))
+
+    def _settings_target(self) -> tuple[int, int, int, int]:
+        """Target (w, h, x, y) for the settings panel, anchored to the
+        overlay's own monitor with right edges aligned to the compact view."""
         cw, ch, cx, cy = self._queue_geom  # type: ignore[misc]
         tw   = self._SETTINGS_W
         rect = get_monitor_rect(cx + cw // 2, cy + ch // 2, work=True)
@@ -1684,11 +1778,12 @@ class JiraOverlay:
         tx  = max(l + 10, min(cx + cw - tw, r - tw - 10))   # right edges aligned
         bot = min(cy + ch, b - 10)
         ty  = max(t + 20, bot - int((b - t) * 0.9))
-        self.root.geometry(f"{tw}x{bot - ty}+{tx}+{ty}")
-        self._animate_alpha(self.config.get("alpha", 0.93))
+        return tw, bot - ty, tx, ty
 
     def _close_settings(self) -> None:
-        self._animate_alpha(0.0, on_done=self._apply_queue_geom)
+        # crossfade back: fade out fast, swap content + resize while invisible,
+        # then fade the compact view back in — no on-screen re-flow, no stutter
+        self._animate_alpha(0.0, duration_ms=120, on_done=self._apply_queue_geom)
 
     def _apply_queue_geom(self) -> None:
         self._in_settings = False
@@ -1730,8 +1825,8 @@ class JiraOverlay:
         # ── Section helpers (defined after body so they target body) ──────────
         def section(title: str) -> None:
             tk.Label(body, text=title.upper(), font=("Segoe UI", 7, "bold"),
-                     fg=_C["fg_dim"], bg=BG).pack(anchor="w", padx=12, pady=(10, 0))
-            tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=12, pady=(2, 2))
+                     fg=_C["accent"], bg=BG).pack(anchor="w", padx=12, pady=(12, 0))
+            tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=12, pady=(3, 2))
 
         def check(parent: tk.Widget, text: str, var: tk.BooleanVar) -> None:
             tk.Checkbutton(parent, text=text, variable=var,
@@ -1891,16 +1986,21 @@ class JiraOverlay:
             self._close_settings()
 
         bf = tk.Frame(self.settings_panel, bg=BG)
-        bf.pack(fill="x", pady=(4, 0))
-        tk.Button(bf, text="✓  Save", command=_save,
+        bf.pack(fill="x", pady=(6, 2), padx=2)
+        save_btn = tk.Button(bf, text="✓  Save", command=_save,
                   bg=_C["accent"], fg="white", font=("Segoe UI", 9, "bold"),
-                  relief="flat", padx=10, pady=5, cursor="hand2",
-                  activebackground=_C["accent_hi"], activeforeground="white"
-                  ).pack(side="left", padx=(0, 4))
-        tk.Button(bf, text="✕  Cancel", command=self._close_settings,
+                  relief="flat", padx=10, pady=6, cursor="hand2", bd=0,
+                  activebackground=_C["accent_hi"], activeforeground="white")
+        save_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        cancel_btn = tk.Button(bf, text="✕  Cancel", command=self._close_settings,
                   bg=SEL, fg=FG, font=("Segoe UI", 9),
-                  relief="flat", padx=10, pady=5, cursor="hand2"
-                  ).pack(side="left")
+                  relief="flat", padx=10, pady=6, cursor="hand2", bd=0,
+                  activebackground=_C["chip"], activeforeground=_C["fg_bright"])
+        cancel_btn.pack(side="left", fill="x", expand=True)
+        save_btn.bind("<Enter>",   lambda _e: save_btn.config(bg=_C["accent_hi"]))
+        save_btn.bind("<Leave>",   lambda _e: save_btn.config(bg=_C["accent"]))
+        cancel_btn.bind("<Enter>", lambda _e: cancel_btn.config(bg=_C["chip"]))
+        cancel_btn.bind("<Leave>", lambda _e: cancel_btn.config(bg=SEL))
 
     def _reconfigure(self) -> None:
         if messagebox.askyesno("Reconfigure",

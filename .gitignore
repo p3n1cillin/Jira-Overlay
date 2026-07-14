@@ -12,6 +12,7 @@ triage_state.json.*
 triage_suggestions.json
 triage_suggestions.json.*
 triage_log.jsonl
+triage_history.jsonl
 TRIAGE_REPORT.md
 triage_learner.log
 
