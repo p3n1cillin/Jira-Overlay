@@ -936,6 +936,32 @@ class JiraOverlay:
 
     # ── UI construction ───────────────────────────────────────────────────────
 
+    _GEAR_W = 30    # settings button footprint reserved in the header
+
+    def _title_text(self, desk: str) -> str:
+        """Header label sized to the space actually available.
+
+        Letter-spacing looks deliberate but very nearly doubles the width, so
+        it is only used when it fits. Failing that we fall back to plain caps
+        and finally to an ellipsis — a long service-desk name must never
+        crowd out the settings button or run off the edge.
+        """
+        name = (desk or "JIRA").upper()
+        try:
+            import tkinter.font as tkfont
+            metric = tkfont.Font(font=_font(8, "bold", display=True))
+            # window border + frame padding, then the settings button
+            avail = (self.config.get("overlayWidth", 260)
+                     - 2 - 28 - self._GEAR_W)
+            for candidate in (f"● {_track(name)}", f"● {name}"):
+                if metric.measure(candidate) <= avail:
+                    return candidate
+            while name and metric.measure(f"● {name}…") > avail:
+                name = name[:-1]
+            return f"● {name}…"
+        except Exception:
+            return f"● {name}"
+
     def _build_ui(self) -> None:
         BG = _C["bg"]
         # Generous, even padding is most of what separates a "tool" from a
@@ -948,21 +974,23 @@ class JiraOverlay:
         hdr = tk.Frame(self.frame, bg=BG)
         hdr.pack(fill="x")
         desk = self.config.get("serviceDeskName", "JIRA")
-        # Letter-spaced small caps read as a deliberate label rather than
-        # shrunken body text.
-        self.lbl_title = tk.Label(hdr, text=f"● {_track(desk.upper())}",
-                                  font=_font(8, "bold", display=True),
-                                  fg=_C["accent"], bg=BG, cursor="hand2")
-        self.lbl_title.pack(side="left")
-        self.lbl_title.bind("<Enter>", lambda _e: self.lbl_title.config(fg=_C["accent_hi"]))
-        self.lbl_title.bind("<Leave>", lambda _e: self.lbl_title.config(fg=_C["accent"]))
-        self.lbl_title.bind("<ButtonRelease-1>", lambda _e: self._open_service_desk())
-        _Tooltip(self.lbl_title, "Open service desk in Jira")
+        # Pack the settings button FIRST so it always reserves its slot; a
+        # long desk name then has to fit around it instead of shoving it off
+        # the edge of the window.
         self.btn_gear = tk.Label(hdr, text=_icon("settings"),
                                  font=_icon_font(11),
                                  fg=_C["fg_dim"], bg=BG, cursor="hand2",
                                  padx=6, pady=2)
         self.btn_gear.pack(side="right")
+        self.lbl_title = tk.Label(hdr, text=self._title_text(desk),
+                                  font=_font(8, "bold", display=True),
+                                  fg=_C["accent"], bg=BG, cursor="hand2",
+                                  anchor="w")
+        self.lbl_title.pack(side="left", fill="x", expand=True)
+        self.lbl_title.bind("<Enter>", lambda _e: self.lbl_title.config(fg=_C["accent_hi"]))
+        self.lbl_title.bind("<Leave>", lambda _e: self.lbl_title.config(fg=_C["accent"]))
+        self.lbl_title.bind("<ButtonRelease-1>", lambda _e: self._open_service_desk())
+        _Tooltip(self.lbl_title, "Open service desk in Jira")
         self.btn_gear.bind("<ButtonRelease-1>", lambda _e: self._toggle_settings())
         self.btn_gear.bind("<Enter>", lambda _e: self.btn_gear.config(
             fg=_C["fg_bright"], bg=_C["chip"]))
@@ -1506,7 +1534,7 @@ class JiraOverlay:
             })
             save_config(cfg)
             self._post(lambda n=desk["projectName"]:
-                self.lbl_title.config(text=f"● {n.upper()}"))
+                self.lbl_title.config(text=self._title_text(n)))
 
         sd_id = cfg["serviceDeskId"]
 
@@ -2299,6 +2327,9 @@ class JiraOverlay:
                 "maxQueueSize":         max_q,
             })
             save_config(self.config)
+            # Width may have changed — refit the header to the new space.
+            self.lbl_title.config(text=self._title_text(
+                self.config.get("serviceDeskName", "JIRA")))
             for row_name, rw in self.row_widgets.items():
                 self._cancel_flash(row_name)
                 rw["row"].destroy()
