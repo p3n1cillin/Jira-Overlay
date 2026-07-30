@@ -346,13 +346,21 @@ _OVERLAY_KEYS = {
     "domain", "email", "token",
     "serviceDeskId", "serviceDeskName", "projectKey",
     "alertQueue", "alertQueues", "trayBadgeQueue", "hiddenQueues",
-    "skipKeywords", "maxQueueSize", "refreshSeconds",
+    "skipKeywords", "maxQueueSize", "refreshSeconds", "alertQueuesAsked",
     "notificationsEnabled", "soundEnabled",
     "alpha", "overlayWidth", "alwaysVisible",
     "slaField", "slaEnabled", "slaUnavailable",
     "completedTodayFilter", "suggestionsFile",
     "lastX", "lastY", "snapCorner",
 }
+
+# Settings that identify the install. A save may *replace* these, but must
+# never drop them: they are the ones a user cannot reconstruct, and losing
+# them turns a working install into "No accessible service desk found" with
+# no way back except typing the credentials in again. Everything else is
+# either rediscovered or a preference worth re-setting.
+_IDENTITY_KEYS = {"domain", "email", "token",
+                  "serviceDeskId", "serviceDeskName", "projectKey"}
 
 
 def normalise_domain(raw: str) -> str:
@@ -387,6 +395,11 @@ def save_config(cfg: dict) -> None:
     memory from startup, so a blind dump would silently delete anything
     another process had added since — dragging the window was enough to wipe
     the learner's discovered workflow settings.
+
+    Keys absent from `cfg` are treated as deliberately removed, which is how
+    lastX/lastY disappear when the window snaps to a corner. The identity
+    settings are exempt: a caller passing an incomplete dict must not be able
+    to destroy the credentials, because nothing can recover them.
     """
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
@@ -395,7 +408,7 @@ def save_config(cfg: dict) -> None:
             merged = {}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         merged = {}
-    for key in _OVERLAY_KEYS:
+    for key in _OVERLAY_KEYS - _IDENTITY_KEYS:
         merged.pop(key, None)
     merged.update(cfg)
     tmp = CONFIG_FILE + ".tmp"
@@ -1681,6 +1694,12 @@ class JiraOverlay:
                       relief="flat", padx=12, pady=7, cursor="hand2",
                       activebackground=_C["accent"], activeforeground="white"
                       ).pack(fill="x", pady=3, padx=4)
+        tk.Button(sf, text="Don't alert me — just show the counts",
+                  command=win.destroy,
+                  bg=_C["bg_dark"], fg=_C["fg_dim"], font=_font(9),
+                  relief="flat", padx=12, pady=6, cursor="hand2",
+                  activebackground=_C["chip"], activeforeground=_C["fg_bright"]
+                  ).pack(fill="x", pady=(8, 3), padx=4)
 
         _bind_wheel(sf, pick_scroll)      # the buttons, not just the canvas
         win.update_idletasks()
@@ -1691,6 +1710,9 @@ class JiraOverlay:
         win.focus_force()
         win.wait_window(win)
 
+        # Asked and answered - including "answered by closing the window".
+        self.config["alertQueuesAsked"] = True
+        save_config(self.config)
         if self.config.get("alertQueue"):
             self._fetch()
 
@@ -1819,11 +1841,14 @@ class JiraOverlay:
         self._all_queue_names = [q["name"] for q in all_queues]
         self.queues = [q for q in all_queues if q["name"] not in hidden]
 
-        # Show alert-queue picker on first run
+        # Offer the alert-queue picker once, on first run. Only once: a user
+        # who closes it without choosing was previously re-prompted by the
+        # very next poll, every five seconds, for ever. Running with no alert
+        # queue at all is a legitimate choice - a passive dashboard - so the
+        # fetch carries on either way and the queue counts stay live.
         alert_qs = self._alert_queues
-        if not alert_qs and self.queues:
+        if not alert_qs and self.queues and not cfg.get("alertQueuesAsked"):
             self._post(self._show_alert_queue_picker)
-            return
 
         # Alert data comes from the UNFILTERED list — hiding a queue from
         # display must not silently disable its alerts
