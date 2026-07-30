@@ -641,7 +641,7 @@ class Learner:
                 best_j, best_dest = j, ex[i][1]
         return best_dest, best_j
 
-    def _plan(self, dest: str) -> str:
+    def plan_for(self, dest: str) -> str:
         """Plain-English description of an outcome.
 
         Outcome wording is supplied by the watcher, which knows this site's
@@ -766,7 +766,7 @@ class Learner:
         conf  = int(round(100 * exps[best] / tot_e))
         conf2 = int(round(100 * exps[second] / tot_e))
         source = "model"
-        note   = self._plan(best)
+        note   = self.plan_for(best)
         hint_dest = hint_for_type
         hint_conf = (int(round(100 * exps.get(hint_dest, 0) / tot_e))
                      if hint_dest else 0)
@@ -784,7 +784,7 @@ class Learner:
                         second, conf2 = best, conf
                     best, conf = k_dest, max(k_conf, conf if k_dest == best else 0)
                     source = "memory"
-                    note   = self._plan(best) + " (matches a previous ticket)"
+                    note   = self.plan_for(best) + " (matches a previous ticket)"
 
         hint_conflict = bool(hint_dest in ready and best != hint_dest)
         if hint_conflict:
@@ -838,6 +838,11 @@ class ShadowWatcher:
         # config. Discovery results are written back so they are visible.
         self.discovery = Discovery(self.jira, self.cfg)
         self.req_field, self.context_fields = self.discovery.fields()
+        # Remember the ids so the field catalogue isn't re-fetched every start.
+        if self.cfg.get("requestTypeField") != self.req_field or \
+                self.cfg.get("contextFieldIds") != self.context_fields:
+            self._save_cfg({"requestTypeField": self.req_field,
+                            "contextFieldIds": self.context_fields})
         self.dests     = list(self.cfg.get("triageStatuses") or [])
         self.resolved  = set(self.cfg.get("resolvedStatuses")
                              or ([self.cfg["resolvedStatus"]]
@@ -896,8 +901,16 @@ class ShadowWatcher:
 
     def ensure_workflow_known(self) -> bool:
         """Fill in whatever the config didn't pin. True once we know enough
-        to learn: at minimum a set of resolved statuses."""
-        if self.dests and self.resolved:
+        to learn: at minimum a set of resolved statuses.
+
+        Whether discovery has run is tracked explicitly rather than inferred
+        from `self.dests` being non-empty — a project where everything is
+        resolved in place legitimately has no handoff statuses, and testing
+        for truthiness made it repeat the whole 250-changelog scan on every
+        single startup.
+        """
+        if self.resolved and (self.dests
+                              or self.state.get("workflowDiscovered")):
             return True
 
         done, _open = self.discovery.status_categories(self.project)
@@ -946,6 +959,9 @@ class ShadowWatcher:
             _log_error(f"discovered outcomes for {self.project}: "
                        f"resolved={sorted(self.resolved)} "
                        f"handoffs={self.dests or 'none'}")
+        if self.resolved:
+            self.state["workflowDiscovered"] = True
+            self._save_state()
         return bool(self.resolved)
 
     def _remember_move_target(self, project_key: str) -> None:
@@ -1131,7 +1147,10 @@ class ShadowWatcher:
         jql = (f'project = {self.project} AND status CHANGED TO '
                f'({", ".join(chr(34) + d + chr(34) for d in self.dests)}) '
                f'AFTER -{BACKFILL_DAYS}d ORDER BY updated DESC')
-        issues = self.jira.search(jql, self._FIELDS, cap=BACKFILL_CAP)
+        # No handoff statuses on this site — every ticket is resolved in place
+        # or moved out, so there is nothing for this pass to find.
+        issues = (self.jira.search(jql, self._FIELDS, cap=BACKFILL_CAP)
+                  if self.dests else [])
         seen: dict[str, None] = dict.fromkeys(
             self.state.setdefault("seenTransitions", []))
         learned = 0
@@ -1311,10 +1330,13 @@ class ShadowWatcher:
         seen: dict[str, None] = dict.fromkeys(
             self.state.setdefault("seenTransitions", []))
         stats = self.state.setdefault("stats", {"predictions": 0, "correct": 0})
+        # A project where everything is resolved in place has no handoff
+        # statuses; "status CHANGED TO ()" is not valid JQL, so skip the pass
+        # rather than issuing a query that fails every cycle.
         dest_list = ", ".join(chr(34) + d + chr(34) for d in self.dests)
-        for issue in self.jira.search(
+        for issue in (self.jira.search(
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
-                f'AFTER {since}', self._FIELDS, cap=50):
+                f'AFTER {since}', self._FIELDS, cap=50) if self.dests else []):
             det = self._issue_details(issue)
             routed, _ = self._transitions(det["key"])
             for tr in routed:
@@ -1613,7 +1635,10 @@ class ShadowWatcher:
     def _rebuild_model(self, recs: list[dict]) -> None:
         """Re-fit a clean model over the whole history with the current TUNING
         (called after adopting a freshly-tuned config)."""
-        lr = Learner({})
+        # Pass the plans through: without them the nightly re-fit silently
+        # replaced the learner with one that had no outcome descriptions, so
+        # the report and suggestions lost their wording until the next restart.
+        lr = Learner({}, plans=self.plans)
         for r in recs:
             det = {"summary": r["summary"], "desc": r["desc"],
                    "labels": r["labels"], "components": r["components"],
@@ -1843,7 +1868,7 @@ class ShadowWatcher:
         ]
         seen = m.get("seen", {})
         for dest in self.all_dests:
-            lines.append(f"| {dest} | {self.learner._plan(dest)} | "
+            lines.append(f"| {dest} | {self.learner.plan_for(dest)} | "
                          f"{seen.get(dest, 0)} |")
 
         live = self._live_metrics()
@@ -2032,14 +2057,46 @@ def _tray_image() -> Image.Image:
     return img
 
 
+def _report_fatal(message: str) -> None:
+    """Tell the user why we couldn't start.
+
+    This runs under pythonw, so there is no console: an unhandled exception
+    here used to kill the process with no tray icon, no message and nothing
+    in the log — indistinguishable from "it just doesn't work".
+    """
+    _log_error(message)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Triage Learner — cannot start", message)
+        root.destroy()
+    except Exception:
+        pass
+
+
 def main() -> None:
     # single-instance guard
     ctypes.windll.kernel32.CreateMutexW(None, False, "JiraTriageLearner")
     if ctypes.windll.kernel32.GetLastError() == 183:        # ERROR_ALREADY_EXISTS
         return
 
-    watcher = ShadowWatcher()
-    worker  = threading.Thread(target=watcher.run_forever, daemon=True)
+    try:
+        watcher = ShadowWatcher()
+    except FileNotFoundError:
+        _report_fatal(f"No {os.path.basename(CONFIG_FILE)} found next to this "
+                      "script.\n\nRun the overlay first so it can set up your "
+                      "Jira credentials and find your service desk.")
+        return
+    except SystemExit as exc:
+        _report_fatal(str(exc))
+        return
+    except Exception:
+        _report_fatal("Failed to start:\n\n" + traceback.format_exc())
+        return
+
+    worker = threading.Thread(target=watcher.run_forever, daemon=True)
     worker.start()
 
     def _open_report() -> None:

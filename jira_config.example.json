@@ -29,5 +29,6 @@
   "moveTargetProjects": [],
   "contextFields": ["Affected services", "Organizations"],
   "resolvedLabel": "",
-  "movedLabel": "Moved to {project}"
+  "movedLabel": "Moved to {project}",
+  "movedLabels": {}
 }

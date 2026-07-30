@@ -295,11 +295,44 @@ def load_config() -> Optional[dict]:
         return None
 
 
+# Settings this app owns. Anything else in the config file belongs to another
+# tool (the triage learner writes what it discovers there) and is preserved on
+# save. Listing them explicitly — rather than merging whatever is on disk —
+# means keys the overlay deliberately *removes*, such as lastX/lastY when the
+# window is snapped to a corner, still get removed.
+_OVERLAY_KEYS = {
+    "domain", "email", "token",
+    "serviceDeskId", "serviceDeskName", "projectKey",
+    "alertQueue", "alertQueues", "trayBadgeQueue", "hiddenQueues",
+    "skipKeywords", "maxQueueSize", "refreshSeconds",
+    "notificationsEnabled", "soundEnabled",
+    "alpha", "overlayWidth", "alwaysVisible",
+    "slaField", "completedTodayFilter", "suggestionsFile",
+    "lastX", "lastY", "snapCorner",
+}
+
+
 def save_config(cfg: dict) -> None:
-    """Atomic write — a crash mid-save can't corrupt the existing config."""
+    """Atomic write — a crash mid-save can't corrupt the existing config.
+
+    Only this app's own keys are rewritten. The overlay holds its config in
+    memory from startup, so a blind dump would silently delete anything
+    another process had added since — dragging the window was enough to wipe
+    the learner's discovered workflow settings.
+    """
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            merged = json.load(f)
+        if not isinstance(merged, dict):
+            merged = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        merged = {}
+    for key in _OVERLAY_KEYS:
+        merged.pop(key, None)
+    merged.update(cfg)
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+        json.dump(merged, f, indent=2)
     os.replace(tmp, CONFIG_FILE)
 
 
@@ -616,14 +649,30 @@ class SetupWindow:
 # ---------------------------------------------------------------------------
 
 class PickDeskWindow:
-    def __init__(self, desks: list[dict]) -> None:
-        self.root   = tk.Tk()
+    """Service-desk chooser, shown when an account can see more than one.
+
+    Takes a parent when the overlay is already running. Creating a second
+    tk.Tk() would spin up an entirely separate Tcl interpreter and nest its
+    mainloop inside the overlay's — this dialog appears during first-run
+    discovery, which is exactly when that is true.
+    """
+
+    def __init__(self, desks: list[dict],
+                 parent: Optional[tk.Misc] = None) -> None:
+        self._owns_root = parent is None
+        self.root = tk.Tk() if self._owns_root else tk.Toplevel(parent)
         self.result: Optional[dict] = None
         self.root.title("Jira Overlay — Pick Desk")
         self.root.configure(bg=_C["bg_dark"])
         self.root.resizable(False, False)
         self._build(desks)
-        self.root.mainloop()
+        if self._owns_root:
+            self.root.mainloop()
+        else:
+            self.root.transient(parent)          # type: ignore[arg-type]
+            self.root.grab_set()
+            self.root.focus_force()
+            parent.wait_window(self.root)        # type: ignore[union-attr]
 
     def _build(self, desks: list[dict]) -> None:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
@@ -840,6 +889,7 @@ class JiraOverlay:
         self._session.headers["Accept"] = "application/json"
         self._last_full_fetch: float = 0.0   # epoch when stats were last fetched
         self._approx_count_ok = True   # server supports /search/approximate-count
+        self._alert_queues_missing: list[str] = []   # configured but gone
         # Work handed back from the fetch thread; drained by _pump on the
         # main thread (see _post).
         self._events: queue.Queue = queue.Queue()
@@ -888,10 +938,18 @@ class JiraOverlay:
             try:
                 fn()
             except tk.TclError:
-                return          # window is going away — stop pumping
+                # Only stop if the window really has gone. Treating any
+                # TclError as shutdown meant one transient widget error
+                # silently killed the pump, and with it every future
+                # refresh — the overlay just quietly stopped updating.
+                if not self.root.winfo_exists():
+                    return
             except Exception:
                 pass            # a failed callback must not kill the loop
-        self.root.after(self._PUMP_MS, self._pump)
+        try:
+            self.root.after(self._PUMP_MS, self._pump)
+        except tk.TclError:
+            pass                # window destroyed between drain and reschedule
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -1385,9 +1443,13 @@ class JiraOverlay:
         picked = threading.Event()
 
         def _show_picker() -> None:
-            p = PickDeskWindow(accessible)
-            self._desk_pick = p.result or accessible[0]
-            picked.set()
+            try:
+                p = PickDeskWindow(accessible, parent=self.root)
+                self._desk_pick = p.result or accessible[0]
+            except Exception:
+                self._desk_pick = accessible[0]   # never strand the fetch
+            finally:
+                picked.set()
 
         self._post(_show_picker)
         picked.wait(timeout=120)
@@ -1585,6 +1647,11 @@ class JiraOverlay:
         # Alert data comes from the UNFILTERED list — hiding a queue from
         # display must not silently disable its alerts
         alert_objs = [q for q in all_queues if q["name"] in alert_qs]
+        # A queue renamed or deleted in Jira would otherwise just stop
+        # alerting, with nothing on screen to say why.
+        self._alert_queues_missing = (
+            sorted(alert_qs - {q["name"] for q in all_queues})
+            if all_queues else [])
 
         # Fetch issues in every alert queue (tooltips + notifications).
         # includeCount is cached by JSM and can report a stale non-zero for an
@@ -1877,6 +1944,12 @@ class JiraOverlay:
         if snoozed:
             until = self._snooze_until.strftime("%H:%M")  # type: ignore[union-attr]
             self.lbl_status.config(text=f"Snoozed until {until}", fg=_C["warn"])
+        elif self._alert_queues_missing:
+            # Renaming an alert queue in Jira would otherwise just stop the
+            # alerts, with nothing on screen to explain why.
+            missing = ", ".join(self._alert_queues_missing)
+            self.lbl_status.config(text=f"Alert queue not found: {missing}",
+                                   fg=_C["warn"])
         else:
             self.lbl_status.config(text=f"● Live · {datetime.now():%H:%M:%S}",
                                    fg=_C["fg_dim"])
@@ -2203,17 +2276,31 @@ class JiraOverlay:
             self._animate_panel_swap(self.settings_panel, self.main_panel,
                                      target)
 
+    _SETTINGS_MIN_H = 320   # never open a panel too short to be usable
+
     def _settings_target(self) -> tuple[int, int, int, int]:
         """Target (w, h, x, y) for the settings panel, anchored to the
-        overlay's own monitor with right edges aligned to the compact view."""
+        overlay's own monitor with right edges aligned to the compact view.
+
+        The height is chosen first and the panel then placed, rather than
+        derived from wherever the overlay happens to sit. Deriving it meant an
+        overlay dragged above the top of the screen produced a *negative*
+        height, which is not a geometry Tk accepts.
+        """
         cw, ch, cx, cy = self._queue_geom  # type: ignore[misc]
         tw   = self._SETTINGS_W
         rect = get_monitor_rect(cx + cw // 2, cy + ch // 2, work=True)
         l, t, r, b = rect if rect else (0, 0, self._sw, self._sh - 50)
-        tx  = max(l + 10, min(cx + cw - tw, r - tw - 10))   # right edges aligned
-        bot = min(cy + ch, b - 10)
-        ty  = max(t + 20, bot - int((b - t) * 0.9))
-        return tw, bot - ty, tx, ty
+        top_limit, bot_limit = t + 20, b - 10
+
+        th = min(int((b - t) * 0.9), max(1, bot_limit - top_limit))
+        th = max(self._SETTINGS_MIN_H, th)
+        # Share the compact overlay's bottom edge where possible, then clamp
+        # so the whole panel stays on the work area.
+        ty = min(cy + ch, bot_limit) - th
+        ty = max(top_limit, min(ty, bot_limit - th))
+        tx = max(l + 10, min(cx + cw - tw, r - tw - 10))
+        return tw, th, tx, ty
 
     def _close_settings(self) -> None:
         """Collapse back to the compact overlay, reversing the expand."""
