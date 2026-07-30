@@ -83,7 +83,9 @@ except ImportError as _exc:
         _root.destroy()
     except Exception:
         pass
-    raise SystemExit(1)
+    # 'from None': the dialog already says what is missing, and a chained
+    # ImportError traceback behind it only muddies the log.
+    raise SystemExit(1) from None
 
 # ---------------------------------------------------------------------------
 # Files & constants

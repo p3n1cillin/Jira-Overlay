@@ -82,7 +82,7 @@ def _bootstrap() -> None:
         return subprocess.call(cmd + [pkg], creationflags=0x08000000)
 
     errors: list[str] = []
-    for i, (mod, pkg) in enumerate(missing):
+    for i, (_mod, pkg) in enumerate(missing):
         lbl.config(text=f"pip install {pkg}")
         win.update()
         # Retry into the user site-packages: on a managed machine, or Python
@@ -579,8 +579,9 @@ def get_monitor_rect(x: int, y: int,
         info = _MONITORINFO()
         info.cbSize = ctypes.sizeof(_MONITORINFO)
         if ctypes.windll.user32.GetMonitorInfoW(mon, ctypes.byref(info)):
-            l, t, r, b = info.rcWork if work else info.rcMonitor
-            return l, t, r, b
+            left, top, right, bottom = (info.rcWork if work
+                                        else info.rcMonitor)
+            return left, top, right, bottom
     except Exception:
         pass
     return None
@@ -1421,13 +1422,14 @@ class JiraOverlay:
         """
         x, y = self.root.winfo_x(), self.root.winfo_y()
         rect = get_monitor_rect(x + w // 2, y + h // 2, work=True)
-        l, t, r, b = rect if rect else (0, 0, self._sw, self._sh - 50)
+        left, top, right, bottom = (rect if rect else
+                                    (0, 0, self._sw, self._sh - 50))
         m = 10
         return {
-            "top-left":     (l + m,     t + m),
-            "top-right":    (r - w - m, t + m),
-            "bottom-left":  (l + m,     b - h - m),
-            "bottom-right": (r - w - m, b - h - m),
+            "top-left":     (left + m,         top + m),
+            "top-right":    (right - w - m,    top + m),
+            "bottom-left":  (left + m,         bottom - h - m),
+            "bottom-right": (right - w - m,    bottom - h - m),
         }
 
     def _drag_release(self, e: tk.Event) -> None:
@@ -2471,16 +2473,17 @@ class JiraOverlay:
         cw, ch, cx, cy = self._queue_geom  # type: ignore[misc]
         tw   = self._SETTINGS_W
         rect = get_monitor_rect(cx + cw // 2, cy + ch // 2, work=True)
-        l, t, r, b = rect if rect else (0, 0, self._sw, self._sh - 50)
-        top_limit, bot_limit = t + 20, b - 10
+        left, top, right, bottom = (rect if rect else
+                                    (0, 0, self._sw, self._sh - 50))
+        top_limit, bot_limit = top + 20, bottom - 10
 
-        th = min(int((b - t) * 0.9), max(1, bot_limit - top_limit))
+        th = min(int((bottom - top) * 0.9), max(1, bot_limit - top_limit))
         th = max(self._SETTINGS_MIN_H, th)
         # Share the compact overlay's bottom edge where possible, then clamp
         # so the whole panel stays on the work area.
         ty = min(cy + ch, bot_limit) - th
         ty = max(top_limit, min(ty, bot_limit - th))
-        tx = max(l + 10, min(cx + cw - tw, r - tw - 10))
+        tx = max(left + 10, min(cx + cw - tw, right - tw - 10))
         return tw, th, tx, ty
 
     def _close_settings(self) -> None:
@@ -2788,4 +2791,5 @@ if __name__ == "__main__":
     except Exception:
         import traceback
         _report_fatal(traceback.format_exc())
-        raise SystemExit(1)
+        # The real traceback is already in the log and the dialog.
+        raise SystemExit(1) from None

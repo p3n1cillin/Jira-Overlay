@@ -168,9 +168,9 @@ All other keys are populated automatically once the overlay has run. The file ho
 
 ---
 
-## Triage Shadow Learner (optional)
+## The triage learner
 
-`triage_learner.pyw` is a companion that sits alongside the overlay, watches how your team triages tickets, and predicts where each **new** ticket is heading. It is **strictly read-only** — the only Jira calls it makes are `GET` and search. It never transitions, comments on, edits, clones or assigns anything. Predictions are suggestions for a human, nothing more.
+The learner starts with the overlay and sits alongside it, watches how your team triages tickets, and predicts where each **new** ticket is heading. It is **strictly read-only** — the only Jira calls it makes are `GET` and search. It never transitions, comments on, edits, clones or assigns anything. Predictions are suggestions for a human, nothing more.
 
 It starts alongside the overlay and adds a purple tray icon; right-click → *Open report*. Quit it from there if you'd rather not run it.
 
@@ -232,8 +232,8 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 │    GET .../queue/{id}/issue                          │  ← alert queue issues
 │                                                      │
 │  Every N min (configurable, default 1 min):          │
-│    POST /api/3/search/jql   ← completed today        │
-│    POST /api/3/search/jql   ← SLA breach count       │
+│    POST /api/3/search/approximate-count              │  ← completed today
+│    POST /api/3/search/approximate-count              │  ← SLA breaches
 └────────────────┬─────────────────────────────────────┘
                  │ results queued to the main thread
                  ▼
@@ -253,8 +253,8 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 - All Jira calls run on a **daemon background thread**; results are handed to the UI through a queue, because Tk may only be touched from the thread running its main loop
 - HTTP 429 responses honour the server's `Retry-After`; 5xx and network errors keep the last data and show a subtle *Reconnecting…* status
 - The overlay uses `overrideredirect(True)` — no title bar, no taskbar entry — with Windows 11 rounded corners applied via DWM, the system icon font (Segoe Fluent Icons) for its controls, and Segoe UI Variable for text
-- Show/hide/settings transitions share a **single alpha-fade animator** (GPU-composited, no layout redraws, no competing animations)
-- Config writes are **atomic** (temp file + rename) and a corrupt config file is quarantined to `.bad` instead of crashing the app
+- Show and hide use a **single alpha-fade animator**, so two fades can never fight over the alpha channel. The settings panel instead **animates its geometry** — the window eases open and closed with a cubic ease-in-out, driven by the clock rather than a frame counter so the duration is honest on any machine
+- Config writes are **atomic** (temp file + rename), and rewrite only this app's own keys — the triage learner stores what it discovers in the same file, and a blind dump would delete it. A corrupt config is quarantined to `.bad` rather than crashing the app
 
 ---
 
