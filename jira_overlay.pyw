@@ -8,7 +8,7 @@ queues in real time.
 Requirements:  Python 3.9+ (Windows)
                pip install requests pystray Pillow  (auto-installed on first run)
 
-Quick start:   pythonw jira_overlay.pyw   (or double-click launch_overlay.bat)
+Quick start:   double-click setup.bat once, then launch.bat
 
 Configuration: jira_config.json  (created on first run, excluded from git)
 """
@@ -43,7 +43,14 @@ _BOOTSTRAP_DEPS = [("requests", "requests"), ("PIL", "Pillow"), ("pystray", "pys
 
 
 def _bootstrap() -> None:
-    """Install missing third-party packages with a progress UI on first run."""
+    """Install missing third-party packages with a progress UI on first run.
+
+    This runs before the rest of the module exists, so it deliberately uses
+    nothing defined further down — not the colour palette, not the font
+    helper. Referencing them here raises NameError before the app has a
+    window to report it in, and under pythonw that is a completely silent
+    failure on exactly the machines that need the bootstrap: new ones.
+    """
     missing = [(mod, pkg) for mod, pkg in _BOOTSTRAP_DEPS
                if importlib.util.find_spec(mod) is None]
     if not missing:
@@ -57,8 +64,10 @@ def _bootstrap() -> None:
     win.geometry(f"360x130+{sw // 2 - 180}+{sh // 2 - 65}")
 
     tk.Label(win, text="Installing required packages…",
-             font=_font(11, "bold"), fg="#e2e8f0", bg="#1a1a2e").pack(pady=(22, 4))
-    lbl = tk.Label(win, text="", font=_font(9), fg="#a0aec0", bg="#1a1a2e")
+             font=("Segoe UI", 11, "bold"), fg="#e2e8f0", bg="#1a1a2e"
+             ).pack(pady=(22, 4))
+    lbl = tk.Label(win, text="", font=("Segoe UI", 9),
+                   fg="#a0aec0", bg="#1a1a2e")
     lbl.pack()
     track = tk.Frame(win, bg="#2d3748", height=5)
     track.pack(fill="x", padx=24, pady=(12, 0))
@@ -66,27 +75,40 @@ def _bootstrap() -> None:
     bar.place(x=0, y=0, height=5)
     win.update()
 
+    def _pip(pkg: str, user: bool) -> int:
+        cmd = [sys.executable, "-m", "pip", "install", "--quiet"]
+        if user:
+            cmd.append("--user")
+        return subprocess.call(cmd + [pkg], creationflags=0x08000000)
+
     errors: list[str] = []
     for i, (mod, pkg) in enumerate(missing):
         lbl.config(text=f"pip install {pkg}")
         win.update()
-        rc = subprocess.call(
-            [sys.executable, "-m", "pip", "install", "--quiet", pkg],
-            creationflags=0x08000000,
-        )
-        if rc != 0:
+        # Retry into the user site-packages: on a managed machine, or Python
+        # from the Microsoft Store, a plain install often can't write to the
+        # interpreter's own directory.
+        if _pip(pkg, user=False) != 0 and _pip(pkg, user=True) != 0:
             errors.append(pkg)
         track.update_idletasks()
         bar.place(width=int(track.winfo_width() * (i + 1) / len(missing)))
         win.update()
 
-    if errors:
-        lbl.config(text=f"Failed to install: {', '.join(errors)}", fg="#fc8181")
-        win.after(4000, win.destroy)
-    else:
+    if not errors:
         lbl.config(text="All done — starting overlay…")
         win.after(900, win.destroy)
-    win.mainloop()
+        win.mainloop()
+        return
+
+    # Falling through would hit `import requests` and die with an ImportError
+    # nobody can see. Say what failed and how to fix it, then stop.
+    win.destroy()
+    messagebox.showerror(
+        "Jira Overlay — setup failed",
+        "Could not install: " + ", ".join(errors) + "\n\n"
+        "Install them by hand, then start the overlay again:\n\n"
+        f'    "{sys.executable}" -m pip install ' + " ".join(errors))
+    sys.exit(1)
 
 
 _bootstrap()
@@ -103,6 +125,7 @@ import pystray
 
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
 STARTUP_NAME = "JiraOverlay"
+LEARNER_STARTUP_NAME = "JiraTriageLearner"
 STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SNAP_MARGIN  = 60   # px from a corner to snap
 _LIVE_POLL_MS = 5_000   # queue-count poll interval — always 5 s regardless of settings
@@ -427,12 +450,34 @@ def release_single_instance() -> None:
         _INSTANCE_MUTEX = None
 
 
+def _startup_entries() -> dict[str, str]:
+    """Registry value name -> script, for every part of the app.
+
+    The overlay and the triage learner are one product, so the single
+    "Run on Windows startup" switch has to cover both — registering only the
+    overlay left the learner silently not starting, and its suggestions
+    quietly absent.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    entries = {STARTUP_NAME: os.path.abspath(__file__)}
+    learner = os.path.join(here, "triage_learner.pyw")
+    if os.path.exists(learner):
+        entries[LEARNER_STARTUP_NAME] = learner
+    return entries
+
+
 def startup_enabled() -> bool:
+    """True when everything present is registered to start with Windows."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0, winreg.KEY_READ) as k:
-            winreg.QueryValueEx(k, STARTUP_NAME)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
+                            winreg.KEY_READ) as k:
+            for name in _startup_entries():
+                try:
+                    winreg.QueryValueEx(k, name)
+                except FileNotFoundError:
+                    return False
         return True
-    except FileNotFoundError:
+    except OSError:
         return False
 
 
@@ -451,14 +496,15 @@ def set_startup(enable: bool) -> None:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
                             winreg.KEY_SET_VALUE) as k:
-            if enable:
-                winreg.SetValueEx(k, STARTUP_NAME, 0, winreg.REG_SZ,
-                                  f'"{_pythonw_exe()}" "{os.path.abspath(__file__)}"')
-            else:
-                try:
-                    winreg.DeleteValue(k, STARTUP_NAME)
-                except FileNotFoundError:
-                    pass
+            for name, script in _startup_entries().items():
+                if enable:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_SZ,
+                                      f'"{_pythonw_exe()}" "{script}"')
+                else:
+                    try:
+                        winreg.DeleteValue(k, name)
+                    except FileNotFoundError:
+                        pass
     except OSError:
         pass
 

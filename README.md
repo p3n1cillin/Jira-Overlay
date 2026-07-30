@@ -1,6 +1,13 @@
 # Jira Overlay
 
-A lightweight Windows desktop overlay that monitors your **Jira Service Management** queues in real time. It sits quietly in the corner of your screen, pops up when new tickets arrive, and gets out of the way when there's nothing to act on.
+A lightweight Windows desktop companion for **Jira Service Management**. It sits quietly in the corner of your screen, pops up when new tickets arrive, and gets out of the way when there's nothing to act on.
+
+It comes in two parts, installed and started together:
+
+- **the overlay** — live queue counts, alerts and SLA, in the corner of your screen
+- **the triage learner** — watches how your team triages tickets and predicts where each new one is heading. Strictly read-only: it only ever suggests.
+
+Neither assumes anything about your Jira. Both work out your service desk, queues and workflow for themselves.
 
 ---
 
@@ -42,43 +49,54 @@ A lightweight Windows desktop overlay that monitors your **Jira Service Manageme
 ## Requirements
 
 - **Windows 10 or 11**
-- **Python 3.9+** — [python.org](https://python.org)
-- A **Jira Service Management** account with API access
-- An **API token** — generate one at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
+- A **Jira Service Management** account
 
-> Third-party packages (`requests`, `Pillow`, `pystray`) are installed automatically on first run — no manual pip step needed.
+That's all. Setup installs Python and everything else if the machine hasn't got it.
 
 ---
 
-## Installation
+## Install
 
-```
-git clone https://github.com/p3nicillin/Jira-Overlay.git
-cd Jira-Overlay
-```
+Download the project (**Code → Download ZIP**, then extract — or `git clone`), then:
 
-Then double-click **`launch_overlay.bat`** — or run:
+### Double-click **`setup.bat`**
 
-```
-pythonw jira_overlay.pyw
-```
+It does the lot:
+
+1. Finds Python, and **installs it** if there isn't one — via winget, or straight from python.org. Per-user, so no admin prompt.
+2. Installs the three packages the app needs
+3. Offers to start it with Windows
+4. Launches it
+
+The overlay then asks for your Jira details and finds your service desk. Nothing else to configure.
+
+> Setup runs in a console window on purpose. The app itself runs under `pythonw`, which has nowhere to print an error — so anything that can go wrong is made to go wrong during setup, where you can read it.
+
+Afterwards, start it with **`launch.bat`** — or just let it start with Windows.
+
+| File | Purpose |
+|---|---|
+| `setup.bat` | First-time setup. Run once. |
+| `launch.bat` | Starts the app. |
 
 ---
 
 ## First-run setup
 
-1. **Dependency install** — a progress window appears and installs the required packages silently. Closes itself when done.
+After `setup.bat` finishes, the app starts and walks you through the rest:
 
-2. **Credentials** — a setup dialog asks for:
+1. **Credentials** — a setup dialog asks for:
    - **Jira Domain** e.g. `yourcompany.atlassian.net`
    - **Email** your Atlassian account email
    - **API Token** click the 🔑 link in the dialog to open the token page directly
 
-3. **Service desk** — if your account has access to multiple service desks, a picker appears. Click the one you want to monitor.
+2. **Service desk** — if your account has access to multiple service desks, a picker appears. Click the one you want to monitor.
 
-4. **Alert queue** — a list of all your queues appears. Click one to set your initial alert queue (the one that triggers popups and notifications). You can add more alert queues later in Settings.
+3. **Alert queue** — a list of all your queues appears. Click one to set your initial alert queue (the one that triggers popups and notifications). You can add more alert queues later in Settings.
 
-Config is saved to `jira_config.json` next to the script. This file is in `.gitignore` and will never be committed.
+Everything is saved to `jira_config.json` next to the app. It holds your API token, so it is gitignored and never committed.
+
+The triage learner needs nothing further — it works out your workflow from your own Jira the first time it runs.
 
 ---
 
@@ -152,7 +170,7 @@ All other keys are populated automatically once the overlay has run. The file ho
 
 `triage_learner.pyw` is a companion that sits alongside the overlay, watches how your team triages tickets, and predicts where each **new** ticket is heading. It is **strictly read-only** — the only Jira calls it makes are `GET` and search. It never transitions, comments on, edits, clones or assigns anything. Predictions are suggestions for a human, nothing more.
 
-Run it with **`launch_learner.bat`**, or `pythonw triage_learner.pyw`. It adds a purple tray icon; right-click → *Open report*.
+It starts alongside the overlay and adds a purple tray icon; right-click → *Open report*. Quit it from there if you'd rather not run it.
 
 ### It configures itself
 

@@ -43,7 +43,7 @@ What this script does:
 STRICTLY READ-ONLY — the only Jira calls are GET and the search endpoint.
 It never transitions, comments on, clones, edits or assigns any ticket.
 
-Run:   pythonw triage_learner.pyw   (or double-click launch_learner.bat)
+Run:   started by launch.bat alongside the overlay
 Stop:  right-click the purple ⊕ tray icon → Quit
 """
 
@@ -61,10 +61,29 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-import requests
-from requests.auth import HTTPBasicAuth
-from PIL import Image, ImageDraw
-import pystray
+try:
+    import requests
+    from requests.auth import HTTPBasicAuth
+    from PIL import Image, ImageDraw
+    import pystray
+except ImportError as _exc:
+    # The overlay installs these on its first run; someone starting the
+    # learner first would otherwise just get a process that dies instantly
+    # with nowhere to print the traceback, pythonw having no console.
+    import sys as _sys
+    try:
+        import tkinter as _tk
+        from tkinter import messagebox as _mb
+        _root = _tk.Tk(); _root.withdraw()
+        _mb.showerror(
+            "Triage Learner — missing dependencies",
+            f"{_exc}\n\nStart the overlay once and it will install what is "
+            "needed, or install them by hand:\n\n"
+            f'    "{_sys.executable}" -m pip install requests Pillow pystray')
+        _root.destroy()
+    except Exception:
+        pass
+    raise SystemExit(1)
 
 # ---------------------------------------------------------------------------
 # Files & constants
