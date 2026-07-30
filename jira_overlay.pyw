@@ -305,10 +305,16 @@ def _get_tray_font() -> ImageFont.ImageFont:
             return _tray_font
         except Exception:
             pass
-    try:
-        _tray_font = ImageFont.load_default(size=56)
-    except TypeError:
-        _tray_font = ImageFont.load_default()
+    # This runs during __init__, outside any Tk callback, so anything raised
+    # here takes the whole app down before it has a window to say so in.
+    for attempt in (lambda: ImageFont.load_default(size=56),
+                    ImageFont.load_default):
+        try:
+            _tray_font = attempt()
+            return _tray_font
+        except Exception:
+            continue
+    _tray_font = None       # caller falls back to Pillow's own default
     return _tray_font
 
 
@@ -377,13 +383,30 @@ def save_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _xml_escape(text: str) -> str:
-    """Escape characters that are special in XML attribute/text values."""
-    return (text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&apos;"))
+    """Make text safe to drop into the toast's XML.
+
+    As well as the five markup characters, control characters have to go:
+    XML 1.0 permits only tab, newline and carriage return below U+0020, and
+    ticket summaries do pick the others up from pasted console output or
+    email. One of them makes the whole document malformed, and because the
+    toast script runs with SilentlyContinue the only symptom is a
+    notification that never arrives.
+    """
+    escaped = (text
+               .replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;")
+               .replace('"', "&quot;")
+               .replace("'", "&apos;"))
+    return "".join(ch for ch in escaped if _XML_OK(ord(ch)))
+
+
+def _XML_OK(cp: int) -> bool:
+    """True for a code point XML 1.0 allows in character data."""
+    return (cp in (0x09, 0x0A, 0x0D)
+            or 0x20 <= cp <= 0xD7FF
+            or 0xE000 <= cp <= 0xFFFD
+            or 0x10000 <= cp <= 0x10FFFF)
 
 
 def send_toast(title: str, body: str) -> None:
@@ -2651,5 +2674,33 @@ def main() -> None:
     JiraOverlay(config).run()
 
 
+def _report_fatal(detail: str) -> None:
+    """Show why the overlay couldn't start.
+
+    Running under pythonw there is no console, so an unhandled exception
+    otherwise kills the process with nothing on screen and nothing on disk —
+    the app simply appears not to work.
+    """
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "jira_overlay_error.log"),
+                  "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{detail}\n\n")
+    except OSError:
+        pass
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Jira Overlay — could not start", detail[-1500:])
+        root.destroy()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        _report_fatal(traceback.format_exc())
+        raise SystemExit(1)
