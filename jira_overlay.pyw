@@ -780,6 +780,7 @@ class JiraOverlay:
     _last_refresh     Datetime of the last successful fetch
     _visible          True when the overlay window is shown (not withdrawn)
     _fade_job         Pending root.after() id for the alpha-fade animation
+    _geom_job         Pending root.after() id for the settings expand/collapse
     _show_job         Pending root.after() id for a delayed _do_show call
     _picker_open      Guard so the alert-queue picker can't stack duplicates
     _tooltip          Active NewTicketTooltip, or None
@@ -823,6 +824,7 @@ class JiraOverlay:
         self._last_refresh: Optional[datetime] = None
         self._visible          = False
         self._fade_job: Optional[str] = None
+        self._geom_job: Optional[str] = None   # settings expand/collapse motion
         self._show_job: Optional[str] = None
         self._picker_open      = False
         self._tooltip: Optional[NewTicketTooltip] = None
@@ -1001,8 +1003,14 @@ class JiraOverlay:
         tk.Frame(self.frame, bg=_C["divider"], height=1).pack(fill="x",
                                                               pady=(8, 6))
 
+        # Content area below the header. Both panels live here, which gives
+        # the settings transition a coordinate space of its own to animate in
+        # (see _animate_panel_swap).
+        self.body = tk.Frame(self.frame, bg=BG)
+        self.body.pack(fill="both", expand=True)
+
         # Main (queue) panel
-        self.main_panel = tk.Frame(self.frame, bg=BG)
+        self.main_panel = tk.Frame(self.body, bg=BG)
         self.main_panel.pack(fill="both", expand=True)
 
         self.rows_frame = tk.Frame(self.main_panel, bg=BG)
@@ -1057,8 +1065,8 @@ class JiraOverlay:
                                    fg=_C["fg_dim"], bg=BG, anchor="e")
         self.lbl_status.pack(side="right")
 
-        # Settings panel (hidden until ⚙ clicked)
-        self.settings_panel = tk.Frame(self.frame, bg=BG)
+        # Settings panel (hidden until the gear is clicked)
+        self.settings_panel = tk.Frame(self.body, bg=BG)
 
         # Bind drag to structural chrome widgets
         for w in (self.root, self.frame, hdr):
@@ -1873,8 +1881,9 @@ class JiraOverlay:
             self.lbl_status.config(text=f"● Live · {datetime.now():%H:%M:%S}",
                                    fg=_C["fg_dim"])
 
-        # Don't resize or show/hide while the settings panel is open — it has its own geometry
-        if not self._in_settings:
+        # Leave geometry alone while settings are open or a transition is
+        # still running — both manage the window rect themselves.
+        if not self._in_settings and not self._geom_job:
             show = self._manual_show or (
                 ((newly_count > 0 and not self._dismissed)
                  or self.config.get("alwaysVisible", False))
@@ -1979,7 +1988,7 @@ class JiraOverlay:
 
     def _do_show(self) -> None:
         self._show_job = None
-        if self._in_settings:
+        if self._in_settings or self._geom_job:
             return   # settings panel manages its own visibility and geometry
         if self._visible and not self._fade_job:
             return
@@ -2040,7 +2049,7 @@ class JiraOverlay:
     # ── Resize / reposition ───────────────────────────────────────────────────
 
     def _resize(self) -> None:
-        if self._in_settings:
+        if self._in_settings or self._geom_job:
             return   # settings geometry is managed by the settings transition
         self.root.update_idletasks()
         w = self.config.get("overlayWidth", 260)
@@ -2076,6 +2085,87 @@ class JiraOverlay:
 
     # ── Inline settings ───────────────────────────────────────────────────────
 
+    _SETTINGS_MS = 260     # duration of the expand / collapse motion
+
+    def _current_rect(self) -> tuple[int, int, int, int]:
+        return (self.root.winfo_width(), self.root.winfo_height(),
+                self.root.winfo_x(), self.root.winfo_y())
+
+    def _animate_geometry(self, start: tuple[int, int, int, int],
+                          target: tuple[int, int, int, int],
+                          on_frame=None, on_done=None,
+                          duration_ms: int = 0) -> None:
+        """Ease the window rect from `start` to `target`.
+
+        Cancels any motion already in flight, so a rapid second click takes
+        over smoothly from wherever the window currently is rather than
+        snapping back.
+        """
+        if self._geom_job:
+            self.root.after_cancel(self._geom_job)
+            self._geom_job = None
+        duration = max(1, duration_ms or self._SETTINGS_MS) / 1000.0
+        sw, sh, sx, sy = start
+        tw, th, tx, ty = target
+        begun = time.perf_counter()
+
+        def ease(t: float) -> float:
+            """Cubic ease-in-out.
+
+            A plain ease-out covers a sixth of the distance in its first
+            frame, which on a window this size reads as a snap followed by a
+            drift. Easing in as well as out keeps the motion continuous at
+            both ends, so it looks like the panel has weight.
+            """
+            return 4 * t ** 3 if t < 0.5 else 1 - ((-2 * t + 2) ** 3) / 2
+
+        def tick() -> None:
+            # Progress comes from the clock, not a frame counter: Tk's
+            # after(16) really lands nearer 20 ms, which stretched a 260 ms
+            # animation to 324 ms. Timing it means the duration is honest on
+            # any machine, and a slow frame is skipped over rather than
+            # dragging the whole transition out.
+            t = (time.perf_counter() - begun) / duration
+            if t >= 1.0:
+                self._geom_job = None
+                self.root.geometry("{}x{}+{}+{}".format(*target))
+                if on_frame:
+                    on_frame(target)
+                if on_done:
+                    on_done()
+                return
+            k = ease(t)
+            cur = (round(sw + (tw - sw) * k), round(sh + (th - sh) * k),
+                   round(sx + (tx - sx) * k), round(sy + (ty - sy) * k))
+            self.root.geometry("{}x{}+{}+{}".format(*cur))
+            if on_frame:
+                on_frame(cur)
+            # Deliberately no update_idletasks() here: forcing a synchronous
+            # repaint of a panel this size costs ~25 ms, which halved the
+            # frame rate and started dropping frames. Letting Tk repaint on
+            # its own schedule is measurably smoother.
+            self._geom_job = self.root.after(8, tick)
+
+        tick()
+
+    def _animate_panel_swap(self, incoming: tk.Frame, outgoing: tk.Frame,
+                            target: tuple[int, int, int, int],
+                            on_done=None) -> None:
+        """Grow (or shrink) the window to `target` while swapping the panel.
+
+        The incoming panel is packed normally and re-laid-out at each
+        intermediate size. That is deliberate: the obvious optimisation —
+        placing it at its final size and revealing it as the window grows —
+        renders as an empty box, because the scroll canvas' contents then sit
+        outside the window and Tk never draws them. Laying out per frame
+        costs little here and is what actually looks right, with widgets
+        stretching smoothly as the panel opens.
+        """
+        outgoing.pack_forget()
+        incoming.pack(fill="both", expand=True)
+        self.root.update_idletasks()
+        self._animate_geometry(self._current_rect(), target, on_done=on_done)
+
     def _toggle_settings(self) -> None:
         if self._in_settings:
             self._close_settings()
@@ -2095,29 +2185,23 @@ class JiraOverlay:
             self.root.deiconify()
             self.root.update_idletasks()
 
-        self._queue_geom = (
-            self.root.winfo_width(), self.root.winfo_height(),
-            self.root.winfo_x(),    self.root.winfo_y(),
-        )
+        # Don't re-read the compact size while a transition is still running —
+        # that would record an intermediate frame as "the compact overlay".
+        if self._queue_geom is None or not self._geom_job:
+            self._queue_geom = self._current_rect()
         self.btn_gear.config(text=_icon("close"))
-        self.main_panel.pack_forget()
         self._build_settings_panel()
-        self.settings_panel.pack(fill="both", expand=True)
 
         target = self._settings_target()
         if was_hidden:
-            # invisible → snap to size and simply fade in, no motion needed
+            # Nothing on screen to expand from — snap to size and fade in.
+            self.main_panel.pack_forget()
+            self.settings_panel.pack(fill="both", expand=True)
             self.root.geometry("{}x{}+{}+{}".format(*target))
             self._animate_alpha(self.config.get("alpha", 0.93))
         else:
-            # visible → crossfade: fade out fast, resize while invisible (so
-            # the panel never re-flows on screen), then fade back in
-            self._animate_alpha(0.0, duration_ms=120,
-                                on_done=lambda: self._reveal_at(target))
-
-    def _reveal_at(self, target: tuple[int, int, int, int]) -> None:
-        self.root.geometry("{}x{}+{}+{}".format(*target))
-        self._animate_alpha(self.config.get("alpha", 0.93))
+            self._animate_panel_swap(self.settings_panel, self.main_panel,
+                                     target)
 
     def _settings_target(self) -> tuple[int, int, int, int]:
         """Target (w, h, x, y) for the settings panel, anchored to the
@@ -2132,19 +2216,22 @@ class JiraOverlay:
         return tw, bot - ty, tx, ty
 
     def _close_settings(self) -> None:
-        # crossfade back: fade out fast, swap content + resize while invisible,
-        # then fade the compact view back in — no on-screen re-flow, no stutter
-        self._animate_alpha(0.0, duration_ms=120, on_done=self._apply_queue_geom)
-
-    def _apply_queue_geom(self) -> None:
+        """Collapse back to the compact overlay, reversing the expand."""
+        # Clear the flag now rather than when the motion ends: it records
+        # intent, not animation state. Leaving it set until the collapse
+        # finished meant a click during those 260 ms read as another close,
+        # so rapid toggling ended up in the wrong state.
         self._in_settings = False
+        if not self._queue_geom:
+            return
         self.btn_gear.config(text=_icon("settings"))
-        self.settings_panel.pack_forget()
-        self.main_panel.pack(fill="both", expand=True)
-        if self._queue_geom:
-            qw, qh, qx, qy = self._queue_geom
-            self.root.geometry(f"{qw}x{qh}+{qx}+{qy}")
-        self._animate_alpha(self.config.get("alpha", 0.93))
+        self._animate_panel_swap(self.main_panel, self.settings_panel,
+                                 self._queue_geom,
+                                 on_done=self._settings_closed)
+
+    def _settings_closed(self) -> None:
+        # A queue update may have arrived while settings were open.
+        self._resize()
 
     def _build_settings_panel(self) -> None:
         """Rebuild inline settings content from current config."""
