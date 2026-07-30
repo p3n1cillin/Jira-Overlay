@@ -220,6 +220,7 @@ class Jira:
         self.session.headers["Accept"] = "application/json"
         # set by the watcher so a long retry backoff doesn't delay Quit
         self.stop: Optional[threading.Event] = None
+        self._refusals: set[int] = set()   # auth/permission codes already logged
 
     def _pause(self, seconds: float) -> bool:
         """Sleep between retries; True if we were asked to stop instead."""
@@ -255,8 +256,29 @@ class Jira:
                     return None
                 delay = min(delay * 2, 20)
                 continue
+            self._note_refusal(r)
             return r
         return None
+
+    def _note_refusal(self, response) -> None:
+        """Record the first auth/permission refusal of each kind.
+
+        Otherwise a wrong or expired token just makes every search come back
+        empty, for ever, with nothing written anywhere — the learner appears
+        to run perfectly and simply never produce a suggestion.
+        """
+        status = response.status_code
+        if status not in (401, 403, 404) or status in self._refusals:
+            return
+        self._refusals.add(status)
+        reason = {401: "credentials rejected — check the API token in "
+                       "jira_config.json",
+                  403: "permission denied — this account cannot read that "
+                       "project",
+                  404: "not found — check projectKey in jira_config.json"}[status]
+        _log_error(f"Jira returned {status} for "
+                   f"{response.request.method} {response.request.path_url}: "
+                   f"{reason}")
 
     def get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
         r = self._send("GET", path, params=params, timeout=15)

@@ -280,6 +280,10 @@ def tune() -> None:
         print(f"process start detected: {start} "
               f"(dropped {before - len(records)} pre-process decisions)")
 
+    if len(records) < 200:
+        print(f"only {len(records)} decisions — too few to hold any out; "
+              "run 'build' once the team has triaged more tickets")
+        return
     warmup = min(WARMUP, len(records) // 5)
     validation_n = max(100, min(400, len(records) // 5))
     split = len(records) - validation_n

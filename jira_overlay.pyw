@@ -175,6 +175,19 @@ _DWMWCP_ROUND       = 2      # full radius
 _DWMWCP_ROUNDSMALL  = 3      # subtle radius, right for compact surfaces
 
 
+def _bind_wheel(widget: tk.Misc, command) -> None:
+    """Bind mouse-wheel scrolling to a widget and everything inside it.
+
+    Tk delivers <MouseWheel> to whatever sits under the pointer, so binding
+    only the canvas means the wheel does nothing while hovering a checkbox.
+    In a panel that is mostly checkboxes, that reads as the wheel being
+    broken rather than as a subtlety of event delivery.
+    """
+    widget.bind("<MouseWheel>", command, add=True)
+    for child in widget.winfo_children():
+        _bind_wheel(child, command)
+
+
 def _track(text: str, spacing: str = " ") -> str:
     """Letter-space a short label.
 
@@ -1494,8 +1507,8 @@ class JiraOverlay:
         sf.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=sf, anchor="nw", width=320)
         canvas.configure(yscrollcommand=sb.set)
-        canvas.bind("<MouseWheel>",
-                    lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        pick_scroll = lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units")
+        canvas.bind("<MouseWheel>", pick_scroll)
         sb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
@@ -1512,6 +1525,7 @@ class JiraOverlay:
                       activebackground=_C["accent"], activeforeground="white"
                       ).pack(fill="x", pady=3, padx=4)
 
+        _bind_wheel(sf, pick_scroll)      # the buttons, not just the canvas
         win.update_idletasks()
         btn_h   = min(sf.winfo_reqheight(), sh - 250)
         total_h = btn_h + 130
@@ -1572,6 +1586,16 @@ class JiraOverlay:
     def _fetch_finished(self) -> None:
         """Main-thread tail of a fetch: repaint, then queue the next poll."""
         self._update_ui()
+        # Replace any poll already queued rather than just overwriting the
+        # handle. The first-run queue picker starts a second fetch of its own,
+        # so two completions can land back to back — and each orphaned timer
+        # would go on firing, quietly multiplying the polling rate.
+        if self._refresh_job:
+            try:
+                self.root.after_cancel(self._refresh_job)
+            except tk.TclError:
+                pass
+            self._refresh_job = None
         if self._settings_changed:
             self._settings_changed = False
             self._last_full_fetch = 0.0   # force stats refresh on next cycle
@@ -1870,7 +1894,10 @@ class JiraOverlay:
         newly_count = self._alert_count
 
         # Deduplication — notify only for genuinely new ticket IDs
-        current_ids = {i.get("issueKey") or i.get("key", "") for i in self.new_issues}
+        # Drop blanks: an issue without a key would otherwise be tracked as ""
+        # and fire a notification with no ticket reference in it.
+        current_ids = {k for k in (i.get("issueKey") or i.get("key", "")
+                                   for i in self.new_issues) if k}
         truly_new   = current_ids - self._seen_newly_ids
         self._seen_newly_ids = current_ids
 
@@ -2530,6 +2557,10 @@ class JiraOverlay:
         save_btn.bind("<Leave>",   lambda _e: save_btn.config(bg=_C["accent"]))
         cancel_btn.bind("<Enter>", lambda _e: cancel_btn.config(bg=_C["chip"]))
         cancel_btn.bind("<Leave>", lambda _e: cancel_btn.config(bg=SEL))
+
+        # Every control in here is something you might be hovering when you
+        # reach for the wheel, so the whole subtree scrolls the panel.
+        _bind_wheel(self.settings_panel, scroll_cmd)
 
     def _reconfigure(self) -> None:
         if messagebox.askyesno("Reconfigure",
