@@ -1,22 +1,29 @@
-# Jira credentials — never commit real config (or its .tmp/.bad siblings)
+# ---------------------------------------------------------------------------
+# Secrets — never commit
+# ---------------------------------------------------------------------------
+# Holds your Jira API token, plus the settings the apps discover for your site.
 jira_config.json
 jira_config.json.*
 
-# Triage learner — team-specific local tooling, never commit (script or data)
-triage_learner.pyw
-launch_learner.bat
-triage_eval.py
-triage_dataset.jsonl
+# ---------------------------------------------------------------------------
+# Triage learner DATA — never commit
+# ---------------------------------------------------------------------------
+# The learner's code ships with the project, but everything it *produces* is
+# derived from your real tickets — summaries, reporter names, customer
+# wording — and none of that belongs in a shared repository.
 triage_state.json
 triage_state.json.*
 triage_suggestions.json
 triage_suggestions.json.*
 triage_log.jsonl
 triage_history.jsonl
-TRIAGE_REPORT.md
+triage_dataset.jsonl
 triage_learner.log
+TRIAGE_REPORT.md
 
+# ---------------------------------------------------------------------------
 # Python
+# ---------------------------------------------------------------------------
 __pycache__/
 *.pyc
 *.pyo

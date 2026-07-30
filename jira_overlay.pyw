@@ -21,15 +21,17 @@ import functools
 import importlib.util
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 import winreg
 import winsound
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 import tkinter as tk
 from tkinter import messagebox
 
@@ -55,8 +57,8 @@ def _bootstrap() -> None:
     win.geometry(f"360x130+{sw // 2 - 180}+{sh // 2 - 65}")
 
     tk.Label(win, text="Installing required packages…",
-             font=("Segoe UI", 11, "bold"), fg="#e2e8f0", bg="#1a1a2e").pack(pady=(22, 4))
-    lbl = tk.Label(win, text="", font=("Segoe UI", 9), fg="#a0aec0", bg="#1a1a2e")
+             font=_font(11, "bold"), fg="#e2e8f0", bg="#1a1a2e").pack(pady=(22, 4))
+    lbl = tk.Label(win, text="", font=_font(9), fg="#a0aec0", bg="#1a1a2e")
     lbl.pack()
     track = tk.Frame(win, bg="#2d3748", height=5)
     track.pack(fill="x", padx=24, pady=(12, 0))
@@ -105,26 +107,140 @@ STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SNAP_MARGIN  = 60   # px from a corner to snap
 _LIVE_POLL_MS = 5_000   # queue-count poll interval — always 5 s regardless of settings
 
-# UI colour palette — refined dark "slate + indigo" theme
+# ── Design tokens ──────────────────────────────────────────────────────────
+# A deep, low-chroma neutral base lets one accent carry the whole interface.
+# Surfaces step up in luminance (bg -> input -> chip) so depth reads without
+# borders, and text sits on a three-level hierarchy (bright / body / dim).
 _C = {
-    "bg":        "#1b2233",   # main surface
-    "bg_dark":   "#141a27",   # deeper (setup dialogs)
-    "border":    "#3d5573",   # subtle 1-px window edge
-    "divider":   "#28324a",   # hairline separators
-    "input":     "#232c40",   # input / elevated surfaces
-    "fg":        "#aab4c5",    # body text
-    "fg_bright": "#eef2f8",    # emphasis text
-    "fg_dim":    "#5b6478",    # muted / inactive
-    "accent":    "#4c8dff",    # friendly Jira-blue accent
-    "accent_hi": "#6ba1ff",    # accent hover
-    "alert":     "#ff6b6b",    # alert / breach
-    "warn":      "#f5c56b",    # snooze / stale
-    "ok":        "#4fd18b",    # completed / healthy
-    "info":      "#6cc6e8",    # alert-queue accent
-    "hover":     "#263250",    # row hover background
-    "chip":      "#2b3a55",    # button hover chip
-    "badge":     "#2b3550",    # count badge background
+    "bg":        "#11151d",   # base surface
+    "bg_dark":   "#0c0f15",   # deeper (setup dialogs, popups)
+    "border":    "#232c39",   # 1-px window edge
+    "divider":   "#1b222c",   # hairline separators
+    "input":     "#1a212b",   # input / elevated surfaces
+    "fg":        "#98a4b6",   # body text
+    "fg_bright": "#f2f5fa",   # emphasis text
+    "fg_dim":    "#5c6675",   # muted / inactive
+    "accent":    "#4d9dff",   # primary accent
+    "accent_hi": "#74b4ff",   # accent hover
+    "alert":     "#ff6363",   # alert / breach
+    "warn":      "#f7c065",   # snooze / stale
+    "ok":        "#41d392",   # completed / healthy
+    "info":      "#5fc8e8",   # alert-queue accent
+    "hover":     "#1e2733",   # row hover background
+    "chip":      "#26313f",   # button hover chip
+    "badge":     "#212a36",   # count badge background
+    "flash":      "#28405e",  # row-change highlight, fades back to bg
+    "done_hover": "#16281f",  # completed-row hover tint (green-leaning)
 }
+
+# Typography — Segoe UI Variable is the Windows 11 system face and reads
+# noticeably cleaner at small sizes; fall back on older Windows.
+_FONT_STACK = ("Segoe UI Variable Text", "Segoe UI")
+_FONT_DISPLAY_STACK = ("Segoe UI Variable Display", "Segoe UI Semibold",
+                       "Segoe UI")
+_font_cache: dict[tuple, tuple] = {}
+
+
+def _font(size: int, weight: str = "normal", display: bool = False) -> tuple:
+    """A font tuple using the best face available on this machine.
+
+    Resolved once per (size, weight, display) and cached — font family
+    probing needs a live Tk interpreter and is far too slow to repeat on
+    every widget.
+    """
+    key = (size, weight, display)
+    hit = _font_cache.get(key)
+    if hit:
+        return hit
+    stack = _FONT_DISPLAY_STACK if display else _FONT_STACK
+    family = stack[-1]
+    try:
+        import tkinter.font as tkfont
+        available = set(tkfont.families())
+        for candidate in stack:
+            if candidate in available:
+                family = candidate
+                break
+    except Exception:
+        pass
+    _font_cache[key] = (family, size, weight) if weight != "normal" \
+        else (family, size)
+    return _font_cache[key]
+
+
+# ── Windows 11 window chrome ───────────────────────────────────────────────
+
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWCP_ROUND       = 2      # full radius
+_DWMWCP_ROUNDSMALL  = 3      # subtle radius, right for compact surfaces
+
+
+def _track(text: str, spacing: str = " ") -> str:
+    """Letter-space a short label.
+
+    Tk has no letter-spacing option, so a thin space between characters is
+    the only way to get the airy small-caps look that makes an all-caps
+    label read as typography rather than shouting.
+    """
+    return spacing.join(text)
+
+# Windows' own icon font. Real system glyphs instead of a mix of Unicode
+# symbols and emoji is much of the difference between "script" and "product":
+# they share a stroke weight, sit on one baseline, and take the text colour
+# rather than rendering as a colour emoji bitmap.
+_ICON_STACK = ("Segoe Fluent Icons",   # Windows 11
+               "Segoe MDL2 Assets")    # Windows 10
+_ICON_GLYPH = {          # codepoints are shared by Fluent Icons and MDL2
+    "refresh":  "",
+    "snooze":   "",   # quiet hours (moon)
+    "hide":     "",   # minimise
+    "close":    "",
+    "settings": "",
+}
+# Plain-text stand-ins so the UI still reads if no icon font is installed.
+_ICON_TEXT = {"refresh": "↻", "snooze": "☾", "hide": "—",
+              "close": "✕", "settings": "⚙"}
+_icon_family: Optional[str] = None
+
+
+def _icon_font(size: int = 10) -> tuple:
+    """Font tuple for icon glyphs; the family is resolved once."""
+    global _icon_family
+    if _icon_family is None:
+        try:
+            import tkinter.font as tkfont
+            available = set(tkfont.families())
+            _icon_family = next((f for f in _ICON_STACK if f in available), "")
+        except Exception:
+            _icon_family = ""
+    return (_icon_family or _FONT_STACK[-1], size)
+
+
+def _icon(name: str) -> str:
+    """Glyph for `name`, falling back to a text symbol without an icon font."""
+    _icon_font()                      # ensure the family has been probed
+    return _ICON_GLYPH[name] if _icon_family else _ICON_TEXT[name]
+
+
+def _round_corners(window, small: bool = False) -> None:
+    """Give a borderless Tk window real Windows 11 rounded corners.
+
+    An overrideredirect window is a bare rectangle; DWM will round and shadow
+    it for us if asked. Silently does nothing on Windows 10 and earlier, where
+    the attribute is simply unsupported.
+    """
+    try:
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetAncestor(window.winfo_id(), 2)  # GA_ROOT
+        if not hwnd:
+            return
+        pref = ctypes.c_int(_DWMWCP_ROUNDSMALL if small else _DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.wintypes.HWND(hwnd),
+            ctypes.c_uint(_DWMWA_WINDOW_CORNER_PREFERENCE),
+            ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass          # cosmetic only — never break the app over chrome
 
 def _lerp_hex(a: str, b: str, t: float) -> str:
     """Linear-interpolate between two #rrggbb colours (t in 0..1)."""
@@ -224,6 +340,45 @@ def play_alert() -> None:
         winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
     except Exception:
         pass
+
+
+_INSTANCE_MUTEX: Optional[int] = None
+_INSTANCE_NAME  = "JiraOverlaySingleInstance"
+
+
+def acquire_single_instance() -> bool:
+    """Claim the single-instance mutex; False if an overlay already runs.
+
+    Without this it was easy to end up with two overlays (a stale one plus a
+    freshly launched one), each polling Jira and each firing its own toast
+    for every new ticket.
+    """
+    global _INSTANCE_MUTEX
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateMutexW.restype  = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                     ctypes.c_wchar_p]
+        handle = k32.CreateMutexW(None, False, _INSTANCE_NAME)
+        if k32.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
+            if handle:
+                k32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _INSTANCE_MUTEX = handle
+        return True
+    except Exception:
+        return True      # never let the guard itself block startup
+
+
+def release_single_instance() -> None:
+    """Drop the mutex so a deliberate relaunch isn't locked out by itself."""
+    global _INSTANCE_MUTEX
+    if _INSTANCE_MUTEX:
+        try:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_INSTANCE_MUTEX))
+        except Exception:
+            pass
+        _INSTANCE_MUTEX = None
 
 
 def startup_enabled() -> bool:
@@ -352,7 +507,7 @@ class _Tooltip:
         tip.configure(bg=_C["border"])          # 1-px accent-colour border
 
         tk.Label(tip, text=self._text,
-                 font=("Segoe UI", 8),
+                 font=_font(8),
                  fg=_C["fg_bright"], bg=_C["input"],
                  padx=8, pady=5).pack(padx=1, pady=1)
 
@@ -369,6 +524,7 @@ class _Tooltip:
         y = max(4, wy - th - 6)
 
         tip.geometry(f"+{x}+{y}")
+        _round_corners(tip, small=True)
         self._tip = tip
 
 
@@ -392,7 +548,7 @@ class SetupWindow:
         self.root.geometry(f"430x295+{sw // 2 - 215}+{sh // 2 - 147}")
 
         tk.Label(self.root, text="Jira Overlay Setup",
-                 font=("Segoe UI", 14, "bold"),
+                 font=_font(14, "bold"),
                  fg=_C["fg_bright"], bg=_C["bg_dark"]
                  ).grid(row=0, column=0, columnspan=2, pady=(20, 16))
 
@@ -403,7 +559,7 @@ class SetupWindow:
         ]
         self._vars: dict[str, tuple[tk.StringVar, str]] = {}
         for i, (label, hint, secret) in enumerate(fields, 1):
-            tk.Label(self.root, text=f"{label}:", font=("Segoe UI", 9),
+            tk.Label(self.root, text=f"{label}:", font=_font(9),
                      fg=_C["fg"], bg=_C["bg_dark"], anchor="e"
                      ).grid(row=i, column=0, sticky="e", padx=(20, 8), pady=6)
             var = tk.StringVar()
@@ -411,7 +567,7 @@ class SetupWindow:
                              show="*" if secret else "",
                              bg=_C["input"], fg=_C["fg_dim"],
                              insertbackground="white", relief="flat",
-                             font=("Segoe UI", 9))
+                             font=_font(9))
             entry.grid(row=i, column=1, sticky="ew", padx=(0, 20), pady=6, ipady=5)
             entry.insert(0, hint)
             entry.bind("<FocusIn>",
@@ -425,15 +581,15 @@ class SetupWindow:
         token_url = "https://id.atlassian.com/manage-profile/security/api-tokens"
         link = tk.Label(self.root,
                         text="🔑  Generate an API token at id.atlassian.com",
-                        font=("Segoe UI", 8, "underline"),
+                        font=_font(8, "underline"),
                         fg=_C["accent"], bg=_C["bg_dark"], cursor="hand2")
         link.grid(row=4, column=0, columnspan=2, pady=(0, 8))
         link.bind("<ButtonRelease-1>", lambda _e: webbrowser.open(token_url))
-        link.bind("<Enter>", lambda _e: link.config(fg="#3399ff"))
+        link.bind("<Enter>", lambda _e: link.config(fg=_C["accent_hi"]))
         link.bind("<Leave>", lambda _e: link.config(fg=_C["accent"]))
 
         tk.Button(self.root, text="Save & Launch", command=self._save,
-                  bg=_C["accent"], fg="white", font=("Segoe UI", 10, "bold"),
+                  bg=_C["accent"], fg="white", font=_font(10, "bold"),
                   relief="flat", padx=16, pady=8, cursor="hand2",
                   activebackground=_C["accent_hi"], activeforeground="white"
                   ).grid(row=5, column=0, columnspan=2, pady=(4, 20))
@@ -473,13 +629,13 @@ class PickDeskWindow:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.root.geometry(f"360x{90 + len(desks) * 44}+{sw // 2 - 180}+{sh // 2 - 100}")
         tk.Label(self.root, text="Which service desk to monitor?",
-                 font=("Segoe UI", 11, "bold"),
+                 font=_font(11, "bold"),
                  fg=_C["fg_bright"], bg=_C["bg_dark"]).pack(pady=(18, 10))
         for desk in desks:
             tk.Button(self.root,
                       text=f"{desk['projectName']}  ({desk['projectKey']})",
                       command=lambda d=desk: self._pick(d),
-                      bg=_C["input"], fg=_C["fg_bright"], font=("Segoe UI", 10),
+                      bg=_C["input"], fg=_C["fg_bright"], font=_font(10),
                       relief="flat", padx=12, pady=8, cursor="hand2",
                       activebackground=_C["fg_dim"], activeforeground="white"
                       ).pack(fill="x", padx=24, pady=4)
@@ -497,7 +653,8 @@ class NewTicketTooltip:
     """Frameless popup listing alert-queue tickets; each row opens in browser."""
 
     def __init__(self, parent: tk.Tk, issues: list[dict],
-                 domain: str, on_mark_seen=None) -> None:
+                 domain: str, on_mark_seen=None,
+                 suggestions: Optional[dict] = None) -> None:
         self.win = tk.Toplevel(parent)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
@@ -505,12 +662,12 @@ class NewTicketTooltip:
 
         if not issues:
             tk.Label(self.win, text="  No tickets  ",
-                     font=("Segoe UI", 9), fg=_C["fg"],
+                     font=_font(9), fg=_C["fg"],
                      bg=_C["input"], pady=8).pack()
             return
 
         tk.Label(self.win, text="  ALERT QUEUE — click to open  ",
-                 font=("Segoe UI", 7, "bold"), fg=_C["fg_dim"],
+                 font=_font(7, "bold"), fg=_C["fg_dim"],
                  bg=_C["input"], pady=4).pack(fill="x")
         tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x")
 
@@ -519,34 +676,45 @@ class NewTicketTooltip:
             summary = (issue.get("fields") or {}).get("summary", "(no summary)")
             short   = summary[:55] + "…" if len(summary) > 55 else summary
             url     = f"https://{domain}/browse/{key}"
-            self._make_issue_row(url, key, short)
+            sugg    = (suggestions or {}).get(key)
+            self._make_issue_row(url, key, short, sugg)
 
         if on_mark_seen:
             tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x", pady=(4, 0))
             tk.Button(self.win, text="✓  Dismiss — hide until new tickets",
                       command=lambda: (on_mark_seen(), self.destroy()),
-                      bg=_C["input"], fg=_C["ok"], font=("Segoe UI", 8),
+                      bg=_C["input"], fg=_C["ok"], font=_font(8),
                       relief="flat", pady=4, cursor="hand2",
                       activebackground="#3d4f6e", activeforeground=_C["ok"]
                       ).pack(fill="x", padx=8, pady=(0, 4))
 
-    def _make_issue_row(self, url: str, key: str, summary: str) -> None:
+    def _make_issue_row(self, url: str, key: str, summary: str,
+                        sugg: Optional[dict] = None) -> None:
         row = tk.Frame(self.win, bg=_C["input"], cursor="hand2")
         row.pack(fill="x", padx=8, pady=2)
         top = tk.Frame(row, bg=_C["input"])
         top.pack(fill="x")
-        lbl_key = tk.Label(top, text=key, font=("Segoe UI", 8, "bold"),
+        lbl_key = tk.Label(top, text=key, font=_font(8, "bold"),
                            fg=_C["accent"], bg=_C["input"], width=10, anchor="w")
         lbl_key.pack(side="left")
-        lbl_txt = tk.Label(top, text=summary, font=("Segoe UI", 8),
+        lbl_txt = tk.Label(top, text=summary, font=_font(8),
                            fg=_C["fg"], bg=_C["input"], anchor="w")
         lbl_txt.pack(side="left")
         widgets = [row, top, lbl_key, lbl_txt]
+        if sugg and sugg.get("label"):
+            review = sugg.get("review")
+            icon   = "⚠" if review else "💡"
+            colour = _C["warn"] if review else _C["ok"]
+            lbl_sugg = tk.Label(row, text=f"        {icon} {sugg['label']}",
+                                font=_font(8), fg=colour,
+                                bg=_C["input"], anchor="w")
+            lbl_sugg.pack(fill="x")
+            widgets.append(lbl_sugg)
 
         def _hover_in(_e: tk.Event) -> None:
             for w in widgets:
                 try:
-                    w.configure(bg="#3d4f6e")
+                    w.configure(bg=_C["chip"])
                 except tk.TclError:
                     pass
 
@@ -563,6 +731,7 @@ class NewTicketTooltip:
             widget.bind("<Leave>", _hover_out)
 
     def place(self, x: int, y: int, screen_w: int, screen_h: int) -> None:
+        _round_corners(self.win)
         self.win.update_idletasks()
         w = self.win.winfo_reqwidth()
         h = self.win.winfo_reqheight()
@@ -591,7 +760,7 @@ class JiraOverlay:
     queues            Visible queue dicts after filtering
     _all_queue_names  All queue names before hidden-queue filter (for Settings)
     new_issues        Issues currently in the alert queue
-    completed_today   Count (int or "N+") of tickets closed today
+    completed_today   Count of tickets closed today
     sla_compliance    Compliance % or None if SLA unavailable
     _sla_unavailable  True once confirmed the SLA JQL field doesn't exist
     _settings_changed Re-fetch flag set when settings saved during an in-flight fetch
@@ -619,6 +788,9 @@ class JiraOverlay:
     _tray_last        (count, alert, name) from last tray update (skip dup redraws)
     _session          Persistent requests.Session (connection reuse, auth preset)
     _last_full_fetch  Epoch when SLA/completed stats were last fetched
+    _approx_count_ok  False once the server is known to lack /approximate-count
+    _events           Queue of callables the fetch thread hands to the main one
+    _flash_jobs       {queue_name: pending after() id} for the row-change fade
     _sw / _sh         Primary screen width / height (pixels)
     """
 
@@ -654,6 +826,9 @@ class JiraOverlay:
         self._show_job: Optional[str] = None
         self._picker_open      = False
         self._tooltip: Optional[NewTicketTooltip] = None
+        self._suggestions: dict = {}   # key -> {label, plan} from the (optional)
+                                       # local triage learner; display only
+        self._suggestions_mtime: float = -1.0   # cache guard for the above
         self._refresh_job: Optional[str] = None
         self._tray: Optional[pystray.Icon] = None
         self._tray_last: tuple[int, bool, str] = (-1, False, "")
@@ -662,6 +837,11 @@ class JiraOverlay:
                                            config.get("token", ""))
         self._session.headers["Accept"] = "application/json"
         self._last_full_fetch: float = 0.0   # epoch when stats were last fetched
+        self._approx_count_ok = True   # server supports /search/approximate-count
+        # Work handed back from the fetch thread; drained by _pump on the
+        # main thread (see _post).
+        self._events: queue.Queue = queue.Queue()
+        self._flash_jobs: dict[str, str] = {}   # queue name -> pending after id
         # Drag state
         self._drag_x0 = self._drag_y0 = 0
         self._drag_win_x = self._drag_win_y = 0
@@ -677,10 +857,39 @@ class JiraOverlay:
         self._sh = self.root.winfo_screenheight()
 
         self._build_ui()
+        _round_corners(self.root)
         self.root.withdraw()
         self._start_tray()
+        self.root.after(self._PUMP_MS, self._pump)
         self._fetch()
         self.root.after(30_000, self._update_relative_time)
+
+    # ── Main-thread hand-off ──────────────────────────────────────────────────
+
+    _PUMP_MS = 40   # how often the main thread drains the worker's queue
+
+    def _post(self, fn: Callable[[], None]) -> None:
+        """Queue `fn` to run on the main thread.
+
+        Tk is not thread-safe: every widget call — including root.after() —
+        must happen on the thread running mainloop. The fetch thread therefore
+        hands work over through a queue instead of touching Tk directly.
+        """
+        self._events.put(fn)
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                fn = self._events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except tk.TclError:
+                return          # window is going away — stop pumping
+            except Exception:
+                pass            # a failed callback must not kill the loop
+        self.root.after(self._PUMP_MS, self._pump)
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -702,7 +911,7 @@ class JiraOverlay:
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit",        lambda: self.root.after(0, self.root.destroy)),
+            pystray.MenuItem("Quit",        lambda: self._post(self.root.destroy)),
         )
         self._tray = pystray.Icon("JiraOverlay", _make_tray_image(0, False),
                                   "Jira Overlay", menu)
@@ -710,9 +919,9 @@ class JiraOverlay:
 
     def _tray_toggle(self) -> None:
         if self._visible:
-            self.root.after(0, self._user_hide)
+            self._post(self._user_hide)
         else:
-            self.root.after(0, self._user_show)
+            self._post(self._user_show)
 
     def _update_tray(self, count: int, alert: bool,
                      queue_name: str = "Newly Opened") -> None:
@@ -729,24 +938,30 @@ class JiraOverlay:
 
     def _build_ui(self) -> None:
         BG = _C["bg"]
-        self.frame = tk.Frame(self.root, bg=BG, padx=12, pady=8)
+        # Generous, even padding is most of what separates a "tool" from a
+        # finished product; the 14/10 inset gives content room to breathe
+        # inside the rounded window.
+        self.frame = tk.Frame(self.root, bg=BG, padx=14, pady=10)
         self.frame.pack(fill="both", expand=True, padx=1, pady=1)
 
         # Header
         hdr = tk.Frame(self.frame, bg=BG)
         hdr.pack(fill="x")
         desk = self.config.get("serviceDeskName", "JIRA")
-        self.lbl_title = tk.Label(hdr, text=f"● {desk.upper()}",
-                                  font=("Segoe UI", 8, "bold"),
+        # Letter-spaced small caps read as a deliberate label rather than
+        # shrunken body text.
+        self.lbl_title = tk.Label(hdr, text=f"● {_track(desk.upper())}",
+                                  font=_font(8, "bold", display=True),
                                   fg=_C["accent"], bg=BG, cursor="hand2")
         self.lbl_title.pack(side="left")
-        self.lbl_title.bind("<Enter>", lambda _e: self.lbl_title.config(fg="#3399ff"))
+        self.lbl_title.bind("<Enter>", lambda _e: self.lbl_title.config(fg=_C["accent_hi"]))
         self.lbl_title.bind("<Leave>", lambda _e: self.lbl_title.config(fg=_C["accent"]))
         self.lbl_title.bind("<ButtonRelease-1>", lambda _e: self._open_service_desk())
         _Tooltip(self.lbl_title, "Open service desk in Jira")
-        self.btn_gear = tk.Label(hdr, text="⚙", font=("Segoe UI", 11),
+        self.btn_gear = tk.Label(hdr, text=_icon("settings"),
+                                 font=_icon_font(11),
                                  fg=_C["fg_dim"], bg=BG, cursor="hand2",
-                                 padx=6, pady=1)
+                                 padx=6, pady=2)
         self.btn_gear.pack(side="right")
         self.btn_gear.bind("<ButtonRelease-1>", lambda _e: self._toggle_settings())
         self.btn_gear.bind("<Enter>", lambda _e: self.btn_gear.config(
@@ -755,7 +970,8 @@ class JiraOverlay:
             fg=_C["fg_dim"], bg=BG))
         _Tooltip(self.btn_gear, "Settings")
 
-        tk.Frame(self.frame, bg=_C["divider"], height=1).pack(fill="x", pady=(4, 4))
+        tk.Frame(self.frame, bg=_C["divider"], height=1).pack(fill="x",
+                                                              pady=(8, 6))
 
         # Main (queue) panel
         self.main_panel = tk.Frame(self.frame, bg=BG)
@@ -765,16 +981,17 @@ class JiraOverlay:
         self.rows_frame.pack(fill="both", expand=True)
         self.row_widgets: dict[str, dict] = {}
 
-        tk.Frame(self.main_panel, bg=_C["divider"], height=1).pack(fill="x", pady=(6, 2))
+        tk.Frame(self.main_panel, bg=_C["divider"], height=1).pack(fill="x",
+                                                                   pady=(8, 4))
         done_row = tk.Frame(self.main_panel, bg=BG, cursor="hand2")
-        done_row.pack(fill="x", pady=1)
+        done_row.pack(fill="x", pady=2)
         self.lbl_done = tk.Label(done_row, text="✓  Completed today — —",
-                                 font=("Segoe UI", 9), fg=_C["ok"], bg=BG,
-                                 cursor="hand2")
+                                 font=_font(9), fg=_C["ok"], bg=BG,
+                                 cursor="hand2", padx=2)
         self.lbl_done.pack(side="left")
         self.lbl_sla = tk.Label(done_row, text="",
-                                font=("Segoe UI", 8, "bold"), fg=_C["ok"], bg=BG,
-                                cursor="hand2")
+                                font=_font(8, "bold"), fg=_C["ok"], bg=BG,
+                                cursor="hand2", padx=2)
         self.lbl_sla.pack(side="right")
 
         def _done_hover(bg: str) -> None:
@@ -785,26 +1002,30 @@ class JiraOverlay:
             w.bind("<ButtonPress-1>",   self._drag_press)
             w.bind("<B1-Motion>",       self._drag_move)
             w.bind("<ButtonRelease-1>", lambda _e: self._open_completed_today())
-            w.bind("<Enter>", lambda _e: _done_hover("#1e3a2e"))
+            w.bind("<Enter>", lambda _e: _done_hover(_C["done_hover"]))
             w.bind("<Leave>", lambda _e: _done_hover(BG))
         _Tooltip(self.lbl_done, "Open completed tickets in Jira")
 
-        tk.Frame(self.main_panel, bg=_C["divider"], height=1).pack(fill="x", pady=(4, 2))
+        tk.Frame(self.main_panel, bg=_C["divider"], height=1).pack(fill="x",
+                                                                   pady=(6, 4))
 
         # Footer: action buttons + status
         footer = tk.Frame(self.main_panel, bg=BG)
         footer.pack(fill="x")
         self.btn_snooze_icon = self._footer_btn(
-            footer, "💤", self._snooze_cycle, tip="Snooze alerts")
-        self._footer_btn(footer, "↻", self._fetch,
-                         tip="Refresh now").pack(side="left", padx=(0, 8))
-        self.btn_snooze_icon.pack(side="left", padx=(0, 8))
-        self._footer_btn(footer, "⊟", self._user_hide,
-                         tip="Hide until new tickets arrive").pack(side="left", padx=(0, 8))
-        self._footer_btn(footer, "✕", self.root.destroy,
-                         color=_C["alert"], tip="Quit").pack(side="left")
+            footer, _icon("snooze"), self._snooze_cycle, tip="Snooze alerts")
+        self._footer_btn(footer, _icon("refresh"), self._fetch,
+                         tip="Refresh now").pack(side="left", padx=(0, 2))
+        self.btn_snooze_icon.pack(side="left", padx=(0, 2))
+        self._footer_btn(footer, _icon("hide"), self._user_hide,
+                         tip="Hide until new tickets arrive"
+                         ).pack(side="left", padx=(0, 2))
+        # Quit sits quietly until hovered — a destructive action shouldn't be
+        # the loudest thing on screen.
+        self._footer_btn(footer, _icon("close"), self.root.destroy,
+                         hover_color=_C["alert"], tip="Quit").pack(side="left")
         self.lbl_status = tk.Label(footer, text="Connecting…",
-                                   font=("Segoe UI", 7),
+                                   font=_font(7),
                                    fg=_C["fg_dim"], bg=BG, anchor="e")
         self.lbl_status.pack(side="right")
 
@@ -826,13 +1047,14 @@ class JiraOverlay:
     @staticmethod
     def _footer_btn(parent: tk.Frame, text: str, cmd,
                     color: str = _C["fg_dim"],
-                    tip: str = "") -> tk.Label:
-        btn = tk.Label(parent, text=text, font=("Segoe UI", 11),
+                    tip: str = "",
+                    hover_color: str = "") -> tk.Label:
+        btn = tk.Label(parent, text=text, font=_icon_font(11),
                        fg=color, bg=_C["bg"], cursor="hand2",
-                       padx=6, pady=1)
+                       padx=7, pady=3)
 
         def _enter(_e: tk.Event) -> None:
-            btn.config(fg=_C["fg_bright"], bg=_C["chip"])
+            btn.config(fg=hover_color or _C["fg_bright"], bg=_C["chip"])
 
         def _leave(_e: tk.Event) -> None:
             btn.config(fg=color, bg=_C["bg"])
@@ -861,18 +1083,20 @@ class JiraOverlay:
         max_chars = max(12, (w_cfg - 100) // 7)
         label = name if len(name) <= max_chars else name[:max_chars - 1] + "…"
 
+        # Taller rows with inner padding give a comfortable click target and
+        # let the hover tint read as a band rather than a thin stripe.
         row = tk.Frame(self.rows_frame, bg=BG, cursor="hand2")
-        row.pack(fill="x", pady=2)
-        lbl_name  = tk.Label(row, text=label, font=("Segoe UI", 9),
-                             fg=nc, bg=BG, anchor="w")
-        lbl_name.pack(side="left", padx=(2, 0))
+        row.pack(fill="x", pady=1)
+        lbl_name  = tk.Label(row, text=label, font=_font(9),
+                             fg=nc, bg=BG, anchor="w", pady=3)
+        lbl_name.pack(side="left", padx=(4, 0))
         # count shown as a small chip so it reads as a discrete badge
-        lbl_count = tk.Label(row, text="—", font=("Segoe UI", 8, "bold"),
-                             fg=cc, bg=_C["badge"], padx=7, pady=0)
-        lbl_count.pack(side="right", padx=(0, 2))
-        dot = tk.Label(row, text="", font=("Segoe UI", 8),
+        lbl_count = tk.Label(row, text="—", font=_font(8, "bold"),
+                             fg=cc, bg=_C["badge"], padx=8, pady=1)
+        lbl_count.pack(side="right", padx=(0, 4))
+        dot = tk.Label(row, text="", font=_font(8),
                        fg=_C["info"], bg=BG)
-        dot.pack(side="right", padx=(0, 4))
+        dot.pack(side="right", padx=(0, 5))
 
         pk  = self.config.get("projectKey", "")
         url = (self._jira_url(f"/jira/servicedesk/projects/{pk}/queues/custom/{qid}")
@@ -997,7 +1221,7 @@ class JiraOverlay:
             tk.Button(inner, text=label,
                       command=lambda m=minutes, p=popup: (p.destroy(), self._snooze(m)),
                       bg=_C["input"], fg=_C["fg_bright"],
-                      font=("Segoe UI", 9), relief="flat",
+                      font=_font(9), relief="flat",
                       padx=16, pady=5, cursor="hand2",
                       activebackground=_C["accent"],
                       activeforeground="white").pack(fill="x")
@@ -1007,6 +1231,7 @@ class JiraOverlay:
         by = self.btn_snooze_icon.winfo_rooty()
         ph = popup.winfo_reqheight()
         popup.geometry(f"+{bx}+{max(0, by - ph - 4)}")
+        _round_corners(popup, small=True)
 
         popup.focus_force()
         popup.bind("<FocusOut>",
@@ -1038,6 +1263,7 @@ class JiraOverlay:
             return
         self._tooltip = NewTicketTooltip(
             self.root, self.new_issues, self.config["domain"],
+            suggestions=self._suggestions,
             on_mark_seen=self._mark_all_seen)
         self._tooltip.place(self.root.winfo_x(), self.root.winfo_y(),
                             self._sw, self._sh)
@@ -1070,15 +1296,21 @@ class JiraOverlay:
                if pk else self._jira_url("/jira/servicedesk"))
         webbrowser.open(url)
 
+    def _completed_today_jql(self) -> str:
+        """JQL behind the 'Completed today' figure and its Jira link."""
+        pk    = self.config.get("projectKey", "")
+        jql   = (f"project = {pk} AND statusCategory = Done "
+                 "AND updated >= startOfDay()")
+        extra = self.config.get("completedTodayFilter", "").strip()
+        return f"{jql} AND {extra}" if extra else jql
+
     def _open_completed_today(self) -> None:
         if self._did_drag:
             return
-        pk  = self.config.get("projectKey", "")
-        extra = self.config.get("completedTodayFilter", "").strip()
-        jql = f"project = {pk} AND statusCategory = Done AND updated >= startOfDay()"
-        if extra:
-            jql += f" AND {extra}"
-        webbrowser.open(self._jira_url(f"/issues/?jql={jql.replace(' ', '+')}"))
+        # Percent-encode: a custom filter can contain =, ", & and other
+        # characters that a bare space→+ swap would corrupt.
+        jql = urllib.parse.quote(self._completed_today_jql(), safe="")
+        webbrowser.open(self._jira_url(f"/issues/?jql={jql}"))
 
     # ── Service-desk discovery ────────────────────────────────────────────────
 
@@ -1093,13 +1325,19 @@ class JiraOverlay:
         except Exception:
             return None
 
-        accessible = [
-            d for d in desks
-            if self._session.get(
-                self._jira_url(f"/rest/servicedeskapi/servicedesk/{d['id']}/queue"),
-                params={"limit": 1}, timeout=5
-            ).ok
-        ]
+        # Probe each desk independently — one unreachable desk must not abort
+        # discovery for the rest.
+        accessible = []
+        for d in desks:
+            try:
+                probe = self._session.get(
+                    self._jira_url(
+                        f"/rest/servicedeskapi/servicedesk/{d['id']}/queue"),
+                    params={"limit": 1}, timeout=5)
+            except requests.RequestException:
+                continue
+            if probe.ok:
+                accessible.append(d)
 
         if not accessible:
             return None
@@ -1115,7 +1353,7 @@ class JiraOverlay:
             self._desk_pick = p.result or accessible[0]
             picked.set()
 
-        self.root.after(0, _show_picker)
+        self._post(_show_picker)
         picked.wait(timeout=120)
         return self._desk_pick
 
@@ -1142,12 +1380,12 @@ class JiraOverlay:
 
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         tk.Label(win, text="Which queue should trigger alerts?",
-                 font=("Segoe UI", 11, "bold"),
+                 font=_font(11, "bold"),
                  fg=_C["fg_bright"], bg=_C["bg_dark"]).pack(pady=(18, 4))
         tk.Label(win,
                  text="The overlay will appear and notifications will fire\n"
                       "when new tickets arrive in this queue.",
-                 font=("Segoe UI", 8), fg=_C["fg_dim"],
+                 font=_font(8), fg=_C["fg_dim"],
                  bg=_C["bg_dark"], justify="center").pack(pady=(0, 10))
 
         container = tk.Frame(win, bg=_C["bg_dark"])
@@ -1171,7 +1409,7 @@ class JiraOverlay:
 
         for q in self.queues:
             tk.Button(sf, text=q["name"], command=lambda n=q["name"]: pick(n),
-                      bg=_C["input"], fg=_C["fg_bright"], font=("Segoe UI", 10),
+                      bg=_C["input"], fg=_C["fg_bright"], font=_font(10),
                       relief="flat", padx=12, pady=7, cursor="hand2",
                       activebackground=_C["accent"], activeforeground="white"
                       ).pack(fill="x", pady=3, padx=4)
@@ -1229,21 +1467,27 @@ class JiraOverlay:
             self.queues       = []
         finally:
             self.loading = False
-            self.root.after(0, self._update_ui)
-            if self._settings_changed:
-                self._settings_changed = False
-                self._last_full_fetch = 0.0   # force stats refresh on next cycle
-                delay = 0                     # immediate
-            elif self._retry_after_ms:
-                delay = self._retry_after_ms  # honour the server's Retry-After
-            elif self._conn_error:
-                delay = _LIVE_POLL_MS         # retry at live rate during reconnect
-            elif self._error_count > 0:
-                delay = min(_LIVE_POLL_MS * (2 ** min(self._error_count, 6)),
-                            5 * 60 * 1_000)
-            else:
-                delay = _LIVE_POLL_MS         # always poll counts every 5 s
-            self._refresh_job = self.root.after(delay, self._fetch)
+            # Refresh the UI and schedule the next poll on the main thread —
+            # this method runs on the fetch thread, which must not touch Tk.
+            self._post(self._fetch_finished)
+
+    def _fetch_finished(self) -> None:
+        """Main-thread tail of a fetch: repaint, then queue the next poll."""
+        self._update_ui()
+        if self._settings_changed:
+            self._settings_changed = False
+            self._last_full_fetch = 0.0   # force stats refresh on next cycle
+            delay = 0                     # immediate
+        elif self._retry_after_ms:
+            delay = self._retry_after_ms  # honour the server's Retry-After
+        elif self._conn_error:
+            delay = _LIVE_POLL_MS         # retry at live rate during reconnect
+        elif self._error_count > 0:
+            delay = min(_LIVE_POLL_MS * (2 ** min(self._error_count, 6)),
+                        5 * 60 * 1_000)
+        else:
+            delay = _LIVE_POLL_MS         # always poll counts every 5 s
+        self._refresh_job = self.root.after(delay, self._fetch)
 
     def _fetch_data(self) -> None:
         """Core data-fetch logic (called from worker thread)."""
@@ -1261,7 +1505,7 @@ class JiraOverlay:
                 "projectKey":      desk.get("projectKey", ""),
             })
             save_config(cfg)
-            self.root.after(0, lambda n=desk["projectName"]:
+            self._post(lambda n=desk["projectName"]:
                 self.lbl_title.config(text=f"● {n.upper()}"))
 
         sd_id = cfg["serviceDeskId"]
@@ -1299,7 +1543,7 @@ class JiraOverlay:
         # Show alert-queue picker on first run
         alert_qs = self._alert_queues
         if not alert_qs and self.queues:
-            self.root.after(0, self._show_alert_queue_picker)
+            self._post(self._show_alert_queue_picker)
             return
 
         # Alert data comes from the UNFILTERED list — hiding a queue from
@@ -1349,52 +1593,79 @@ class JiraOverlay:
         self._conn_error  = False
         self._error_count = 0
 
+    def _count_issues(self, jql: str) -> tuple[Optional[int], bool]:
+        """Count issues matching `jql`.
+
+        Returns (count, jql_rejected). `count` is None when the query didn't
+        succeed; `jql_rejected` is True only when Jira actively rejected the
+        query itself (HTTP 400 — e.g. an SLA field that doesn't exist), so a
+        transient network or 5xx blip is never mistaken for a permanent
+        configuration problem.
+
+        Prefers /search/approximate-count, which returns just a number; the
+        old path pulled up to 200 whole issues purely to call len() on them,
+        which also silently capped the figure at '200+'.
+        """
+        if self._approx_count_ok:
+            r = self._session.post(
+                self._jira_url("/rest/api/3/search/approximate-count"),
+                json={"jql": jql}, timeout=10)
+            if r.ok:
+                try:
+                    return int(r.json()["count"]), False
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    return None, False
+            if r.status_code == 400:
+                return None, True
+            if r.status_code != 404:
+                return None, False
+            # 404 — older Jira without the endpoint; use the search API
+            # from here on.
+            self._approx_count_ok = False
+
+        r = self._session.post(
+            self._jira_url("/rest/api/3/search/jql"),
+            json={"jql": jql, "maxResults": 200, "fields": ["status"]},
+            timeout=10)
+        if not r.ok:
+            return None, r.status_code == 400
+        try:
+            return len(r.json().get("issues", [])), False
+        except (ValueError, AttributeError):
+            return None, False
+
     def _fetch_completion_stats(self, cfg: dict) -> None:
         """Fetch completed-today count and optional SLA compliance."""
-        pk = cfg.get("projectKey", "")
-        if not pk:
+        if not cfg.get("projectKey", ""):
             self.completed_today = 0
             self.sla_compliance  = None
             return
 
-        base_jql = f"project = {pk} AND statusCategory = Done AND updated >= startOfDay()"
-        extra = cfg.get("completedTodayFilter", "").strip()
-        if extra:
-            base_jql += f" AND {extra}"
-
+        base_jql = self._completed_today_jql()
         try:
-            cr = self._session.post(
-                self._jira_url("/rest/api/3/search/jql"),
-                json={"jql": base_jql, "maxResults": 200, "fields": ["status"]},
-                timeout=10)
-            if not cr.ok:
+            total_n, _ = self._count_issues(base_jql)
+            if total_n is None:
                 self.completed_today = 0
                 self.sla_compliance  = None
                 return
-
-            data    = cr.json()
-            total_n = len(data.get("issues", []))
-            self.completed_today = (f"{total_n}+" if not data.get("isLast", True)
-                                    else total_n)
+            self.completed_today = total_n
 
             if self._sla_unavailable or total_n == 0:
                 self.sla_compliance = None
                 return
 
             sla_field = cfg.get("slaField", "Time to resolution")
-            sla_jql   = base_jql + f' AND "{sla_field}" = slaBreached()'
-            sr = self._session.post(
-                self._jira_url("/rest/api/3/search/jql"),
-                json={"jql": sla_jql, "maxResults": 200, "fields": ["status"]},
-                timeout=10)
-            if sr.ok:
-                breached = len(sr.json().get("issues", []))
-                self.sla_compliance = round((total_n - breached) / total_n * 100)
+            breached, rejected = self._count_issues(
+                base_jql + f' AND "{sla_field}" = slaBreached()')
+            if breached is None:
+                # Only stop asking when Jira rejected the query outright —
+                # that means the SLA field is missing or renamed. A transient
+                # failure just leaves the figure blank for this cycle.
+                self._sla_unavailable = self._sla_unavailable or rejected
+                self.sla_compliance   = None
             else:
-                body = sr.text.lower()
-                if any(token in body for token in ("does not exist", "unknown", "field")):
-                    self._sla_unavailable = True
-                self.sla_compliance = None
+                self.sla_compliance = round(
+                    (total_n - breached) / total_n * 100)
 
         except Exception:
             self.completed_today = 0
@@ -1402,11 +1673,33 @@ class JiraOverlay:
 
     # ── Update UI ─────────────────────────────────────────────────────────────
 
+    def _load_suggestions(self) -> dict:
+        """Optional routing suggestions written by an external process
+        (e.g. a local triage learner). Display-only — the overlay never
+        acts on them. Ignored if the file is missing or stale. Re-parsed
+        only when the file actually changes (cached by mtime)."""
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            self.config.get("suggestionsFile", "triage_suggestions.json"))
+        try:
+            mtime = os.path.getmtime(path)
+            if time.time() - mtime > 900:
+                return {}
+            if mtime == self._suggestions_mtime:
+                return self._suggestions          # unchanged since last read
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self._suggestions_mtime = mtime
+            return data
+        except (OSError, ValueError):
+            return {}
+
     def _update_ui(self) -> None:
         if self._conn_error:
             # Transient network loss — keep existing rows, show subtle status
             self.lbl_status.config(text="Reconnecting…", fg=_C["warn"])
             return
+        self._suggestions = self._load_suggestions()
 
         if self.error_msg:
             # Hard error — wipe rows_frame completely then show single error label
@@ -1414,7 +1707,7 @@ class JiraOverlay:
                 child.destroy()
             self.row_widgets.clear()
             err = tk.Label(self.rows_frame, text=self.error_msg,
-                           font=("Segoe UI", 8), fg=_C["alert"], bg=_C["bg"])
+                           font=_font(8), fg=_C["alert"], bg=_C["bg"])
             err.pack()
             self._bind_drag(err)
             self.lbl_status.config(text="Tap ↻ to retry", fg=_C["alert"])
@@ -1431,6 +1724,7 @@ class JiraOverlay:
         current_names = {q["name"] for q in self.queues}
         for name in list(self.row_widgets):
             if name not in current_names:
+                self._cancel_flash(name)
                 self.row_widgets[name]["row"].destroy()
                 del self.row_widgets[name]
 
@@ -1465,7 +1759,7 @@ class JiraOverlay:
 
             prev = self._prev_counts.get(name)
             if prev is not None and count != prev:
-                self._flash_row(rw)
+                self._flash_row(name, rw)
             self._prev_counts[name] = count
 
         # Total across ALL alert queues (computed in the fetch from the
@@ -1500,12 +1794,19 @@ class JiraOverlay:
                 summary = summaries.get(key, "")
                 title   = f"Jira — {key}"
                 body    = summary[:120] if summary else "New ticket in alert queue"
+                s       = self._suggestions.get(key, {})
+                if s.get("label"):
+                    body += f"\n{'⚠' if s.get('review') else '💡'} {s['label']}"
             else:
                 title   = f"Jira — {len(truly_new)} new tickets"
                 lines   = []
                 for key in list(truly_new)[:3]:
                     s    = summaries.get(key, "")
-                    lines.append(f"{key}: {s[:60]}" if s else key)
+                    line = f"{key}: {s[:60]}" if s else key
+                    sg   = self._suggestions.get(key, {})
+                    if sg.get("label"):
+                        line += f" {'⚠' if sg.get('review') else '💡'} {sg['label']}"
+                    lines.append(line)
                 if len(truly_new) > 3:
                     lines.append(f"…and {len(truly_new) - 3} more")
                 body = "\n".join(lines)
@@ -1526,9 +1827,12 @@ class JiraOverlay:
         else:
             self.lbl_sla.config(text="")
 
+        # Match what the rows show: alert queues use the live reconciled count,
+        # since JSM's cached includeCount can report a stale non-zero.
         tray_queue = self.config.get("trayBadgeQueue", "Newly Opened")
         tray_count = next(
-            (q.get("issueCount", 0) for q in self.queues
+            (self._reconciled_counts.get(q["name"], q.get("issueCount", 0))
+             for q in self.queues
              if tray_queue.lower() in q["name"].lower()),
             newly_count,
         )
@@ -1561,24 +1865,43 @@ class JiraOverlay:
 
     # ── Row flash ─────────────────────────────────────────────────────────────
 
-    def _flash_row(self, rw: dict) -> None:
+    def _cancel_flash(self, name: str) -> None:
+        """Drop a pending fade so it can't fire against a destroyed widget."""
+        job = self._flash_jobs.pop(name, None)
+        if job:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _flash_row(self, name: str, rw: dict) -> None:
         """Smoothly fade a row's background from an accent tint back to base
         when its count changes — a gentle highlight rather than a hard blink.
-        The count chip keeps its own background."""
+        The count chip keeps its own background.
+
+        A row that changes again mid-fade restarts cleanly instead of leaving
+        two fades fighting over the same background.
+        """
         targets = [rw["row"], rw["lbl_name"], rw["dot"]]
-        highlight, base = "#33507a", _C["bg"]
+        highlight, base = _C["flash"], _C["bg"]
         steps = 14
 
+        job = self._flash_jobs.pop(name, None)
+        if job:
+            self.root.after_cancel(job)
+
         def tick(i: int) -> None:
+            self._flash_jobs.pop(name, None)
             t   = i / steps
             col = _lerp_hex(highlight, base, t)
             try:
                 for w in targets:
                     w.configure(bg=col)
             except tk.TclError:
-                return
+                return          # row was destroyed (queue list changed)
             if i < steps:
-                self.root.after(28, lambda: tick(i + 1))
+                self._flash_jobs[name] = self.root.after(
+                    28, lambda: tick(i + 1))
 
         tick(0)
 
@@ -1748,7 +2071,7 @@ class JiraOverlay:
             self.root.winfo_width(), self.root.winfo_height(),
             self.root.winfo_x(),    self.root.winfo_y(),
         )
-        self.btn_gear.config(text="✕")
+        self.btn_gear.config(text=_icon("close"))
         self.main_panel.pack_forget()
         self._build_settings_panel()
         self.settings_panel.pack(fill="both", expand=True)
@@ -1787,7 +2110,7 @@ class JiraOverlay:
 
     def _apply_queue_geom(self) -> None:
         self._in_settings = False
-        self.btn_gear.config(text="⚙")
+        self.btn_gear.config(text=_icon("settings"))
         self.settings_panel.pack_forget()
         self.main_panel.pack(fill="both", expand=True)
         if self._queue_geom:
@@ -1824,7 +2147,7 @@ class JiraOverlay:
 
         # ── Section helpers (defined after body so they target body) ──────────
         def section(title: str) -> None:
-            tk.Label(body, text=title.upper(), font=("Segoe UI", 7, "bold"),
+            tk.Label(body, text=title.upper(), font=_font(7, "bold"),
                      fg=_C["accent"], bg=BG).pack(anchor="w", padx=12, pady=(12, 0))
             tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=12, pady=(3, 2))
 
@@ -1832,12 +2155,12 @@ class JiraOverlay:
             tk.Checkbutton(parent, text=text, variable=var,
                            fg=FG, bg=BG, selectcolor=SEL,
                            activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=1)
+                           font=_font(9)).pack(anchor="w", padx=16, pady=1)
 
         # Stats refresh interval
         section("Stats refresh interval")
         tk.Label(body, text="Queue counts update live every 5 s.  This controls how often\nSLA % and Completed Today refresh (heavier queries).",
-                 font=("Segoe UI", 8), fg=_C["fg_dim"], bg=BG,
+                 font=_font(8), fg=_C["fg_dim"], bg=BG,
                  justify="left").pack(anchor="w", padx=16, pady=(0, 4))
         rf = tk.Frame(body, bg=BG)
         rf.pack(fill="x", padx=16, pady=(0, 4))
@@ -1846,7 +2169,7 @@ class JiraOverlay:
             tk.Radiobutton(rf, text=lbl, variable=s_refresh, value=secs,
                            fg=FG, bg=BG, selectcolor=SEL,
                            activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+                           font=_font(9)).pack(side="left", padx=(0, 8))
 
         # Alerts
         section("Alerts")
@@ -1859,14 +2182,14 @@ class JiraOverlay:
         section("Appearance")
         af = tk.Frame(body, bg=BG)
         af.pack(fill="x", padx=16, pady=(0, 4))
-        tk.Label(af, text="Transparency", font=("Segoe UI", 9),
+        tk.Label(af, text="Transparency", font=_font(9),
                  fg=FG, bg=BG).grid(row=0, column=0, sticky="w")
         s_alpha = tk.DoubleVar(value=cfg.get("alpha", 0.93))
         tk.Scale(af, from_=0.3, to=1.0, resolution=0.05, orient="horizontal",
                  variable=s_alpha, length=140, bg=BG, fg=FG,
                  troughcolor=SEL, highlightthickness=0, sliderrelief="flat"
                  ).grid(row=0, column=1, padx=(8, 0))
-        tk.Label(af, text="Width", font=("Segoe UI", 9),
+        tk.Label(af, text="Width", font=_font(9),
                  fg=FG, bg=BG).grid(row=1, column=0, sticky="w", pady=(6, 0))
         s_width = tk.IntVar(value=cfg.get("overlayWidth", 260))
         tk.Scale(af, from_=200, to=420, resolution=10, orient="horizontal",
@@ -1881,17 +2204,17 @@ class JiraOverlay:
         kf = tk.Frame(body, bg=BG)
         kf.pack(fill="x", padx=16, pady=(0, 4))
         tk.Label(kf, text="Hide queues whose name contains:",
-                 font=("Segoe UI", 8), fg=FG, bg=BG).pack(anchor="w")
+                 font=_font(8), fg=FG, bg=BG).pack(anchor="w")
         s_skip_kw = tk.StringVar(value=", ".join(cfg.get("skipKeywords", [])))
         tk.Entry(kf, textvariable=s_skip_kw, bg=SEL, fg=_C["fg_bright"],
-                 insertbackground="white", relief="flat", font=("Segoe UI", 9)
+                 insertbackground="white", relief="flat", font=_font(9)
                  ).pack(fill="x", ipady=3, pady=(2, 6))
         tk.Label(kf, text="Hide queues with more than N tickets (0 = no limit):",
-                 font=("Segoe UI", 8), fg=FG, bg=BG).pack(anchor="w")
+                 font=_font(8), fg=FG, bg=BG).pack(anchor="w")
         s_max_q = tk.IntVar(value=cfg.get("maxQueueSize", 0))
         tk.Spinbox(kf, from_=0, to=999_999, increment=1_000,
                    textvariable=s_max_q, width=10, bg=SEL, fg=_C["fg_bright"],
-                   insertbackground="white", relief="flat", font=("Segoe UI", 9),
+                   insertbackground="white", relief="flat", font=_font(9),
                    buttonbackground=SEL).pack(anchor="w", ipady=3, pady=(2, 0))
 
         # Queues to show
@@ -1911,7 +2234,7 @@ class JiraOverlay:
             tk.Radiobutton(body, text=name, variable=s_tray_badge, value=name,
                            fg=FG, bg=BG, selectcolor=SEL,
                            activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=("Segoe UI", 9)).pack(anchor="w", padx=16)
+                           font=_font(9)).pack(anchor="w", padx=16)
 
         # Alert queues
         section("Alert queues (trigger overlay + notifications)")
@@ -1928,16 +2251,16 @@ class JiraOverlay:
         sf = tk.Frame(body, bg=BG)
         sf.pack(fill="x", padx=16, pady=(0, 4))
         tk.Label(sf, text="SLA field name:",
-                 font=("Segoe UI", 9), fg=FG, bg=BG).pack(anchor="w")
+                 font=_font(9), fg=FG, bg=BG).pack(anchor="w")
         s_sla = tk.StringVar(value=cfg.get("slaField", "Time to resolution"))
         tk.Entry(sf, textvariable=s_sla, bg=SEL, fg=_C["fg_bright"],
-                 insertbackground="white", relief="flat", font=("Segoe UI", 9)
+                 insertbackground="white", relief="flat", font=_font(9)
                  ).pack(fill="x", ipady=3, pady=(2, 6))
         tk.Label(sf, text='Extra JQL filter (e.g. "assignee is not EMPTY"):',
-                 font=("Segoe UI", 8), fg=FG, bg=BG).pack(anchor="w")
+                 font=_font(8), fg=FG, bg=BG).pack(anchor="w")
         s_completed_filter = tk.StringVar(value=cfg.get("completedTodayFilter", ""))
         tk.Entry(sf, textvariable=s_completed_filter, bg=SEL, fg=_C["fg_bright"],
-                 insertbackground="white", relief="flat", font=("Segoe UI", 9)
+                 insertbackground="white", relief="flat", font=_font(9)
                  ).pack(fill="x", ipady=3, pady=(2, 0))
 
         # System
@@ -1947,7 +2270,7 @@ class JiraOverlay:
         tk.Frame(body, bg=BG, height=4).pack()
         tk.Button(body, text="⚙  Reconfigure credentials…",
                   command=self._reconfigure, bg=SEL, fg=FG,
-                  font=("Segoe UI", 9), relief="flat", padx=8, pady=4,
+                  font=_font(9), relief="flat", padx=8, pady=4,
                   cursor="hand2").pack(anchor="w", padx=16, pady=(0, 8))
 
         # Save / Cancel
@@ -1976,7 +2299,8 @@ class JiraOverlay:
                 "maxQueueSize":         max_q,
             })
             save_config(self.config)
-            for rw in self.row_widgets.values():
+            for row_name, rw in self.row_widgets.items():
+                self._cancel_flash(row_name)
                 rw["row"].destroy()
             self.row_widgets.clear()
             if self.loading:
@@ -1988,12 +2312,12 @@ class JiraOverlay:
         bf = tk.Frame(self.settings_panel, bg=BG)
         bf.pack(fill="x", pady=(6, 2), padx=2)
         save_btn = tk.Button(bf, text="✓  Save", command=_save,
-                  bg=_C["accent"], fg="white", font=("Segoe UI", 9, "bold"),
+                  bg=_C["accent"], fg="white", font=_font(9, "bold"),
                   relief="flat", padx=10, pady=6, cursor="hand2", bd=0,
                   activebackground=_C["accent_hi"], activeforeground="white")
         save_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
         cancel_btn = tk.Button(bf, text="✕  Cancel", command=self._close_settings,
-                  bg=SEL, fg=FG, font=("Segoe UI", 9),
+                  bg=SEL, fg=FG, font=_font(9),
                   relief="flat", padx=10, pady=6, cursor="hand2", bd=0,
                   activebackground=_C["chip"], activeforeground=_C["fg_bright"])
         cancel_btn.pack(side="left", fill="x", expand=True)
@@ -2012,6 +2336,9 @@ class JiraOverlay:
                 os.remove(CONFIG_FILE)
             except OSError:
                 pass
+            # Hand the single-instance mutex over before spawning the
+            # replacement, or it would see us still holding it and exit.
+            release_single_instance()
             # Relaunch so the setup window actually appears (previously this
             # just quit and the user had to start the app again by hand)
             subprocess.Popen([_pythonw_exe(), os.path.abspath(__file__)],
@@ -2031,6 +2358,8 @@ class JiraOverlay:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    if not acquire_single_instance():
+        return          # another overlay already has the tray icon
     config = load_config()
     if not config:
         setup  = SetupWindow()
