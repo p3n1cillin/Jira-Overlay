@@ -90,6 +90,8 @@ After `setup.bat` finishes, the app starts and walks you through the rest:
    - **Email** your Atlassian account email
    - **API Token** click the 🔑 link in the dialog to open the token page directly
 
+   Paste the address however you like — a full URL such as `https://yourcompany.atlassian.net/browse/SD-1` is reduced to just the host. The details are checked against Jira before anything is saved, so a wrong token is caught there and then rather than showing up later as a silent failure.
+
 2. **Service desk** — if your account has access to multiple service desks, a picker appears. Click the one you want to monitor.
 
 3. **Alert queue** — a list of all your queues appears. Click one to set your initial alert queue (the one that triggers popups and notifications). You can add more alert queues later in Settings.

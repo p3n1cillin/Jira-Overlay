@@ -354,6 +354,31 @@ _OVERLAY_KEYS = {
 }
 
 
+def normalise_domain(raw: str) -> str:
+    """Reduce whatever the user pasted to a bare Jira host.
+
+    People copy the address out of their browser, so the field regularly
+    arrives as a full URL - often a link to a specific ticket. Keeping the
+    path turned every later request into a 404 with nothing to explain it,
+    so take the host and discard the rest. Returns "" if there is no host
+    to be found, which the caller reports rather than saving.
+    """
+    text = (raw or "").strip().strip("/")
+    if not text:
+        return ""
+    if "//" not in text:
+        text = "//" + text          # urlsplit needs a scheme to find a host
+    host = urllib.parse.urlsplit(text).netloc or ""
+    host = host.split("@")[-1]      # drop any user:pass@
+    if host.endswith(":443"):
+        host = host[:-4]
+    host = host.strip().lower()
+    # A host has at least one dot and no path, space or wildcard in it.
+    if "." not in host or any(c in host for c in ' /\\?#'):
+        return ""
+    return host
+
+
 def save_config(cfg: dict) -> None:
     """Atomic write — a crash mid-save can't corrupt the existing config.
 
@@ -660,7 +685,7 @@ class SetupWindow:
     def _build(self) -> None:
         self.root.update_idletasks()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"430x295+{sw // 2 - 215}+{sh // 2 - 147}")
+        self.root.geometry(f"430x320+{sw // 2 - 215}+{sh // 2 - 160}")
 
         tk.Label(self.root, text="Jira Overlay Setup",
                  font=_font(14, "bold"),
@@ -707,7 +732,10 @@ class SetupWindow:
                   bg=_C["accent"], fg="white", font=_font(10, "bold"),
                   relief="flat", padx=16, pady=8, cursor="hand2",
                   activebackground=_C["accent_hi"], activeforeground="white"
-                  ).grid(row=5, column=0, columnspan=2, pady=(4, 20))
+                  ).grid(row=5, column=0, columnspan=2, pady=(4, 4))
+        self._status = tk.Label(self.root, text="", font=_font(8),
+                                fg=_C["fg_dim"], bg=_C["bg_dark"])
+        self._status.grid(row=6, column=0, columnspan=2, pady=(0, 14))
         self.root.columnconfigure(1, weight=1)
 
     def _save(self) -> None:
@@ -718,12 +746,69 @@ class SetupWindow:
                 messagebox.showerror("Missing", f"{label} is required.", parent=self.root)
                 return
             values[label] = v
-        domain = (values["Jira Domain"].strip("/")
-                  .replace("https://", "").replace("http://", ""))
-        self.result = {"domain": domain, "email": values["Email"],
-                       "token": values["API Token"]}
+        domain = normalise_domain(values["Jira Domain"])
+        if not domain:
+            messagebox.showerror(
+                "Jira Domain",
+                "That doesn't look like a Jira address.\n\n"
+                "It should be just the host, like:\n"
+                "    yourcompany.atlassian.net",
+                parent=self.root)
+            return
+        candidate = {"domain": domain, "email": values["Email"],
+                     "token": values["API Token"]}
+        problem = self._check_credentials(candidate)
+        if problem:
+            messagebox.showerror("Could not sign in", problem, parent=self.root)
+            return
+        self.result = candidate
         save_config(self.result)
         self.root.destroy()
+
+    def _check_credentials(self, cfg: dict) -> str:
+        """Try the credentials now; return a problem description, or "".
+
+        Without this the first sign a token is wrong is a two-word status
+        line some minutes later, by which point the user has moved on and
+        has no idea which of the three fields is at fault.
+        """
+        self._busy("Checking your details...")
+        try:
+            r = requests.get(
+                f"https://{cfg['domain']}/rest/api/3/myself",
+                auth=HTTPBasicAuth(cfg["email"], cfg["token"]),
+                headers={"Accept": "application/json"}, timeout=15)
+        except requests.RequestException as exc:
+            return (f"Could not reach {cfg['domain']}.\n\n"
+                    "Check the domain and your internet connection.\n\n"
+                    f"({type(exc).__name__})")
+        finally:
+            self._busy("")
+
+        if r.status_code in (401, 403):
+            return ("Jira rejected the email or API token.\n\n"
+                    "The token must belong to the same account as the email, "
+                    "and tokens expire - create a fresh one if in doubt.")
+        if r.status_code == 404:
+            return (f"{cfg['domain']} answered, but doesn't look like a Jira "
+                    "site.\n\nCheck the domain.")
+        if not r.ok:
+            return f"Jira returned HTTP {r.status_code} when signing in."
+        try:
+            who = r.json().get("displayName") or cfg["email"]
+        except ValueError:
+            who = cfg["email"]
+        messagebox.showinfo("Signed in", f"Connected to Jira as {who}.",
+                            parent=self.root)
+        return ""
+
+    def _busy(self, text: str) -> None:
+        """Show progress while the sign-in check runs, since it blocks."""
+        try:
+            self._status.config(text=text)
+            self.root.update()
+        except tk.TclError:
+            pass
 
 
 # ---------------------------------------------------------------------------
