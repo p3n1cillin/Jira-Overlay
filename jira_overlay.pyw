@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -349,7 +350,7 @@ _OVERLAY_KEYS = {
     "skipKeywords", "maxQueueSize", "refreshSeconds", "alertQueuesAsked",
     "notificationsEnabled", "soundEnabled",
     "alpha", "overlayWidth", "alwaysVisible",
-    "slaField", "slaEnabled", "slaUnavailable",
+    "slaField", "slaEnabled",
     "completedTodayFilter", "suggestionsFile",
     "lastX", "lastY", "snapCorner",
 }
@@ -411,6 +412,16 @@ def save_config(cfg: dict) -> None:
     for key in _OVERLAY_KEYS - _IDENTITY_KEYS:
         merged.pop(key, None)
     merged.update(cfg)
+
+    # Keep the last good copy. This file holds an API token and a service
+    # desk id that nobody can reconstruct from memory, and a bad write is
+    # only ever noticed after the fact.
+    try:
+        if os.path.exists(CONFIG_FILE):
+            shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
+    except OSError:
+        pass
+
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2)
@@ -1035,7 +1046,10 @@ class JiraOverlay:
         self.new_issues: list[dict]  = []
         self.completed_today         = 0
         self.sla_compliance: Optional[int] = None
-        self._sla_unavailable  = bool(config.get("slaUnavailable", False))
+        # Session-only: see _fetch_completion_stats. An older build
+        # persisted this; drop the value rather than honouring it.
+        self._sla_unavailable  = False
+        config.pop("slaUnavailable", None)
         self._settings_changed = False
         self._in_settings      = False
         self._queue_geom: Optional[tuple[int, int, int, int]] = None
@@ -1979,10 +1993,13 @@ class JiraOverlay:
                 # without SLAs it always will be. Remember it, or every launch
                 # repeats a request that cannot succeed. A transient failure
                 # just leaves the figure blank for this cycle.
-                if rejected and not self._sla_unavailable:
-                    self._sla_unavailable = True
-                    self.config["slaUnavailable"] = True
-                    save_config(self.config)
+                # Held for this session only. Persisting it looked like a
+                # cheap saving - one skipped request per launch - but it wrote
+                # a conclusion to disk that the user then had no obvious way
+                # to undo, and a wrong one sticks until they think to toggle
+                # an SLA setting. One extra failing request per launch is a
+                # far better trade than a sticky wrong state.
+                self._sla_unavailable = self._sla_unavailable or rejected
                 self.sla_compliance = None
             else:
                 self.sla_compliance = round(
@@ -2758,7 +2775,6 @@ class JiraOverlay:
             # again, so drop any "this desk has no such field" latch.
             if (s_sla_on.get() != was_sla_on) or (s_sla.get().strip() != was_sla_field):
                 self._sla_unavailable = False
-                self.config.pop("slaUnavailable", None)
             save_config(self.config)
             # Width may have changed — refit the header to the new space.
             self.lbl_title.config(text=self._title_text(
