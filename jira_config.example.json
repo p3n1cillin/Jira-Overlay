@@ -1,15 +1,15 @@
 {
   "_comment": "Copy to jira_config.json. Only domain, email and token are required — the overlay's setup dialog writes those for you and discovers the rest. Every key below the first block is optional; delete any you don't want to pin.",
-
   "domain": "yourcompany.atlassian.net",
   "email": "you@yourcompany.com",
   "token": "YOUR_API_TOKEN_HERE",
-
   "_overlay": "--- discovered on first run, or set from the Settings panel ---",
   "serviceDeskId": 1,
   "serviceDeskName": "Service Desk",
   "projectKey": "SD",
-  "alertQueues": ["Newly Opened"],
+  "alertQueues": [
+    "Newly Opened"
+  ],
   "trayBadgeQueue": "Newly Opened",
   "hiddenQueues": [],
   "skipKeywords": [],
@@ -21,13 +21,16 @@
   "alpha": 0.93,
   "overlayWidth": 260,
   "slaField": "Time to resolution",
+  "slaEnabled": true,
   "completedTodayFilter": "",
-
   "_triage": "--- optional: the shadow learner discovers all of these ---",
   "triageStatuses": [],
   "resolvedStatuses": [],
   "moveTargetProjects": [],
-  "contextFields": ["Affected services", "Organizations"],
+  "contextFields": [
+    "Affected services",
+    "Organizations"
+  ],
   "resolvedLabel": "",
   "movedLabel": "Moved to {project}",
   "movedLabels": {}

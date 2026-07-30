@@ -349,7 +349,8 @@ _OVERLAY_KEYS = {
     "skipKeywords", "maxQueueSize", "refreshSeconds",
     "notificationsEnabled", "soundEnabled",
     "alpha", "overlayWidth", "alwaysVisible",
-    "slaField", "completedTodayFilter", "suggestionsFile",
+    "slaField", "slaEnabled", "slaUnavailable",
+    "completedTodayFilter", "suggestionsFile",
     "lastX", "lastY", "snapCorner",
 }
 
@@ -1021,7 +1022,7 @@ class JiraOverlay:
         self.new_issues: list[dict]  = []
         self.completed_today         = 0
         self.sla_compliance: Optional[int] = None
-        self._sla_unavailable  = False
+        self._sla_unavailable  = bool(config.get("slaUnavailable", False))
         self._settings_changed = False
         self._in_settings      = False
         self._queue_geom: Optional[tuple[int, int, int, int]] = None
@@ -1933,19 +1934,31 @@ class JiraOverlay:
                 return
             self.completed_today = total_n
 
-            if self._sla_unavailable or total_n == 0:
+            # SLAs are a Jira Service Management Premium feature, so plenty of
+            # desks simply haven't got them. An empty field name means the
+            # user has turned this off, and we ask Jira nothing at all.
+            # Absent means "never configured", so fall back to the usual JSM
+            # field name. Present but empty means the user cleared it on
+            # purpose, which is one of the ways to turn this off.
+            sla_field = (cfg.get("slaField", "Time to resolution") or "").strip()
+            if (not cfg.get("slaEnabled", True) or not sla_field
+                    or self._sla_unavailable or total_n == 0):
                 self.sla_compliance = None
                 return
 
-            sla_field = cfg.get("slaField", "Time to resolution")
             breached, rejected = self._count_issues(
                 base_jql + f' AND "{sla_field}" = slaBreached()')
             if breached is None:
                 # Only stop asking when Jira rejected the query outright —
-                # that means the SLA field is missing or renamed. A transient
-                # failure just leaves the figure blank for this cycle.
-                self._sla_unavailable = self._sla_unavailable or rejected
-                self.sla_compliance   = None
+                # that means the field is missing or renamed, which on a desk
+                # without SLAs it always will be. Remember it, or every launch
+                # repeats a request that cannot succeed. A transient failure
+                # just leaves the figure blank for this cycle.
+                if rejected and not self._sla_unavailable:
+                    self._sla_unavailable = True
+                    self.config["slaUnavailable"] = True
+                    save_config(self.config)
+                self.sla_compliance = None
             else:
                 self.sla_compliance = round(
                     (total_n - breached) / total_n * 100)
@@ -2647,14 +2660,27 @@ class JiraOverlay:
 
         # SLA & completed today
         section("SLA & completed today")
+        s_sla_on = tk.BooleanVar(value=cfg.get("slaEnabled", True))
+        check(body, "Show SLA compliance", s_sla_on)
         sf = tk.Frame(body, bg=BG)
         sf.pack(fill="x", padx=16, pady=(0, 4))
         tk.Label(sf, text="SLA field name:",
                  font=_font(9), fg=FG, bg=BG).pack(anchor="w")
         s_sla = tk.StringVar(value=cfg.get("slaField", "Time to resolution"))
-        tk.Entry(sf, textvariable=s_sla, bg=SEL, fg=_C["fg_bright"],
-                 insertbackground="white", relief="flat", font=_font(9)
-                 ).pack(fill="x", ipady=3, pady=(2, 6))
+        sla_entry = tk.Entry(sf, textvariable=s_sla, bg=SEL,
+                             fg=_C["fg_bright"], insertbackground="white",
+                             relief="flat", font=_font(9))
+        sla_entry.pack(fill="x", ipady=3, pady=(2, 2))
+        tk.Label(sf, text="Plenty of teams have SLAs and don't track them.\n"
+                          "Turn this off and the overlay stops asking Jira "
+                          "about them entirely.",
+                 font=_font(8), fg=_C["fg_dim"], bg=BG,
+                 justify="left").pack(anchor="w", pady=(0, 6))
+
+        def _sync_sla_entry(*_a: object) -> None:
+            sla_entry.config(state="normal" if s_sla_on.get() else "disabled")
+        s_sla_on.trace_add("write", _sync_sla_entry)
+        _sync_sla_entry()
         tk.Label(sf, text='Extra JQL filter (e.g. "assignee is not EMPTY"):',
                  font=_font(8), fg=FG, bg=BG).pack(anchor="w")
         s_completed_filter = tk.StringVar(value=cfg.get("completedTodayFilter", ""))
@@ -2673,6 +2699,9 @@ class JiraOverlay:
                   cursor="hand2").pack(anchor="w", padx=16, pady=(0, 8))
 
         # Save / Cancel
+        was_sla_on    = bool(cfg.get("slaEnabled", True))
+        was_sla_field = (cfg.get("slaField") or "").strip()
+
         def _save() -> None:
             set_startup(s_startup.get())
             alert_list = [n for n, v in s_alert_vars.items() if v.get()]
@@ -2691,12 +2720,20 @@ class JiraOverlay:
                 "alwaysVisible":        s_always.get(),
                 "alertQueues":          alert_list,
                 "alertQueue":           alert_list[0] if alert_list else "",
-                "slaField":             s_sla.get().strip() or "Time to resolution",
+                "slaEnabled":           s_sla_on.get(),
+                # No fallback to the default here: forcing it back meant the
+                # setting could never actually be turned off.
+                "slaField":             s_sla.get().strip(),
                 "completedTodayFilter": s_completed_filter.get().strip(),
                 "skipKeywords":         [k.strip() for k in s_skip_kw.get().split(",")
                                          if k.strip()],
                 "maxQueueSize":         max_q,
             })
+            # Changing either SLA setting is the user telling us to try
+            # again, so drop any "this desk has no such field" latch.
+            if (s_sla_on.get() != was_sla_on) or (s_sla.get().strip() != was_sla_field):
+                self._sla_unavailable = False
+                self.config.pop("slaUnavailable", None)
             save_config(self.config)
             # Width may have changed — refit the header to the new space.
             self.lbl_title.config(text=self._title_text(

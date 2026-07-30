@@ -146,7 +146,8 @@ Click the **gear** in the overlay header to open Settings inline. All changes ta
 | **Queues to show** | Per-queue visibility toggles |
 | **Tray badge shows** | Which queue's count appears on the tray icon badge |
 | **Alert queues** | One or more queues that trigger the overlay + notifications |
-| **SLA field name** | The Jira field used for SLA compliance (default: `Time to resolution`) — leave blank to disable SLA tracking |
+| **Show SLA compliance** | Off by choice is fine — plenty of teams have SLAs and don't track them. Turned off, the overlay stops asking Jira about them altogether |
+| **SLA field name** | Which Jira field to measure against (default: `Time to resolution`). Only used when the above is on |
 | **Completed today filter** | Extra JQL appended to the completed-today query e.g. `assignee is not EMPTY` |
 | **Run on Windows startup** | Adds to `HKCU\...\Run` registry key |
 
@@ -263,7 +264,7 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 | Symptom | Fix |
 |---|---|
 | "HTTP 401 — check credentials" | Regenerate your API token and paste it via **Settings → Reconfigure credentials** |
-| SLA % never appears | Enter the exact SLA field name from your Jira instance in Settings (e.g. `Time to first response`) |
+| SLA % never appears | Either it's switched off in Settings, or the field name doesn't match yours — try `Time to first response`. If your plan has no SLAs at all, leave it off; the overlay detects a missing field and stops asking |
 | Queues missing | Check **Settings → Hide queues whose name contains** or the max-ticket threshold |
 | Overlay appears on wrong monitor | Drag it to the right monitor — it saves position automatically |
 | Notifications not appearing | Check Windows Focus Assist / Do Not Disturb settings |
