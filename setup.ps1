@@ -30,7 +30,22 @@ function Write-Bad($text)      { Write-Host "    $text" -ForegroundColor Red }
 # Find a Python we can use
 # --------------------------------------------------------------------------
 
+function Test-StoreStub($exe) {
+    # Windows ships a 0-byte "app execution alias" at
+    # WindowsApps\python.exe. It is not Python: running it opens the
+    # Microsoft Store, which is the last thing anyone wants mid-install. It
+    # has to be recognised without being executed.
+    try {
+        $item = Get-Item -LiteralPath $exe -Force -ErrorAction Stop
+        return ($item.Length -eq 0) -or
+               ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    } catch {
+        return $false
+    }
+}
+
 function Get-PythonVersion($exe) {
+    if (Test-StoreStub $exe) { return $null }
     try {
         $out = & $exe -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
         if ($LASTEXITCODE -eq 0 -and $out) { return [Version]$out.Trim() }
@@ -64,8 +79,6 @@ function Find-Python {
     }
 
     foreach ($exe in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
-        # The Store's placeholder python.exe is a stub that just opens the Store.
-        if ($exe -like '*WindowsApps*' -and -not (Get-PythonVersion $exe)) { continue }
         $ver = Get-PythonVersion $exe
         if ($ver -and $ver -ge $MinVersion) {
             return [pscustomobject]@{ Exe = $exe; Version = $ver }

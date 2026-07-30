@@ -52,6 +52,16 @@ def handoff_dests(records: list[dict], w=None) -> set[str]:
 
 def build() -> None:
     w = tl.ShadowWatcher()          # reuses config, Jira client, changelog logic
+    # The watcher only works out this site's statuses when its main loop
+    # starts, so do it here too — otherwise a fresh install has no handoff or
+    # resolved statuses and every query below is malformed.
+    if not w.ensure_workflow_known():
+        print("Could not work out this project's workflow. Check projectKey "
+              "and your credentials in jira_config.json, or set "
+              "triageStatuses / resolvedStatuses by hand.")
+        return
+    print(f"project {w.project}: handoffs={w.dests or 'none'} "
+          f"resolved={sorted(w.resolved)} moves={w.move_targets or 'none'}")
     cutoff = f"{datetime.now() - timedelta(days=tl.BACKFILL_DAYS):%Y-%m-%d}"
     records: list[dict] = []
     seen: set[str] = set()
@@ -69,7 +79,10 @@ def build() -> None:
     dest_list = ", ".join(f'"{d}"' for d in w.dests)
     jql = (f'project = {w.project} AND status CHANGED TO ({dest_list}) '
            f'AFTER -{tl.BACKFILL_DAYS}d ORDER BY updated DESC')
-    for issue in w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP):
+    # "status CHANGED TO ()" is not valid JQL; a project where everything is
+    # resolved in place simply has nothing for this pass to find.
+    for issue in (w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP)
+                  if w.dests else []):
         det = w._issue_details(issue)
         routed, _ = w._transitions(det["key"])
         req = det.get("requestType", "")
@@ -131,6 +144,21 @@ def build() -> None:
 # ---------------------------------------------------------------------------
 
 WARMUP = 150     # don't score the first N (model barely trained)
+
+
+def load_dataset() -> Optional[list[dict]]:
+    """Records from the last `build`, or None with an explanation."""
+    try:
+        with open(DATASET, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"No dataset yet at {DATASET}\n"
+              "Run this first:   python triage_eval.py build")
+        return None
+    except json.JSONDecodeError as exc:
+        print(f"{DATASET} is corrupt ({exc}). Rebuild it with:   "
+              "python triage_eval.py build")
+        return None
 
 
 def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
@@ -218,8 +246,9 @@ DEFAULT_CFG = {"logOdds": 1, "summaryWeight": 6, "mistakeWeight": 3,
 def review_bands() -> None:
     """Show how the 'review' flag splits reliable suggestions from the
     error-prone ones, across a few thresholds."""
-    with open(DATASET, encoding="utf-8") as f:
-        records = [json.loads(line) for line in f]
+    records = load_dataset()
+    if records is None:
+        return
     handoffs = handoff_dests(records)
     team = [r["when"] for r in records if r["dest"] in handoffs]
     if team:
@@ -238,8 +267,9 @@ def review_bands() -> None:
 
 
 def analyze(cfg: dict) -> None:
-    with open(DATASET, encoding="utf-8") as f:
-        records = [json.loads(line) for line in f]
+    records = load_dataset()
+    if records is None:
+        return
     handoffs = handoff_dests(records)
     team = [r["when"] for r in records if r["dest"] in handoffs]
     if team:
@@ -266,8 +296,9 @@ def analyze(cfg: dict) -> None:
 
 
 def tune() -> None:
-    with open(DATASET, encoding="utf-8") as f:
-        records = [json.loads(line) for line in f]
+    records = load_dataset()
+    if records is None:
+        return
 
     # Handoffs may have started only recently: train from the first
     # handoff onward, else earlier resolutions teach the wrong lesson.
