@@ -2011,6 +2011,19 @@ class JiraOverlay:
                 self.row_widgets[name]["row"].destroy()
                 del self.row_widgets[name]
 
+        # Nothing to show is ambiguous on its own: a brand-new service desk
+        # with no queues looks exactly like one where every queue has been
+        # filtered out. Say which, rather than leaving an empty box that
+        # claims to be live.
+        if not self.queues and not self._conn_error:
+            note = ("All queues are hidden — see Settings"
+                    if self._all_queue_names else
+                    "No queues found in this service desk")
+            hint = tk.Label(self.rows_frame, text=note, font=_font(8),
+                            fg=_C["fg_dim"], bg=_C["bg"], pady=6)
+            hint.pack()
+            self._bind_drag(hint)
+
         alert_qs = self._alert_queues
 
         for q in self.queues:
