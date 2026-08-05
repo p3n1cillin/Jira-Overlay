@@ -1,0 +1,153 @@
+"""Window placement and network retry.
+
+Neither has misbehaved; both are the sort of thing that breaks quietly on
+somebody else's machine - a monitor that isn't there any more, a Jira that
+is rate-limiting - so they are pinned down here.
+"""
+
+import os
+import sys
+import threading
+import time
+
+import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _harness import Checker, load_learner, load_overlay      # noqa: E402
+
+check = Checker("placement and retry")
+ov = load_overlay()
+
+# --- Window placement ------------------------------------------------------
+
+MONITOR = (0, 0, 1920, 1032)
+WIDTH, HEIGHT = 260, 300
+
+
+def place(cfg, monitor):
+    """Returns (x, y, config-after) from one _reposition."""
+    o = object.__new__(ov.JiraOverlay)
+    o.config = dict(cfg)
+    o._sw, o._sh = 1920, 1080
+    placed = {}
+
+    class FakeRoot:
+        def update_idletasks(self):
+            pass
+
+        def winfo_width(self):
+            return WIDTH
+
+        def winfo_height(self):
+            return HEIGHT
+
+        def winfo_x(self):
+            return 100
+
+        def winfo_y(self):
+            return 100
+
+        def geometry(self, spec):
+            placed["spec"] = spec
+
+    o.root = FakeRoot()
+    ov.get_monitor_rect = lambda x, y, work=False, m=monitor: m
+    ov.JiraOverlay._reposition(o)
+    x, y = (int(v) for v in placed["spec"].lstrip("+").split("+"))
+    return x, y, o.config
+
+
+for label, cfg, monitor in [
+        ("a saved corner", {"snapCorner": "top-left"}, MONITOR),
+        ("a corner name it doesn't know", {"snapCorner": "nowhere"}, MONITOR),
+        ("a saved position", {"lastX": 300, "lastY": 400}, MONITOR),
+        ("a position far off the right", {"lastX": 99999, "lastY": 99999}, MONITOR),
+        ("a negative position", {"lastX": -5000, "lastY": -5000}, MONITOR),
+        ("nothing saved at all", {}, MONITOR)]:
+    x, y, _cfg = place(cfg, MONITOR)
+    on_screen = (MONITOR[0] <= x and MONITOR[1] <= y
+                 and x + WIDTH <= MONITOR[2] and y + HEIGHT <= MONITOR[3])
+    check(f"the overlay lands on screen given {label}", on_screen, f"({x}, {y})")
+
+# A monitor that has been unplugged since the position was saved.
+x, y, cfg_after = place({"lastX": 300, "lastY": 400}, None)
+check("an unplugged monitor falls back to a corner",
+      cfg_after.get("snapCorner") == "bottom-right"
+      and "lastX" not in cfg_after, str(cfg_after))
+
+
+# --- Network retry ---------------------------------------------------------
+
+tl = load_learner()
+
+
+class Response:
+    def __init__(self, code, retry_after=None):
+        self.status_code = code
+        self.ok = 200 <= code < 300
+        self.headers = {"Retry-After": retry_after} if retry_after else {}
+        self.request = type("R", (), {"method": "GET", "path_url": "/x"})()
+
+    def json(self):
+        return {}
+
+
+def client(responses, stop=None, real_backoff=False):
+    """A Jira client wired to canned responses.
+
+    The backoff is skipped unless a test is specifically about timing -
+    waiting out the real 1+2+4+8 seconds would make this suite slow enough
+    that people stop running it.
+    """
+    jira = object.__new__(tl.Jira)
+    jira.domain = "x"
+    jira.stop = stop
+    jira._refusals = set()
+    attempts = []
+    it = iter(responses)
+
+    class Session:
+        def request(self, *a, **k):
+            attempts.append(time.perf_counter())
+            nxt = next(it)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+    jira.session = Session()
+    if not real_backoff:
+        jira._pause = lambda seconds: (stop.wait(0) if stop else False)
+    return jira, attempts
+
+
+for label, responses, want_attempts, want_result in [
+        ("a first-time success", [Response(200)], 1, 200),
+        ("a 500 then success", [Response(500), Response(200)], 2, 200),
+        ("a 429 then success", [Response(429, "1"), Response(200)], 2, 200),
+        ("a dropped connection",
+         [requests.ConnectionError(), Response(200)], 2, 200),
+        ("a persistent 500", [Response(500)] * 6, 5, None)]:
+    jira, attempts = client(responses)
+    result = jira._send("GET", "/x")
+    got = None if result is None else result.status_code
+    check(f"{label} takes {want_attempts} attempt(s)",
+          len(attempts) == want_attempts, f"{len(attempts)}")
+    check(f"  ...and returns {want_result}", got == want_result, str(got))
+
+# Rejections are permanent, so retrying them only delays the report.
+for code in (401, 403, 404):
+    jira, attempts = client([Response(code)])
+    jira._send("GET", "/x")
+    check(f"an HTTP {code} is not retried", len(attempts) == 1, str(len(attempts)))
+
+# Quitting must not wait out a backoff.
+stop = threading.Event()
+jira, attempts = client([Response(500)] * 6, stop=stop, real_backoff=True)
+threading.Timer(0.3, stop.set).start()
+started = time.perf_counter()
+jira._send("GET", "/x")
+elapsed = time.perf_counter() - started
+check("Quit aborts a backoff instead of waiting it out", elapsed < 2.0,
+      f"{elapsed:.2f}s")
+
+sys.exit(check.done())

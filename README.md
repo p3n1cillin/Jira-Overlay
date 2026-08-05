@@ -297,7 +297,7 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 python tests/run_all.py
 ```
 
-No test framework needed. Each suite runs in its own process, because several patch imports or Tk.
+No test framework needed, and the whole suite runs in a few seconds. Each suite runs in its own process, because several patch imports or Tk.
 
 | Suite | Covers |
 |---|---|
@@ -305,6 +305,7 @@ No test framework needed. Each suite runs in its own process, because several pa
 | `test_overlay.py` | SLA on/off, the alert-queue picker, startup registration, the event pump |
 | `test_report.py` | Team report periods, the JQL it builds, ranking |
 | `test_learner.py` | Self-configuration against a **fictional service desk** with nothing in common with any real one |
+| `test_resilience.py` | Window placement across monitors, and network retry/backoff |
 | `test_setup.py` | First run on a machine with no dependencies, and a failed install |
 
 The suites never touch a real `jira_config.json` — they point at a temporary one. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
