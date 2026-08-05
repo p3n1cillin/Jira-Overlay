@@ -21,17 +21,20 @@ import functools
 import importlib.util
 import json
 import os
+import csv
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import webbrowser
 import winreg
 import winsound
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 import tkinter as tk
 from tkinter import messagebox
@@ -351,6 +354,7 @@ _OVERLAY_KEYS = {
     "notificationsEnabled", "soundEnabled",
     "alpha", "overlayWidth", "alwaysVisible",
     "slaField", "slaEnabled",
+    "reportUsers", "reportRange", "reportBasis",
     "completedTodayFilter", "suggestionsFile",
     "lastX", "lastY", "snapCorner",
 }
@@ -888,6 +892,418 @@ class PickDeskWindow:
 
 
 # ---------------------------------------------------------------------------
+# Team report — who completed the most, over a period you choose
+# ---------------------------------------------------------------------------
+
+# label -> how many days back from today; None means "pick the dates yourself"
+REPORT_RANGES = [("Today", 0), ("7 days", 6), ("30 days", 29),
+                 ("90 days", 89), ("Custom", None)]
+
+# Which Jira date a ticket is counted against.
+#   resolved — when it was actually finished. Accurate, but only populated if
+#              the workflow sets a resolution.
+#   updated  — last touched. Always present, and what the overlay's
+#              "Completed today" figure already uses, so the two reconcile.
+REPORT_BASES = [("Resolved date", "resolved"), ("Last updated", "updated")]
+
+
+def report_users(cfg: dict) -> list[dict]:
+    """People to report on, as [{"name":…, "accountId":…}].
+
+    Accepts a plain list of names too, so a hand-edited config keeps working.
+    Falls back to parsing the completed-today filter, which is where an
+    existing install already lists its team.
+    """
+    raw = cfg.get("reportUsers")
+    if isinstance(raw, list) and raw:
+        out = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append({"name": item, "accountId": ""})
+            elif isinstance(item, dict) and item.get("name"):
+                out.append({"name": item["name"],
+                            "accountId": item.get("accountId", "")})
+        return out
+    # Nothing configured — seed from `assignee in ("A", "B")` if it's there.
+    found = re.findall(r'"([^"]+)"',
+                       cfg.get("completedTodayFilter", "") or "")
+    return [{"name": n, "accountId": ""} for n in found]
+
+
+class TeamReportWindow:
+    """Ranked count of completed tickets per person over a chosen period.
+
+    Counts are one cheap approximate-count per person rather than fetching
+    issues, and they run on a worker thread so the window stays responsive.
+    """
+
+    def __init__(self, app: "JiraOverlay") -> None:
+        self.app  = app
+        self.rows: dict[str, dict] = {}
+        self.results: list[tuple[str, Optional[int]]] = []
+        self._seq = 0            # ignore results from a superseded request
+        self._closed = False
+
+        cfg = app.config
+        self.win = tk.Toplevel(app.root)
+        self.win.title("Team report")
+        self.win.configure(bg=_C["bg"])
+        self.win.minsize(460, 380)
+        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+        self.win.geometry(f"520x560+{sw // 2 - 260}+{max(20, sh // 2 - 300)}")
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+
+        self.v_range = tk.StringVar(value=cfg.get("reportRange", "30 days"))
+        self.v_basis = tk.StringVar(value=cfg.get("reportBasis", "resolved"))
+        today = date.today()
+        self.v_from  = tk.StringVar(value=str(today - timedelta(days=29)))
+        self.v_to    = tk.StringVar(value=str(today))
+        self.people  = report_users(cfg)
+
+        self._build()
+        self.refresh()
+
+    # -- construction ------------------------------------------------------
+
+    def _build(self) -> None:
+        BG = _C["bg"]
+        outer = tk.Frame(self.win, bg=BG, padx=18, pady=16)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(outer, text=_track("TEAM REPORT"),
+                 font=_font(9, "bold", display=True),
+                 fg=_C["accent"], bg=BG).pack(anchor="w")
+        self.lbl_sub = tk.Label(outer, text="", font=_font(9),
+                                fg=_C["fg_dim"], bg=BG, anchor="w")
+        self.lbl_sub.pack(anchor="w", pady=(2, 10))
+
+        # Period
+        rng = self._range_row = tk.Frame(outer, bg=BG)
+        rng.pack(fill="x")
+        for label, _days in REPORT_RANGES:
+            tk.Radiobutton(rng, text=label, value=label, variable=self.v_range,
+                           command=self._range_changed,
+                           font=_font(9), fg=_C["fg"], bg=BG,
+                           selectcolor=_C["input"], activebackground=BG,
+                           activeforeground=_C["fg_bright"],
+                           highlightthickness=0, bd=0).pack(side="left",
+                                                            padx=(0, 8))
+
+        self.custom = tk.Frame(outer, bg=BG)
+        for text, var in (("From", self.v_from), ("To", self.v_to)):
+            tk.Label(self.custom, text=text, font=_font(8), fg=_C["fg_dim"],
+                     bg=BG).pack(side="left", padx=(0, 4))
+            e = tk.Entry(self.custom, textvariable=var, width=11,
+                         bg=_C["input"], fg=_C["fg_bright"], relief="flat",
+                         insertbackground="white", font=_font(9))
+            e.pack(side="left", padx=(0, 10), ipady=2)
+            e.bind("<Return>", lambda _e: self.refresh())
+        tk.Label(self.custom, text="yyyy-mm-dd", font=_font(8),
+                 fg=_C["fg_dim"], bg=BG).pack(side="left")
+
+        # Basis
+        basis = tk.Frame(outer, bg=BG)
+        basis.pack(fill="x", pady=(10, 0))
+        tk.Label(basis, text="Count by", font=_font(8), fg=_C["fg_dim"],
+                 bg=BG).pack(side="left", padx=(0, 8))
+        for label, value in REPORT_BASES:
+            tk.Radiobutton(basis, text=label, value=value,
+                           variable=self.v_basis, command=self.refresh,
+                           font=_font(9), fg=_C["fg"], bg=BG,
+                           selectcolor=_C["input"], activebackground=BG,
+                           activeforeground=_C["fg_bright"],
+                           highlightthickness=0, bd=0).pack(side="left",
+                                                            padx=(0, 8))
+
+        tk.Frame(outer, bg=_C["divider"], height=1).pack(fill="x", pady=12)
+
+        # Pack the footer against the bottom *before* the results area claims
+        # the remaining space, so a long list can never push the buttons off
+        # the edge of the window.
+        foot = tk.Frame(outer, bg=BG)
+        foot.pack(side="bottom", fill="x", pady=(8, 0))
+        tk.Frame(outer, bg=_C["divider"], height=1).pack(side="bottom",
+                                                         fill="x", pady=(12, 0))
+
+        self.results_frame = tk.Frame(outer, bg=BG)
+        self.results_frame.pack(fill="both", expand=True)
+        for text, cmd in (("People…", self._edit_people),
+                          ("Export CSV", self._export),
+                          ("Refresh", self.refresh)):
+            b = tk.Label(foot, text=text, font=_font(9), fg=_C["fg"],
+                         bg=_C["input"], cursor="hand2", padx=12, pady=5)
+            b.pack(side="left", padx=(0, 8))
+            b.bind("<ButtonRelease-1>", lambda _e, c=cmd: c())
+            b.bind("<Enter>", lambda _e, w=b: w.config(bg=_C["chip"],
+                                                       fg=_C["fg_bright"]))
+            b.bind("<Leave>", lambda _e, w=b: w.config(bg=_C["input"],
+                                                       fg=_C["fg"]))
+        self.lbl_status = tk.Label(foot, text="", font=_font(8),
+                                   fg=_C["fg_dim"], bg=BG)
+        self.lbl_status.pack(side="right")
+        self._range_changed(refresh=False)
+
+    def _range_changed(self, refresh: bool = True) -> None:
+        if self.v_range.get() == "Custom":
+            # Anchored directly beneath the range buttons: packed without
+            # `after`, it lands wherever the packer has got to, which by this
+            # point is below the results list.
+            self.custom.pack(fill="x", pady=(8, 0), after=self._range_row)
+        else:
+            self.custom.pack_forget()
+        if refresh:
+            self.refresh()
+
+    # -- period ------------------------------------------------------------
+
+    def _period(self) -> Optional[tuple[date, date]]:
+        """(start, end) inclusive, or None if the typed dates make no sense."""
+        label = self.v_range.get()
+        days = dict(REPORT_RANGES).get(label)
+        if days is not None:
+            end = date.today()
+            return end - timedelta(days=days), end
+        try:
+            start = date.fromisoformat(self.v_from.get().strip())
+            end   = date.fromisoformat(self.v_to.get().strip())
+        except ValueError:
+            return None
+        return (start, end) if start <= end else (end, start)
+
+    # -- counting ----------------------------------------------------------
+
+    def refresh(self) -> None:
+        if self._closed:
+            return
+        period = self._period()
+        if period is None:
+            self._set_status("Dates must be yyyy-mm-dd", warn=True)
+            return
+        start, end = period
+        self.lbl_sub.config(
+            text=f"{self.app.config.get('serviceDeskName', 'Service desk')}"
+                 f"  ·  {start} to {end}")
+        if not self.people:
+            self._render([], 0)
+            self._set_status("No people chosen yet — use People…")
+            return
+
+        self._seq += 1
+        seq = self._seq
+        self._set_status("Counting…")
+        threading.Thread(target=self._work, args=(seq, start, end),
+                         daemon=True).start()
+
+    def _work(self, seq: int, start: date, end: date) -> None:
+        basis = self.v_basis.get()
+        pk    = self.app.config.get("projectKey", "")
+        # `end` is inclusive, so compare against the following midnight.
+        window = (f'{basis} >= "{start}" AND {basis} < "{end + timedelta(days=1)}"')
+        results: list[tuple[str, Optional[int]]] = []
+        for person in self.people:
+            if self._closed or seq != self._seq:
+                return
+            who = (f'assignee = "{person["accountId"]}"' if person["accountId"]
+                   else f'assignee = "{person["name"]}"')
+            jql = (f'project = {pk} AND statusCategory = Done '
+                   f'AND {window} AND {who}')
+            try:
+                count, _rejected = self.app._count_issues(jql)
+            except Exception:
+                count = None
+            results.append((person["name"], count))
+        total = sum(c for _n, c in results if c is not None)
+        self.app._post(lambda: self._done(seq, results, total))
+
+    def _done(self, seq: int, results: list, total: int) -> None:
+        if self._closed or seq != self._seq:
+            return
+        self.results = results
+        self._render(results, total)
+        failed = [n for n, c in results if c is None]
+        if failed:
+            self._set_status(f"Could not count: {', '.join(failed)}", warn=True)
+        else:
+            self._set_status(f"{total} completed in total")
+
+    # -- rendering ---------------------------------------------------------
+
+    def _render(self, results: list, total: int) -> None:
+        for child in self.results_frame.winfo_children():
+            child.destroy()
+        if not results:
+            tk.Label(self.results_frame,
+                     text="Nothing to show yet.", font=_font(9),
+                     fg=_C["fg_dim"], bg=_C["bg"]).pack(anchor="w")
+            return
+
+        ranked = sorted(results, key=lambda r: (r[1] is None, -(r[1] or 0)))
+        best = max((c or 0) for _n, c in ranked) or 1
+        for place, (name, count) in enumerate(ranked, 1):
+            row = tk.Frame(self.results_frame, bg=_C["bg"])
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=f"{place}.", font=_font(9),
+                     fg=_C["fg_dim"], bg=_C["bg"], width=3,
+                     anchor="w").pack(side="left")
+            tk.Label(row, text=name, font=_font(9),
+                     fg=_C["fg_bright"] if place == 1 else _C["fg"],
+                     bg=_C["bg"], width=20, anchor="w").pack(side="left")
+            shown = "—" if count is None else str(count)
+            tk.Label(row, text=shown, font=_font(9, "bold"),
+                     fg=_C["accent"] if place == 1 else _C["fg"],
+                     bg=_C["badge"], padx=8, width=5).pack(side="right")
+            share = tk.Label(row,
+                             text=f"{100 * (count or 0) // total}%" if total
+                                  else "",
+                             font=_font(8), fg=_C["fg_dim"], bg=_C["bg"],
+                             width=5, anchor="e")
+            share.pack(side="right", padx=(0, 8))
+            # Proportional bar — the quickest way to read a ranking.
+            track = tk.Frame(row, bg=_C["input"], height=6)
+            track.pack(side="left", fill="x", expand=True, padx=(8, 8))
+            track.pack_propagate(False)
+            if count:
+                bar = tk.Frame(track,
+                               bg=_C["accent"] if place == 1 else _C["info"],
+                               height=6)
+                bar.place(relwidth=(count / best), relheight=1)
+
+    def _set_status(self, text: str, warn: bool = False) -> None:
+        if not self._closed:
+            self.lbl_status.config(text=text,
+                                   fg=_C["warn"] if warn else _C["fg_dim"])
+
+    # -- actions -----------------------------------------------------------
+
+    def _edit_people(self) -> None:
+        picked = _PeoplePicker(self.win, self.app, self.people).result
+        if picked is None:
+            return
+        self.people = picked
+        self.app.config["reportUsers"] = picked
+        save_config(self.app.config)
+        self.refresh()
+
+    def _export(self) -> None:
+        if not self.results:
+            self._set_status("Nothing to export yet", warn=True)
+            return
+        period = self._period()
+        start, end = period if period else (date.today(), date.today())
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"team-report-{start}-to-{end}.csv")
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["Person", "Completed", "From", "To", "Counted by"])
+                for name, count in sorted(self.results,
+                                          key=lambda r: -(r[1] or 0)):
+                    w.writerow([name, "" if count is None else count,
+                                start, end, self.v_basis.get()])
+            os.startfile(path)
+            self._set_status(f"Saved {os.path.basename(path)}")
+        except OSError as exc:
+            self._set_status(f"Could not save: {exc}", warn=True)
+
+    def _close(self) -> None:
+        self._closed = True
+        cfg = self.app.config
+        cfg["reportRange"] = self.v_range.get()
+        cfg["reportBasis"] = self.v_basis.get()
+        save_config(cfg)
+        self.win.destroy()
+
+
+class _PeoplePicker:
+    """Choose which people the report covers, from the project's own users."""
+
+    def __init__(self, parent: tk.Misc, app: "JiraOverlay",
+                 current: list[dict]) -> None:
+        self.app = app
+        self.result: Optional[list[dict]] = None
+        self.win = tk.Toplevel(parent)
+        self.win.title("People in the report")
+        self.win.configure(bg=_C["bg"])
+        self.win.geometry("380x460")
+        self.win.transient(parent)
+
+        chosen = {(p.get("accountId") or p["name"]): p for p in current}
+        BG = _C["bg"]
+        tk.Label(self.win, text="Tick everyone the report should cover",
+                 font=_font(9), fg=_C["fg"], bg=BG).pack(anchor="w",
+                                                         padx=16, pady=(14, 8))
+        wrap = tk.Frame(self.win, bg=BG)
+        wrap.pack(fill="both", expand=True, padx=12)
+        canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        sb = tk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        body = tk.Frame(canvas, bg=BG)
+        body.bind("<Configure>",
+                  lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        cw = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(cw, width=e.width))
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        self.vars: list[tuple[tk.BooleanVar, dict]] = []
+        people = self._discover()
+        # Anyone already chosen stays listed even if the lookup missed them.
+        for key, person in chosen.items():
+            if not any((p.get("accountId") or p["name"]) == key
+                       for p in people):
+                people.append(person)
+        for person in sorted(people, key=lambda p: p["name"].lower()):
+            key = person.get("accountId") or person["name"]
+            var = tk.BooleanVar(value=key in chosen)
+            tk.Checkbutton(body, text=person["name"], variable=var,
+                           font=_font(9), fg=_C["fg"], bg=BG,
+                           selectcolor=_C["input"], activebackground=BG,
+                           activeforeground=_C["fg_bright"],
+                           highlightthickness=0, bd=0, anchor="w"
+                           ).pack(fill="x", pady=1)
+            self.vars.append((var, person))
+        scroll = lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units")
+        _bind_wheel(wrap, scroll)
+
+        if not self.vars:
+            tk.Label(body, text="No assignable users came back from Jira.",
+                     font=_font(9), fg=_C["fg_dim"], bg=BG).pack(anchor="w")
+
+        foot = tk.Frame(self.win, bg=BG)
+        foot.pack(fill="x", padx=16, pady=12)
+        tk.Button(foot, text="Save", command=self._save, relief="flat",
+                  bg=_C["accent"], fg="white", font=_font(9, "bold"),
+                  padx=14, pady=5, cursor="hand2").pack(side="left")
+        tk.Button(foot, text="Cancel", command=self.win.destroy,
+                  relief="flat", bg=_C["input"], fg=_C["fg"], font=_font(9),
+                  padx=14, pady=5, cursor="hand2").pack(side="left", padx=8)
+
+        self.win.grab_set()
+        parent.wait_window(self.win)
+
+    def _discover(self) -> list[dict]:
+        """Users Jira says can be assigned work in this project."""
+        pk = self.app.config.get("projectKey", "")
+        try:
+            r = self.app._session.get(
+                self.app._jira_url("/rest/api/3/user/assignable/search"),
+                params={"project": pk, "maxResults": 200}, timeout=15)
+            if not r.ok:
+                return []
+            return [{"name": u.get("displayName", ""),
+                     "accountId": u.get("accountId", "")}
+                    for u in r.json() if u.get("displayName")]
+        except Exception:
+            return []
+
+    def _save(self) -> None:
+        self.result = [person for var, person in self.vars if var.get()]
+        self.win.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Newly-opened ticket tooltip
 # ---------------------------------------------------------------------------
 
@@ -1166,6 +1582,7 @@ class JiraOverlay:
     def _start_tray(self) -> None:
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
+            pystray.MenuItem("Team report", lambda: self._post(self._open_report)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",        lambda: self._post(self.root.destroy)),
         )
@@ -1578,6 +1995,35 @@ class JiraOverlay:
         """
         self._tooltip = None   # popup destroys itself after calling us
         self._user_hide()
+
+    @staticmethod
+    def _log_error(detail: str) -> None:
+        """Record a non-fatal failure. pythonw has no console, so without
+        this the user just sees a feature quietly do nothing."""
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "jira_overlay_error.log"),
+                      "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{detail}\n\n")
+        except OSError:
+            pass
+
+    def _open_report(self) -> None:
+        """Open the team report, or focus it if it is already up."""
+        existing = getattr(self, "_report_win", None)
+        if existing is not None and not existing._closed:
+            try:
+                existing.win.deiconify()
+                existing.win.lift()
+                existing.win.focus_force()
+                return
+            except tk.TclError:
+                pass          # window was destroyed behind our back
+        try:
+            self._report_win = TeamReportWindow(self)
+        except Exception:
+            self._log_error("team report failed to open:\n"
+                            + traceback.format_exc())
 
     def _open_service_desk(self) -> None:
         if self._did_drag:
@@ -2880,7 +3326,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        import traceback
         _report_fatal(traceback.format_exc())
         # The real traceback is already in the log and the dialog.
         raise SystemExit(1) from None

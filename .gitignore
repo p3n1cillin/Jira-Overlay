@@ -21,6 +21,9 @@ triage_dataset.jsonl
 triage_learner.log
 TRIAGE_REPORT.md
 
+# Exported reports may name staff and ticket volumes
+team-report-*.csv
+
 # Crash logs — may quote ticket text
 jira_overlay_error.log
 

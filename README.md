@@ -42,6 +42,7 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 | Windows startup | Optional — toggle in Settings |
 | Fully configurable | Every filter, threshold, SLA field name, and queue is configurable per-user |
 | Single instance | A second launch quietly exits instead of double-polling and double-notifying |
+| Team report | Ranks whoever you choose by tickets completed, over any date range, exportable to CSV |
 | Optional triage learner | A read-only companion that predicts where each new ticket is heading (see below) |
 
 ---
@@ -123,9 +124,28 @@ Once running, the overlay lives in your **system tray**. It only appears on scre
 
 ### Tray icon
 
-Click the tray icon to show/hide the overlay (a tray-shown overlay stays up until you hide it). Right-click for Show/Hide and Quit.
+Click the tray icon to show/hide the overlay (a tray-shown overlay stays up until you hide it). Right-click for Show/Hide, **Team report** and Quit.
 
 The badge count shows whichever queue you designate in Settings → *Tray badge shows*.
+
+---
+
+## Team report
+
+Right-click the tray icon → **Team report**.
+
+Ranks the people you choose by how many tickets they completed over a period you choose.
+
+| Control | What it does |
+|---|---|
+| **Period** | Today, 7 / 30 / 90 days, or **Custom** with your own from/to dates |
+| **Count by** | **Resolved date** is when the ticket was actually finished. **Last updated** is what the overlay's *Completed today* figure uses, so the two reconcile — useful if your workflow doesn't set a resolution |
+| **People…** | Pick from the users Jira says can be assigned work in your project |
+| **Export CSV** | Saves the current view next to the app and opens it |
+
+Each person is one cheap count query, so it stays fast with a large team, and it runs off the UI thread so the window never freezes.
+
+If you already have an `assignee in (...)` filter set for *Completed today*, the report seeds its list of people from it the first time you open it.
 
 ---
 
@@ -268,6 +288,26 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 | Queues missing | Check **Settings → Hide queues whose name contains** or the max-ticket threshold |
 | Overlay appears on wrong monitor | Drag it to the right monitor — it saves position automatically |
 | Notifications not appearing | Check Windows Focus Assist / Do Not Disturb settings |
+
+---
+
+## Tests
+
+```
+python tests/run_all.py
+```
+
+No test framework needed. Each suite runs in its own process, because several patch imports or Tk.
+
+| Suite | Covers |
+|---|---|
+| `test_config.py` | Config writing — two processes share this file, and it holds the API token |
+| `test_overlay.py` | SLA on/off, the alert-queue picker, startup registration, the event pump |
+| `test_report.py` | Team report periods, the JQL it builds, ranking |
+| `test_learner.py` | Self-configuration against a **fictional service desk** with nothing in common with any real one |
+| `test_setup.py` | First run on a machine with no dependencies, and a failed install |
+
+The suites never touch a real `jira_config.json` — they point at a temporary one. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
 
 ---
 
