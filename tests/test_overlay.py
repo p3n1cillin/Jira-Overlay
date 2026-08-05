@@ -112,6 +112,65 @@ shown, n = fetch_cycle(dict(base, alertQueues=[], alertQueuesAsked=True))
 check("running with no alert queue is allowed", not shown and n == 2)
 
 
+# --- Display filters must never switch off an alert ------------------------
+# hiddenQueues, skipKeywords and maxQueueSize all decide what is worth
+# looking at. None of them should be able to silence a notification the user
+# asked for - and maxQueueSize only bites once a queue is busy, which is
+# exactly when the alert matters.
+
+BUSY = [{"name": "Newly Opened", "id": 1, "issueCount": 150},
+        {"name": "Archive Escalations", "id": 2, "issueCount": 5},
+        {"name": "Open tasks", "id": 3, "issueCount": 12}]
+
+
+class BusyResp:
+    ok = True
+    status_code = 200
+
+    def json(self):
+        return {"values": BUSY}
+
+    def raise_for_status(self):
+        pass
+
+
+def alerting(cfg):
+    o = object.__new__(O)
+    o.config = cfg
+    o._jira_url = lambda p="": "https://x" + p
+    o._session = type("S", (), {"get": lambda *a, **k: BusyResp()})()
+    o.queues = []
+    o._all_queue_names = []
+    o.new_issues = []
+    o._reconciled_counts = {}
+    o._alert_count = 0
+    o._last_full_fetch = 9e18
+    o._alert_queues_missing = []
+    o._post = lambda fn: None
+    o._fetch_completion_stats = lambda c: None
+    O._fetch_data(o)
+    return o._alert_count, o._alert_queues_missing, len(o.queues)
+
+
+alert_base = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
+              "alertQueues": ["Newly Opened"], "alertQueuesAsked": True}
+
+for label, extra, rows in (
+        ("with no filters set", {}, 3),
+        ("when capped by maxQueueSize", {"maxQueueSize": 100}, 2),
+        ("when excluded by skipKeywords", {"skipKeywords": ["NEWLY"]}, 2),
+        ("when hidden from display", {"hiddenQueues": ["Newly Opened"]}, 2)):
+    count, missing, shown_rows = alerting(dict(alert_base, **extra))
+    check(f"a busy alert queue still alerts {label}",
+          count == 150 and not missing, f"count={count} missing={missing}")
+    check(f"  ...while the display is still filtered {label}",
+          shown_rows == rows, f"{shown_rows} rows")
+
+count, missing, _rows = alerting(dict(alert_base, alertQueues=["Nope"]))
+check("a queue Jira really doesn't have is still reported",
+      missing == ["Nope"], str(missing))
+
+
 # --- Startup registration covers both apps ---------------------------------
 
 TEST_KEY = r"Software\JiraOverlayTest\Run"

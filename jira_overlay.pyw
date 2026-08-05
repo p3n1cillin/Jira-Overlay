@@ -2293,8 +2293,15 @@ class JiraOverlay:
         max_count = cfg.get("maxQueueSize", 0)
         hidden    = set(cfg.get("hiddenQueues", []))
 
+        # Everything the service desk has, before any of the user's filters.
+        # Alerting reads from this. The three filters below are all about
+        # what is worth *looking* at, and none of them should be able to
+        # switch off a notification the user asked for - maxQueueSize in
+        # particular only bites once a queue gets busy, which is exactly when
+        # the alert matters most.
+        every_queue = r.json().get("values", [])
         all_queues = [
-            q for q in r.json().get("values", [])
+            q for q in every_queue
             if not any(kw in q["name"].upper() for kw in skip_kw)
             and (max_count == 0 or q.get("issueCount", 0) <= max_count)
         ]
@@ -2310,14 +2317,16 @@ class JiraOverlay:
         if not alert_qs and self.queues and not cfg.get("alertQueuesAsked"):
             self._post(self._show_alert_queue_picker)
 
-        # Alert data comes from the UNFILTERED list — hiding a queue from
-        # display must not silently disable its alerts
-        alert_objs = [q for q in all_queues if q["name"] in alert_qs]
-        # A queue renamed or deleted in Jira would otherwise just stop
-        # alerting, with nothing on screen to say why.
+        # Alert data comes from the genuinely unfiltered list, so that hiding
+        # a queue, skipping it by keyword, or capping it by size only ever
+        # affects what is shown.
+        alert_objs = [q for q in every_queue if q["name"] in alert_qs]
+        # Only report a queue as missing when Jira really doesn't have it —
+        # measuring against the filtered list blamed Jira for the user's own
+        # display settings.
         self._alert_queues_missing = (
-            sorted(alert_qs - {q["name"] for q in all_queues})
-            if all_queues else [])
+            sorted(alert_qs - {q["name"] for q in every_queue})
+            if every_queue else [])
 
         # Fetch issues in every alert queue (tooltips + notifications).
         # includeCount is cached by JSM and can report a stale non-zero for an
