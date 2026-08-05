@@ -16,7 +16,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_config.py", "test_overlay.py", "test_report.py",
-          "test_notify.py", "test_resilience.py", "test_learner.py",
+          "test_notify.py", "test_wiring.py", "test_resilience.py",
+          "test_learner.py",
           "test_setup.py"]
 
 

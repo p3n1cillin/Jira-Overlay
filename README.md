@@ -305,6 +305,7 @@ No test framework needed, and the whole suite runs in a few seconds. Each suite 
 | `test_overlay.py` | SLA on/off, the alert-queue picker, startup registration, the event pump |
 | `test_report.py` | Team report periods, the JQL it builds, ranking |
 | `test_learner.py` | Self-configuration against a **fictional service desk** with nothing in common with any real one |
+| `test_wiring.py` | Clicks every control in the overlay and Settings — catches bindings that point at nothing |
 | `test_resilience.py` | Window placement across monitors, and network retry/backoff |
 | `test_setup.py` | First run on a machine with no dependencies, and a failed install |
 
