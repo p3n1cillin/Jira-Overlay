@@ -1245,7 +1245,6 @@ class _PeoplePicker:
         self.win.geometry("380x460")
         self.win.transient(parent)
 
-        chosen = {(p.get("accountId") or p["name"]): p for p in current}
         BG = _C["bg"]
         tk.Label(self.win, text="Tick everyone the report should cover",
                  font=_font(9), fg=_C["fg"], bg=BG).pack(anchor="w",
@@ -1265,15 +1264,10 @@ class _PeoplePicker:
         sb.pack(side="right", fill="y")
 
         self.vars: list[tuple[tk.BooleanVar, dict]] = []
-        people = self._discover()
-        # Anyone already chosen stays listed even if the lookup missed them.
-        for key, person in chosen.items():
-            if not any((p.get("accountId") or p["name"]) == key
-                       for p in people):
-                people.append(person)
-        for person in sorted(people, key=lambda p: p["name"].lower()):
-            key = person.get("accountId") or person["name"]
-            var = tk.BooleanVar(value=key in chosen)
+        people, already_chosen = self._merge(current, self._discover())
+
+        for person in people:
+            var = tk.BooleanVar(value=already_chosen(person))
             tk.Checkbutton(body, text=person["name"], variable=var,
                            font=_font(9), fg=_C["fg"], bg=BG,
                            selectcolor=_C["input"], activebackground=BG,
@@ -1299,6 +1293,41 @@ class _PeoplePicker:
 
         self.win.grab_set()
         parent.wait_window(self.win)
+
+    @staticmethod
+    def _merge(current: list[dict], discovered: list[dict]):
+        """Combine the people already chosen with the ones Jira knows about.
+
+        Returns (people to list, predicate saying whether one is chosen).
+
+        The two sources identify people differently: anyone seeded from a
+        completed-today filter has a name and no accountId, while Jira always
+        supplies an accountId. Keying both as "accountId or name" meant they
+        never matched, so every person already chosen was listed twice, once
+        ticked and once not. Match on accountId when there is one to match,
+        and on name otherwise.
+        """
+        chosen_ids = {p["accountId"] for p in current if p.get("accountId")}
+        chosen_names = {p["name"].strip().lower() for p in current
+                        if p.get("name")}
+
+        def already_chosen(person: dict) -> bool:
+            return (person.get("accountId") in chosen_ids
+                    or person.get("name", "").strip().lower() in chosen_names)
+
+        people = list(discovered)
+        known_ids = {p["accountId"] for p in people if p.get("accountId")}
+        known_names = {p["name"].strip().lower() for p in people}
+        # Keep anyone chosen whom the lookup didn't return: someone who has
+        # left, or a name that was typed in by hand.
+        for person in current:
+            if person.get("accountId") and person["accountId"] in known_ids:
+                continue
+            if person.get("name", "").strip().lower() in known_names:
+                continue
+            people.append(person)
+        people.sort(key=lambda p: p["name"].lower())
+        return people, already_chosen
 
     def _discover(self) -> list[dict]:
         """Users Jira says can be assigned work in this project."""

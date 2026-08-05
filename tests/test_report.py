@@ -105,6 +105,37 @@ w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
 check("a person with no name costs no query",
       not [q for q in seen if "assignee" in str(q)])
 
+# --- The People picker, matching two different sources ---------------------
+# People seeded from a completed-today filter have a name and no accountId.
+# Jira returns an accountId. Comparing "accountId or name" on both sides
+# meant they never matched, so everyone already chosen was listed twice -
+# once ticked, once not.
+JIRA_USERS = [
+    {"name": "Ada Nkemi",    "accountId": "acc-ada"},
+    {"name": "Bart Bielski", "accountId": "acc-bart"},
+    {"name": "Jo Bright",    "accountId": "acc-jo"},
+    {"name": "Sam Carter",   "accountId": "acc-sam"},
+]
+SEEDED = [{"name": n, "accountId": ""}
+          for n in ("Ada Nkemi", "Jo Bright", "Sam Carter")]
+GONE = [{"name": "Ex Employee", "accountId": ""}]
+
+listed, ticked = ov._PeoplePicker._merge(SEEDED + GONE, list(JIRA_USERS))
+
+names = [p["name"] for p in listed]
+check("nobody is listed twice", len(names) == len(set(names)), str(names))
+check("everyone already chosen is ticked",
+      sorted(p["name"] for p in listed if ticked(p))
+      == sorted(["Ada Nkemi", "Ex Employee", "Jo Bright", "Sam Carter"]),
+      str(sorted(p["name"] for p in listed if ticked(p))))
+check("people not chosen stay unticked",
+      not ticked({"name": "Bart Bielski", "accountId": "acc-bart"}))
+check("someone who has left Jira is still listed",
+      "Ex Employee" in names)
+check("a matched person carries Jira's accountId, not the seeded blank",
+      next(p for p in listed if p["name"] == "Ada Nkemi")["accountId"]
+      == "acc-ada")
+
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
 sys.exit(0 if ok else 1)
