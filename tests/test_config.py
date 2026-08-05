@@ -85,4 +85,63 @@ ov.save_config(dict(FULL))
 check("a corrupt config is replaced rather than fatal",
       read().get("domain") == "acme.atlassian.net")
 
+# Opening Settings and saving without touching anything must be a no-op.
+# Every setting passes through a Tk variable and back, so a list read as a
+# string, or a number read as text, would quietly rewrite the file.
+import time                                          # noqa: E402
+
+ROUND_TRIP = {
+    "domain": "acme.atlassian.net", "email": "a@b.c", "token": "SECRET",
+    "serviceDeskId": 11, "serviceDeskName": "Desk", "projectKey": "SD",
+    "alertQueues": ["Open", "Escalated"], "alertQueue": "Open",
+    "trayBadgeQueue": "Open", "hiddenQueues": ["Archive"],
+    "skipKeywords": ["test", "spam"], "maxQueueSize": 500,
+    "refreshSeconds": 15, "notificationsEnabled": True, "soundEnabled": False,
+    "alpha": 0.95, "overlayWidth": 300, "alwaysVisible": False,
+    "slaField": "Time to resolution", "slaEnabled": True,
+    "completedTodayFilter": 'assignee in ("Sam Carter")',
+    "lastX": 100, "lastY": 200,
+    "reportUsers": [{"name": "Sam Carter", "accountId": "a1"}],
+    "reportRange": "7 days", "reportBasis": "updated",
+    # keys belonging to the learner, which the overlay must not disturb
+    "triageStatuses": ["With DEV"], "movedLabels": {"BUGS": "Product bug"},
+}
+write(dict(ROUND_TRIP))
+ov.set_startup = lambda enable: None
+ov.startup_enabled = lambda: False
+ov.JiraOverlay._fetch = lambda self: None
+ov.JiraOverlay._start_tray = lambda self: None
+app = ov.JiraOverlay(dict(ROUND_TRIP))
+app.queues = [{"name": n, "id": i, "issueCount": 1}
+              for i, n in enumerate(["Open", "Escalated", "Archive"], 1)]
+app._all_queue_names = [q["name"] for q in app.queues]
+app.completed_today = 1
+app.sla_compliance = 100
+app._update_ui()
+app._do_show()
+app._toggle_settings()
+app.root.update()
+time.sleep(0.6)
+app.root.update()
+
+widgets = []
+
+
+def walk(w):
+    widgets.append(w)
+    for child in w.winfo_children():
+        walk(child)
+
+
+walk(app.settings_panel)
+[b for b in widgets
+ if b.winfo_class() == "Button" and "Save" in str(b.cget("text"))][0].invoke()
+app.root.update()
+
+after = read()
+drift = sorted(k for k in set(ROUND_TRIP) | set(after)
+               if ROUND_TRIP.get(k, "<absent>") != after.get(k, "<absent>"))
+check("saving Settings unchanged rewrites nothing", not drift, str(drift))
+app.root.destroy()
+
 sys.exit(check.done())
