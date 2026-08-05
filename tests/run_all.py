@@ -16,7 +16,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_config.py", "test_overlay.py", "test_report.py",
-          "test_learner.py", "test_setup.py"]
+          "test_notify.py", "test_learner.py", "test_setup.py"]
 
 
 def main() -> int:
