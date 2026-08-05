@@ -2482,8 +2482,14 @@ class JiraOverlay:
                 return self._suggestions          # unchanged since last read
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            # Another process writes this file, so take nothing on trust: a
+            # list or a bare null would otherwise reach the callers that do
+            # .get() on it. Caching the parse here rather than relying on the
+            # caller to assign the result back also keeps the mtime shortcut
+            # honest for anyone who reads it in future.
+            self._suggestions = data if isinstance(data, dict) else {}
             self._suggestions_mtime = mtime
-            return data
+            return self._suggestions
         except (OSError, ValueError):
             return {}
 

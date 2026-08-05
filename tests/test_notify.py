@@ -60,4 +60,51 @@ for x, y in ((0, 0), (-5000, -5000), (99999, 99999)):
     sane = (rect is not None and rect[2] > rect[0] and rect[3] > rect[1])
     check(f"a monitor is found for coordinates ({x}, {y})", sane, str(rect))
 
+
+# --- Suggestions file, written by the learner ------------------------------
+# A separate process writes this, so nothing in it can be taken on trust.
+import json                                          # noqa: E402
+import tempfile                                      # noqa: E402
+import time                                          # noqa: E402
+
+_dir = tempfile.mkdtemp()
+_path = os.path.join(_dir, "suggestions.json")
+
+
+def _reader():
+    o = object.__new__(ov.JiraOverlay)
+    o.config = {"suggestionsFile": _path}
+    o._suggestions_mtime = 0.0
+    o._suggestions = {}
+    return o
+
+
+for label, content in (("a valid object", {"SD-1": {"label": "With DEV"}}),
+                       ("a list", ["nope"]),
+                       ("a bare null", "null"),
+                       ("truncated json", '{"SD-1": {"label": "With'),
+                       ("an empty object", {})):
+    if isinstance(content, str):
+        open(_path, "w", encoding="utf-8").write(content)
+    else:
+        json.dump(content, open(_path, "w"))
+    loaded = ov.JiraOverlay._load_suggestions(_reader())
+    check(f"{label} yields a dict the callers can use",
+          isinstance(loaded, dict), type(loaded).__name__)
+
+# The mtime shortcut must return what was parsed, not whatever the field
+# happened to hold - it previously relied on the one caller assigning back.
+json.dump({"SD-1": {"label": "With DEV"}}, open(_path, "w"))
+reader = _reader()
+first = ov.JiraOverlay._load_suggestions(reader)
+second = ov.JiraOverlay._load_suggestions(reader)
+check("a second read returns the same suggestions", first == second,
+      f"{first} then {second}")
+
+# Suggestions from a learner that has since stopped must not be shown.
+old = time.time() - 3600
+os.utime(_path, (old, old))
+check("suggestions older than the staleness window are dropped",
+      ov.JiraOverlay._load_suggestions(_reader()) == {})
+
 sys.exit(check.done())
