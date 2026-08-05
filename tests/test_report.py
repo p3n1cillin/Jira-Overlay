@@ -74,6 +74,37 @@ seen.clear(); w.v_basis.set("updated"); w._seq = 2
 w._work(2, date(2026, 1, 1), date(2026, 1, 2))
 check("'Last updated' basis changes the field", 'updated >= "2026-01-01"' in seen[0])
 
+# --- Names are user-supplied text, and they go into a query ----------------
+# Display names are set by the people they belong to, so quotes and
+# backslashes turn up legitimately. Interpolated raw, a name either breaks
+# the query or changes what it counts.
+QUOTE, SLASH = '"', chr(92)
+check("a quote in a name is escaped",
+      ov.jql_quote("O" + QUOTE + "Brien")
+      == QUOTE + "O" + SLASH + QUOTE + "Brien" + QUOTE,
+      ov.jql_quote("O" + QUOTE + "Brien"))
+check("a backslash is escaped",
+      ov.jql_quote("DOMAIN" + SLASH + "user")
+      == QUOTE + "DOMAIN" + SLASH * 2 + "user" + QUOTE,
+      ov.jql_quote("DOMAIN" + SLASH + "user"))
+check("an injection attempt stays a single literal",
+      ov.jql_quote('x" OR project=OTHER OR "').count(SLASH) == 2,
+      ov.jql_quote('x" OR project=OTHER OR "'))
+
+seen.clear()
+w.people = [{"name": "O" + QUOTE + "Brien", "accountId": ""}]
+w._seq += 1
+w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
+check("the report escapes the name it queries with",
+      SLASH + QUOTE + "Brien" in seen[0], seen[0][-44:])
+
+seen.clear()
+w.people = [{"name": "", "accountId": ""}]
+w._seq += 1
+w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
+check("a person with no name costs no query",
+      not [q for q in seen if "assignee" in str(q)])
+
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
 sys.exit(0 if ok else 1)

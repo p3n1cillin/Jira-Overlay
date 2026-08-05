@@ -907,6 +907,19 @@ REPORT_RANGES = [("Today", 0), ("7 days", 6), ("30 days", 29),
 REPORT_BASES = [("Resolved date", "resolved"), ("Last updated", "updated")]
 
 
+def jql_quote(value: str) -> str:
+    """Quote a value for use as a JQL string literal.
+
+    Display names are set by the people they belong to, so they really do
+    contain quotes and backslashes. Interpolated raw, a name like O"Brien
+    breaks the query outright, and a crafted one changes what it matches -
+    the count is read-only, but it would be counting something other than
+    what was asked for.
+    """
+    escaped = (value or "").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def report_users(cfg: dict) -> list[dict]:
     """People to report on, as [{"name":…, "accountId":…}].
 
@@ -1103,10 +1116,14 @@ class TeamReportWindow:
         for person in self.people:
             if self._closed or seq != self._seq:
                 return
-            who = (f'assignee = "{person["accountId"]}"' if person["accountId"]
-                   else f'assignee = "{person["name"]}"')
+            if not (person.get("accountId") or person.get("name")):
+                results.append((person.get("name", ""), None))
+                continue
+            # accountId is opaque and unambiguous; the display name is only a
+            # fallback, and must be quoted like any other user-supplied text.
+            who = jql_quote(person["accountId"] or person["name"])
             jql = (f'project = {pk} AND statusCategory = Done '
-                   f'AND {window} AND {who}')
+                   f'AND {window} AND assignee = {who}')
             try:
                 count, _rejected = self.app._count_issues(jql)
             except Exception:
