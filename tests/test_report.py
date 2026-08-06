@@ -294,6 +294,67 @@ check(f"{TRIALS} counts racing a close all finish without error",
       not race_errors and done["n"] == TRIALS,
       f"{done['n']}/{TRIALS} finished, errors: {race_errors}")
 
+# --- Rapid Refresh clicks: only the most recent one should ever render -----
+# Each refresh() bumps self._seq and starts a background count carrying that
+# seq; _done only renders when its seq still matches self._seq. A prior
+# version of this test tied "which request is slow" to the GLOBAL ORDER
+# _count_issues was called in, rather than to which request it belonged to -
+# that doesn't model real latency (an older request isn't guaranteed to
+# reach Jira first) and produced a result that looked exactly like a stale-
+# data bug. With latency attached to the request itself instead, 15 trials
+# of 5 rapid clicks with independently randomised delays never render
+# anything but the last click's result.
+import random                                          # noqa: E402
+
+
+def _refresh_race_trial(n_clicks):
+    rw = object.__new__(ov.TeamReportWindow)
+    rw.v_range = tk.StringVar(value="Today")
+    rw.v_from = tk.StringVar()
+    rw.v_to = tk.StringVar()
+    rw.v_basis = tk.StringVar(value="resolved")
+    rw.people = [{"name": "Sam", "accountId": ""}]
+    rw._closed = False
+    rw._seq = 0
+    rw.lbl_sub = type("L", (), {"config": lambda self, **k: None})()
+    rw._set_status = lambda *a, **k: None
+    renders = []
+    rw._render = lambda results, total: renders.append(total)
+
+    class Mock:
+        def __init__(self, value, delay):
+            self.value, self.delay = value, delay
+            self.config = {"projectKey": "SD"}
+
+        def _count_issues(self, jql):
+            time.sleep(self.delay)
+            return (self.value, False)
+
+        def _post(self, fn):
+            root.after(0, fn)
+
+    for i in range(n_clicks):
+        rw.app = Mock(value=i, delay=random.uniform(0, 0.05))
+        rw.refresh()
+
+    started = time.perf_counter()
+
+    def finish():
+        if time.perf_counter() - started > 0.3:
+            root.quit()
+        else:
+            root.after(10, finish)
+
+    root.after(10, finish)
+    root.mainloop()
+    return renders
+
+
+rapid_failures = [(t, r) for t in range(8)
+                  if (r := _refresh_race_trial(5)) != [4]]
+check("only the latest of 5 rapid clicks ever renders, 8 times over",
+      not rapid_failures, str(rapid_failures))
+
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
 sys.exit(0 if ok else 1)
