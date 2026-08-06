@@ -1130,9 +1130,24 @@ class TeamReportWindow:
                 count = None
             results.append((person["name"], count))
         total = sum(c for _n, c in results if c is not None)
-        self.app._post(lambda: self._done(seq, results, total))
 
-    def _done(self, seq: int, results: list, total: int) -> None:
+        # How much of the completed work this ranking actually accounts for.
+        # A desk that resolves tickets without assigning them can leave most
+        # of its output invisible here, and a ranking presented as though it
+        # were the whole picture would be quietly misleading.
+        everything = f'project = {pk} AND statusCategory = Done AND {window}'
+        try:
+            completed, _r = self.app._count_issues(everything)
+            unassigned, _r = self.app._count_issues(
+                everything + " AND assignee IS EMPTY")
+        except Exception:
+            completed = unassigned = None
+        self.app._post(
+            lambda: self._done(seq, results, total, completed, unassigned))
+
+    def _done(self, seq: int, results: list, total: int,
+              completed: Optional[int] = None,
+              unassigned: Optional[int] = None) -> None:
         if self._closed or seq != self._seq:
             return
         self.results = results
@@ -1140,6 +1155,19 @@ class TeamReportWindow:
         failed = [n for n, c in results if c is None]
         if failed:
             self._set_status(f"Could not count: {', '.join(failed)}", warn=True)
+            return
+        if completed:
+            share = 100 * total // completed
+            text = f"{total} of {completed} completed ({share}%)"
+            if unassigned:
+                text += f" · {unassigned} had no assignee"
+            # A low share isn't necessarily neglect: on a desk that clones a
+            # ticket out to another team's project (see the triage learner's
+            # "moved to" outcomes), the master here can go unassigned while
+            # the real work — and its assignee — lives on the clone in a
+            # project this report was never asked about. The number is
+            # shown either way; only the colour hints that it's worth a look.
+            self._set_status(text, warn=share < 50)
         else:
             self._set_status(f"{total} completed in total")
 

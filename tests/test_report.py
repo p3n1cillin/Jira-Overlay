@@ -56,7 +56,8 @@ w.app = App(); w._closed = False; w._seq = 1
 w.v_basis = tk.StringVar(value="resolved")
 w.people = [{"name": "Sam Carter", "accountId": "acc-1"},
             {"name": "Ada", "accountId": ""}]
-w._done = lambda seq, results, total: seen.append(("RESULT", results, total))
+w._done = lambda seq, results, total, *_coverage: seen.append(
+    ("RESULT", results, total))
 w._work(1, date(2026, 1, 1), date(2026, 1, 31))
 q = seen[0]
 check("counts only completed work", "statusCategory = Done" in q)
@@ -102,8 +103,9 @@ seen.clear()
 w.people = [{"name": "", "accountId": ""}]
 w._seq += 1
 w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
-check("a person with no name costs no query",
-      not [q for q in seen if "assignee" in str(q)])
+check("a person with no name costs no per-person query",
+      not [q for q in seen if "assignee =" in str(q)],
+      str([q for q in seen if "assignee =" in str(q)]))
 
 # --- The People picker, matching two different sources ---------------------
 # People seeded from a completed-today filter have a name and no accountId.
@@ -135,6 +137,69 @@ check("someone who has left Jira is still listed",
 check("a matched person carries Jira's accountId, not the seeded blank",
       next(p for p in listed if p["name"] == "Ada Nkemi")["accountId"]
       == "acc-ada")
+
+# --- Coverage: how much of the completed work the ranking accounts for ----
+# A ranking shown with no sense of scale is misleading on a desk where most
+# completed tickets are unassigned - which, on a desk that clones a ticket
+# out to another project rather than assigning the master, is normal rather
+# than a sign anyone is slacking. A fresh window is used here rather than
+# the one above, whose _done was overridden earlier in this file.
+w2 = object.__new__(ov.TeamReportWindow)
+w2.v_range = tk.StringVar(value="Custom")
+w2.v_from = tk.StringVar()
+w2.v_to = tk.StringVar()
+w2.v_basis = tk.StringVar(value="resolved")
+w2._closed = False
+w2._seq = 1
+w2._render = lambda *a: None
+
+
+def coverage_status(total_completed, unassigned):
+    w2.people = [{"name": "Alfie", "accountId": ""},
+                 {"name": "Luke", "accountId": ""}]
+    counts = {"Alfie": 291, "Luke": 235}          # sums to 526
+    status = {}
+
+    class App:
+        config = {"projectKey": "SD"}
+
+        def _count_issues(self, jql):
+            if "assignee IS EMPTY" in jql:
+                return (unassigned, False)
+            if "assignee" not in jql:
+                return (total_completed, False)
+            for name, n in counts.items():
+                if f'"{name}"' in jql:
+                    return (n, False)
+            return (0, False)
+
+        def _post(self, fn):
+            fn()
+
+    w2.app = App()
+    w2._set_status = lambda text, warn=False: status.update(text=text, warn=warn)
+    w2._seq += 1
+    w2._work(w2._seq, date(2026, 1, 1), date(2026, 1, 31))
+    return status
+
+
+# 526 of 1028 is 51% - above the warning threshold.
+s = coverage_status(1028, 436)
+check("the status line states coverage as a fact, not a verdict",
+      "526 of 1028" in s["text"] and "51%" in s["text"], s["text"])
+check("the unassigned count is shown", "436" in s["text"], s["text"])
+check("51% coverage doesn't trip the low-coverage colour", not s["warn"])
+
+s = coverage_status(600, 0)
+check("zero unassigned omits the 'had no assignee' clause",
+      "assignee" not in s["text"], s["text"])
+
+s = coverage_status(2000, 1900)
+check("well under half attributed does flag the colour", s["warn"])
+
+s = coverage_status(None, None)
+check("if Jira refuses the extra queries, the total alone is still shown",
+      "completed in total" in s["text"], s["text"])
 
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")

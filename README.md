@@ -147,6 +147,8 @@ Each person is one cheap count query, so it stays fast with a large team, and it
 
 If you already have an `assignee in (...)` filter set for *Completed today*, the report seeds its list of people from it the first time you open it.
 
+The status line also shows what share of the project's completed work the ranking accounts for, e.g. *"583 of 1028 completed (56%) · 436 had no assignee"*. That number is scoped to the project you're monitoring: if your workflow clones a ticket out to another team's project rather than assigning the original, the assignee — and the credit for finishing it — lives on that clone, in a project this report was never asked about. A low share there isn't a sign of anything wrong; it's a property of how your desk hands work off.
+
 ---
 
 ## Settings
