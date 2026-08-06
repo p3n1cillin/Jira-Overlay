@@ -201,6 +201,20 @@ s = coverage_status(None, None)
 check("if Jira refuses the extra queries, the total alone is still shown",
       "completed in total" in s["text"], s["text"])
 
+
+# --- CSV export: a name is not safe to write verbatim ----------------------
+# A display name starting with = + - @ or a tab is a valid Jira name that
+# Excel will still try to evaluate as a formula - "CSV injection", and not
+# merely theoretical: some Excel configurations honour old DDE syntax inside
+# such a formula. The standard fix is a leading single quote, which Excel
+# shows the text after and drops rather than evaluating.
+for name in ("=1+1", "+SUM(A1:A9)", "-2+3", "@SUM(1,1)", "\tcmd", "-"):
+    safe = ov.csv_safe(name)
+    check(f"{name!r} can't be read as a formula after export",
+          safe[0] == "'" and safe[1:] == name, safe)
+for name in ("Sam Carter", "O'Brien", ""):
+    check(f"{name!r} is left alone", ov.csv_safe(name) == name)
+
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
 sys.exit(0 if ok else 1)

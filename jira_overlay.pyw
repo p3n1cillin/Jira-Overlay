@@ -907,6 +907,21 @@ REPORT_RANGES = [("Today", 0), ("7 days", 6), ("30 days", 29),
 REPORT_BASES = [("Resolved date", "resolved"), ("Last updated", "updated")]
 
 
+def csv_safe(value: str) -> str:
+    """Neutralise a value that could be read as a spreadsheet formula.
+
+    Display names are set by the people they belong to, and a name starting
+    with =, +, -, @ or a tab is a valid Jira display name that Excel will
+    still try to evaluate as a formula when the exported CSV is opened —
+    "CSV injection", OWASP-documented and not merely theoretical: some Excel
+    configurations still honour the old DDE syntax inside such a formula.
+    Prefixing a single quote is the standard mitigation; Excel shows the
+    text as-is and drops the quote rather than evaluating it.
+    """
+    text = str(value)
+    return "'" + text if text and text[0] in "=+-@\t\r" else text
+
+
 def jql_quote(value: str) -> str:
     """Quote a value for use as a JQL string literal.
 
@@ -1244,7 +1259,7 @@ class TeamReportWindow:
                 w.writerow(["Person", "Completed", "From", "To", "Counted by"])
                 for name, count in sorted(self.results,
                                           key=lambda r: -(r[1] or 0)):
-                    w.writerow([name, "" if count is None else count,
+                    w.writerow([csv_safe(name), "" if count is None else count,
                                 start, end, self.v_basis.get()])
             os.startfile(path)
             self._set_status(f"Saved {os.path.basename(path)}")
