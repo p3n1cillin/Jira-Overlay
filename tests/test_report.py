@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import load_overlay                    # noqa: E402
@@ -214,6 +215,84 @@ for name in ("=1+1", "+SUM(A1:A9)", "-2+3", "@SUM(1,1)", "\tcmd", "-"):
           safe[0] == "'" and safe[1:] == name, safe)
 for name in ("Sam Carter", "O'Brien", ""):
     check(f"{name!r} is left alone", ov.csv_safe(name) == name)
+
+# --- Reading a Tk variable from the counting thread -------------------------
+# _work runs on a background thread and reads self.v_basis, a tk.StringVar,
+# once at the top. Tk variables are not documented as thread-safe, but
+# CPython's _tkinter marshals a cross-thread Tcl call onto whichever thread
+# is running mainloop and blocks the caller until it's served - which is
+# safe PROVIDED mainloop is actually running continuously, as it is in the
+# live app. A test using periodic manual update() calls instead of a real
+# mainloop() found what looked like a hang; it was the test's threading
+# model, not the app - restored here with a real mainloop so the result
+# means something. A watchdog kills the process rather than hanging the
+# suite if this regresses.
+import threading                                      # noqa: E402
+
+
+def _kill_on_hang(seconds):
+    def watch():
+        time.sleep(seconds)
+        print("test_report: _work + close race did not finish in time "
+              "-- treating as a hang")
+        os._exit(1)
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    return t
+
+
+TRIALS = 15
+done = {"n": 0}
+race_errors = []
+_kill_on_hang(12)
+
+for trial in range(TRIALS):
+    tw = object.__new__(ov.TeamReportWindow)
+    tw.v_basis = tk.StringVar(value="resolved")
+    tw.people = [{"name": "Sam", "accountId": ""}]
+    tw._closed = False
+    tw._seq = 1
+
+    class SlowApp:
+        config = {"projectKey": "SD"}
+
+        def _count_issues(self, jql):
+            time.sleep(0.005)
+            return (1, False)
+
+        def _post(self, fn):
+            root.after(0, fn)
+
+    tw.app = SlowApp()
+    tw._done = lambda *a, **k: None
+
+    def worker(tw=tw, trial=trial):
+        try:
+            tw._work(trial, date(2026, 1, 1), date(2026, 1, 2))
+        except Exception as exc:                      # noqa: BLE001
+            race_errors.append((trial, exc))
+        finally:
+            done["n"] += 1
+
+    threading.Thread(target=worker, daemon=True).start()
+    # Close it from the main thread shortly after, the way a click on the
+    # window's X actually happens, while mainloop keeps running underneath.
+    root.after(2, (lambda tw=tw: setattr(tw, "_closed", True)))
+
+
+def _pump_until_done():
+    if done["n"] >= TRIALS:
+        root.quit()
+    else:
+        root.after(20, _pump_until_done)
+
+
+root.after(20, _pump_until_done)
+root.mainloop()
+
+check(f"{TRIALS} counts racing a close all finish without error",
+      not race_errors and done["n"] == TRIALS,
+      f"{done['n']}/{TRIALS} finished, errors: {race_errors}")
 
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
