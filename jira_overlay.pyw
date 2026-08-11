@@ -922,6 +922,50 @@ def csv_safe(value: str) -> str:
     return "'" + text if text and text[0] in "=+-@\t\r" else text
 
 
+def _has_association(ext: str) -> bool:
+    """Whether Windows has anything registered to open `ext`.
+
+    os.startfile() (ShellExecute under the hood) doesn't raise when there is
+    no association — on a machine with no spreadsheet app, exporting the
+    report just silently does nothing: no new window, no exception, nothing
+    a background process could log. Checking first is the only way to catch
+    that before the button click does nothing.
+    """
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
+                rf"\{ext}\UserChoice") as k:
+            if winreg.QueryValueEx(k, "ProgId")[0]:
+                return True
+    except OSError:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+            return bool(winreg.QueryValueEx(k, "")[0])
+    except OSError:
+        return False
+
+
+def open_in_default_or_notepad(path: str) -> None:
+    """Open `path` with whatever Windows has registered for it, falling back
+    to Notepad — present on every Windows install by definition — rather
+    than risk this silently doing nothing on a machine with no spreadsheet
+    app associated with .csv.
+    """
+    _, ext = os.path.splitext(path)
+    if _has_association(ext):
+        try:
+            os.startfile(path)
+            return
+        except OSError:
+            pass
+    try:
+        subprocess.Popen(["notepad.exe", path])
+    except OSError:
+        pass
+
+
 def jql_quote(value: str) -> str:
     """Quote a value for use as a JQL string literal.
 
@@ -1261,10 +1305,11 @@ class TeamReportWindow:
                                           key=lambda r: -(r[1] or 0)):
                     w.writerow([csv_safe(name), "" if count is None else count,
                                 start, end, self.v_basis.get()])
-            os.startfile(path)
             self._set_status(f"Saved {os.path.basename(path)}")
         except OSError as exc:
             self._set_status(f"Could not save: {exc}", warn=True)
+            return
+        open_in_default_or_notepad(path)
 
     def _close(self) -> None:
         self._closed = True

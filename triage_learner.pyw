@@ -54,9 +54,11 @@ import json
 import math
 import os
 import re
+import subprocess
 import threading
 import time
 import traceback
+import winreg
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -201,6 +203,53 @@ _STOPWORDS = {
 def _log_error(msg: str) -> None:
     with open(ERROR_LOG, "a", encoding="utf-8") as f:
         f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
+
+
+def _has_association(ext: str) -> bool:
+    """Whether Windows has anything registered to open `ext`.
+
+    os.startfile() (ShellExecute under the hood) doesn't raise when there is
+    no association — on a plain Windows install with nothing markdown-aware
+    installed, it silently resolves to nothing visible: no new window, no
+    exception, no error anywhere pythonw could report it. Checking first,
+    rather than reacting to a failure that never announces itself, is the
+    only way to catch this before the menu click just does nothing.
+    """
+    try:
+        # A per-user choice (Explorer's own "always open with") overrides
+        # the class-wide default and is what a real double-click would use.
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
+                rf"\{ext}\UserChoice") as k:
+            if winreg.QueryValueEx(k, "ProgId")[0]:
+                return True
+    except OSError:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+            return bool(winreg.QueryValueEx(k, "")[0])
+    except OSError:
+        return False
+
+
+def open_in_default_or_notepad(path: str) -> None:
+    """Open `path` with whatever Windows has registered for it, falling back
+    to Notepad — present on every Windows install by definition — rather
+    than risk the menu item that's meant to show the report doing nothing
+    with no way for the user to tell why.
+    """
+    _, ext = os.path.splitext(path)
+    if _has_association(ext):
+        try:
+            os.startfile(path)
+            return
+        except OSError:
+            pass
+    try:
+        subprocess.Popen(["notepad.exe", path])
+    except OSError as exc:
+        _log_error(f"could not open {path} with notepad.exe either: {exc}")
 
 
 def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
@@ -2144,7 +2193,7 @@ def main() -> None:
 
     def _open_report() -> None:
         if os.path.exists(REPORT_FILE):
-            os.startfile(REPORT_FILE)
+            open_in_default_or_notepad(REPORT_FILE)
 
     def _quit(icon: pystray.Icon) -> None:
         watcher.stop.set()

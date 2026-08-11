@@ -254,6 +254,35 @@ for j in live:
         real_cancel(j)
     except Exception:
         pass
+# --- Opening an exported file: os.startfile succeeds silently when there is
+# no association, so "Export CSV" on a machine with no spreadsheet app would
+# save the file and then appear to do nothing when it tries to open it.
+check("an extension that plainly doesn't exist has no association",
+      ov._has_association(".fake9182nope") is False)
+check("a real, universally-associated extension is detected as having one",
+      ov._has_association(".txt") is True)
+
+
+def _procs_named(name: str) -> set:
+    import subprocess as sp
+    out = sp.check_output(["tasklist", "/fi", f"imagename eq {name}",
+                           "/fo", "csv"], text=True)
+    return {ln for ln in out.splitlines() if name.lower() in ln.lower()}
+
+
+import tempfile
+target = os.path.join(tempfile.mkdtemp(), "export.fake9182nope")
+open(target, "w", encoding="utf-8").write("test export content\n")
+before = _procs_named("notepad.exe")
+ov.open_in_default_or_notepad(target)
+import time
+time.sleep(1.5)
+after = _procs_named("notepad.exe")
+check("an unassociated extension falls back to Notepad, not silence",
+      len(after) > len(before), f"before={len(before)} after={len(after)}")
+import subprocess
+subprocess.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
+
 root.destroy()
 
 sys.exit(check.done())

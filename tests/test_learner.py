@@ -194,4 +194,38 @@ check("a rejected token is reported once, not silently swallowed",
       len(lines) == 2 and "401" in lines[0] and "API token" in lines[0],
       f"{len(lines)} line(s)")
 
+
+# --- Opening the report: os.startfile succeeds silently when there is no --
+# file association, so a machine with nothing markdown-aware installed sees
+# "Open report" do nothing, forever, with no error anywhere to explain why.
+# Confirmed on a real machine: .md had no association, os.startfile raised
+# nothing on either the main thread or a background thread (pystray's own
+# menu callbacks run on one), and no new process appeared either time.
+check("an extension that plainly doesn't exist has no association",
+      tl._has_association(".fake9182nope") is False)
+check("a real, universally-associated extension is detected as having one",
+      tl._has_association(".txt") is True)
+
+
+def _procs_named(name: str) -> set:
+    import subprocess
+    out = subprocess.check_output(
+        ["tasklist", "/fi", f"imagename eq {name}", "/fo", "csv"], text=True)
+    return {ln for ln in out.splitlines() if name.lower() in ln.lower()}
+
+
+import tempfile as _tempfile
+fake_ext = ".fake9182nope"
+target = os.path.join(_tempfile.mkdtemp(), f"report{fake_ext}")
+open(target, "w", encoding="utf-8").write("test report content\n")
+before = _procs_named("notepad.exe")
+tl.open_in_default_or_notepad(target)
+import time as _time
+_time.sleep(1.5)
+after = _procs_named("notepad.exe")
+check("an unassociated extension falls back to Notepad, not silence",
+      len(after) > len(before), f"before={len(before)} after={len(after)}")
+import subprocess as _sp
+_sp.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
+
 sys.exit(check.done())
