@@ -200,6 +200,20 @@ _STOPWORDS = {
 }
 
 
+def json_objects(value) -> list:
+    """The entries of a JSON array that are actually objects.
+
+    Every Jira response this code walks is a list of dicts in the happy
+    case, and each level of it — the array itself, and the entries inside —
+    can be null or something else entirely on a site with different
+    permissions, an older API, or a partial response. Filtering once here
+    means the callers can iterate without a guard at every level.
+    """
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, dict)]
+
+
 def as_name_list(value) -> list[str]:
     """A config setting that must be a list of names, whatever it holds.
 
@@ -390,10 +404,18 @@ class Jira:
                            json_body=body, timeout=20)
             if r is None or not r.ok:
                 break
-            data = r.json()
-            issues.extend(data.get("issues", []))
+            try:
+                data = r.json()
+            except ValueError:          # a 200 that isn't JSON at all
+                break
+            if not isinstance(data, dict):
+                break
+            # json_objects, not `or []`: an "issues" that is a string would
+            # otherwise be iterated one character at a time.
+            page = json_objects(data.get("issues"))
+            issues.extend(page)
             token = data.get("nextPageToken")
-            if not token or data.get("isLast", True):
+            if not token or data.get("isLast", True) or not page:
                 break
         return issues
 
@@ -404,12 +426,16 @@ class Jira:
         while True:
             data = self.get(f"/rest/api/3/issue/{key}/changelog",
                             {"startAt": start, "maxResults": 100})
-            if not data:
+            if not isinstance(data, dict):
                 break
-            out.extend(data.get("values", []))
-            if data.get("isLast", True) or not data.get("values"):
+            page = json_objects(data.get("values"))
+            out.extend(page)
+            # Stop on an empty page as well as isLast: a response that keeps
+            # claiming there is more, without returning any, would otherwise
+            # page for ever.
+            if data.get("isLast", True) or not page:
                 break
-            start += len(data["values"])
+            start += len(page)
         return out
 
 
@@ -446,7 +472,7 @@ class Discovery:
         if pinned_rt and pinned_ctx is not None:
             return pinned_rt, as_name_list(pinned_ctx)
 
-        catalogue = self.jira.get("/rest/api/3/field") or []
+        catalogue = json_objects(self.jira.get("/rest/api/3/field"))
         req_field, context = pinned_rt, []
         for f in catalogue:
             fid    = f.get("id", "")
@@ -471,9 +497,9 @@ class Discovery:
         project. 'Done' drives the resolved-in-place outcome."""
         done: set[str] = set()
         openish: set[str] = set()
-        data = self.jira.get(f"/rest/api/3/project/{project}/statuses") or []
-        for issue_type in data:
-            for st in issue_type.get("statuses", []):
+        data = self.jira.get(f"/rest/api/3/project/{project}/statuses")
+        for issue_type in json_objects(data):
+            for st in json_objects(issue_type.get("statuses")):
                 name = st.get("name", "")
                 if not name:
                     continue
@@ -627,18 +653,27 @@ class Learner:
         # site's workflow) and shared by reference so newly discovered
         # outcomes describe themselves without rebuilding the model.
         self._plans = plans if plans is not None else {}
-        m = state.setdefault("model", {})
-        m.setdefault("priors", {})         # dest -> #examples
-        m.setdefault("tokens", {})         # dest -> {token: count}
-        m.setdefault("totals", {})         # dest -> total token count
-        m.setdefault("reqTypes", {})       # dest -> {request type: count}
-        m.setdefault("reporters", {})      # dest -> {reporter: count}
-        m.setdefault("cloneProjects", {})  # dest -> {clone project key: count}
-        m.setdefault("exemplars", [])      # [[title tokens...], dest] memory
-        m.setdefault("seen", {})           # dest -> raw #examples (never decayed)
+        # setdefault only fills a key that is MISSING, so a key present with
+        # a null — or holding the wrong type after a version change or a
+        # damaged write — went straight through and crashed on first use.
+        # This file carries every decision the model has learned, so it is
+        # worth reading defensively: an unusable section is rebuilt empty
+        # and relearned, rather than taking the whole learner down.
+        if not isinstance(state.get("model"), dict):
+            state["model"] = {}
+        m = state["model"]
+        for bucket in ("priors", "tokens", "totals", "reqTypes", "reporters",
+                       "cloneProjects", "seen"):
+            if not isinstance(m.get(bucket), dict):
+                m[bucket] = {}
+        if not isinstance(m.get("exemplars"), list):
+            m["exemplars"] = []             # [[title tokens...], dest] memory
         # Absent in models written before lazy decay — 1.0 is exactly right
-        # for them, since their stored counts are already true values.
-        m.setdefault("scale", 1.0)
+        # for them, since their stored counts are already true values. A
+        # non-positive scale would divide by zero on the next example.
+        scale = m.get("scale")
+        if not isinstance(scale, (int, float)) or scale <= 0:
+            m["scale"] = 1.0
         self.m = m
         self._ex_index: Optional[dict] = None
         self._ex_lens: Optional[list[int]] = None
@@ -1211,8 +1246,8 @@ class ShadowWatcher:
         never counted as a resolved-in-place outcome."""
         routed: list[dict] = []
         resolved: list[dict] = []
-        for h in self.jira.changelog(key):
-            for item in h.get("items", []):
+        for h in json_objects(self.jira.changelog(key)):
+            for item in json_objects(h.get("items")):
                 if item.get("field") != "status":
                     continue
                 to = item.get("toString", "")
@@ -1220,7 +1255,7 @@ class ShadowWatcher:
                     "id":   f"{key}:{h.get('id', '')}",
                     "dest": to,
                     "by":   (h.get("author") or {}).get("displayName", ""),
-                    "when": h.get("created", "")[:16].replace("T", " "),
+                    "when": (h.get("created") or "")[:16].replace("T", " "),
                 }
                 if to in self.dests:
                     routed.append(rec)
@@ -1240,8 +1275,8 @@ class ShadowWatcher:
         """
         moves: list[dict] = []
         first_summary = ""
-        for h in self.jira.changelog(key):
-            for item in h.get("items", []):
+        for h in json_objects(self.jira.changelog(key)):
+            for item in json_objects(h.get("items")):
                 field = item.get("field", "")
                 if field == "Key" and (item.get("fromString") or "") \
                         .startswith(self.project + "-"):
@@ -1773,15 +1808,36 @@ class ShadowWatcher:
         # replaced the learner with one that had no outcome descriptions, so
         # the report and suggestions lost their wording until the next restart.
         lr = Learner({}, plans=self.plans)
+        skipped = 0
         for r in recs:
-            det = {"summary": r["summary"], "desc": r["desc"],
-                   "labels": r["labels"], "components": r["components"],
-                   "structured": r.get("structured", []),
-                   "reporter": r["reporter"], "key": "", "clones": []}
-            req_type = r.get("requestType", r.get("reqType", ""))
-            toks = features_for(det, req_type)
-            lr.learn(r["dest"], toks, req_type, r["cloneProjects"],
-                     r["reporter"], exemplar=tokenize(r["summary"]))
+            # One unusable record must not cost the entire re-fit. These are
+            # read back from a file written by earlier versions, so fields
+            # can be absent, null, or the wrong type; anything that still
+            # can't be used is skipped and the other few thousand decisions
+            # are kept.
+            try:
+                det = {"summary": str(r.get("summary") or ""),
+                       "desc": str(r.get("desc") or ""),
+                       "labels": as_name_list(r.get("labels")),
+                       "components": as_name_list(r.get("components")),
+                       "structured": as_name_list(r.get("structured")),
+                       "reporter": str(r.get("reporter") or ""),
+                       "key": "", "clones": []}
+                dest = r.get("dest")
+                if not dest:
+                    skipped += 1
+                    continue
+                req_type = str(r.get("requestType")
+                               or r.get("reqType") or "")
+                toks = features_for(det, req_type)
+                lr.learn(dest, toks, req_type,
+                         as_name_list(r.get("cloneProjects")),
+                         det["reporter"], exemplar=tokenize(det["summary"]))
+            except Exception:                       # noqa: BLE001
+                skipped += 1
+        if skipped:
+            _log_error(f"model rebuild skipped {skipped} unusable "
+                       f"record(s) of {len(recs)}")
         self.state["model"] = lr.m
         self.learner = lr
 

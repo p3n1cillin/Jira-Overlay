@@ -333,4 +333,53 @@ check("a list where a map belongs doesn't crash",
       tl.as_label_map(["PPS"]) == {})
 check("a null label map is empty", tl.as_label_map(None) == {})
 
+
+# --- Everything read off the wire or off disk can be the wrong shape ------
+# Jira responses, the changelog, the field catalogue and the history file
+# are all arrays-of-objects in the happy case, and every level of that can
+# be null or something else on a different site, an older API, or a partial
+# response. json_objects filters once so callers can iterate plainly.
+check("a null array yields nothing", tl.json_objects(None) == [])
+check("a string is not iterated character by character",
+      tl.json_objects("junk") == [])
+check("non-object entries are dropped",
+      tl.json_objects([{"a": 1}, "junk", None, 5]) == [{"a": 1}])
+check("a proper array of objects is unchanged",
+      tl.json_objects([{"a": 1}, {"b": 2}]) == [{"a": 1}, {"b": 2}])
+
+# The model file carries every decision learned so far, so an unusable
+# section is rebuilt empty rather than taking the learner down.
+for label, broken in (("model null", {"model": None}),
+                      ("model not a dict", {"model": "corrupt"}),
+                      ("priors null", {"model": {"priors": None}}),
+                      ("tokens null", {"model": {"tokens": None}}),
+                      ("exemplars null", {"model": {"exemplars": None}}),
+                      ("scale null", {"model": {"scale": None}}),
+                      ("scale zero", {"model": {"scale": 0}}),
+                      ("scale negative", {"model": {"scale": -1}})):
+    try:
+        lr = tl.Learner(dict(broken))
+        lr.learn("D", ["a", "b", "c"], "rt", [], "Sam", exemplar=["a"])
+        lr.predict_ex(["a"], "rt", "Sam", exemplar=["a"])
+        ok = lr.m["scale"] > 0
+    except Exception:                                   # noqa: BLE001
+        ok = False
+    check(f"a state file with {label} still loads and learns", ok)
+
+# One unusable history record must not cost the whole nightly re-fit.
+rebuild = object.__new__(tl.ShadowWatcher)
+rebuild.plans = {}
+rebuild.state = {}
+rebuild.learner = tl.Learner({})
+GOOD_REC = {"summary": "printer broken", "desc": "it broke",
+            "labels": ["hw"], "components": ["Printers"],
+            "structured": [], "reporter": "Sam", "dest": "With DEV",
+            "cloneProjects": [], "requestType": "Get IT help"}
+mixed = [GOOD_REC, {}, dict(GOOD_REC, summary=None),
+         dict(GOOD_REC, labels=None), dict(GOOD_REC, dest=None), GOOD_REC]
+tl.ShadowWatcher._rebuild_model(rebuild, mixed)
+check("a re-fit survives unusable records and keeps the good ones",
+      rebuild.state["model"]["priors"].get("With DEV", 0) > 0,
+      str(rebuild.state["model"]["priors"]))
+
 sys.exit(check.done())
