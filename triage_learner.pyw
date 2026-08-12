@@ -110,7 +110,7 @@ BACKFILL_DAYS  = 90          # seed the model from this much history
 BACKFILL_CAP   = 1000        # max historical issues per outcome to learn from
 OVERLAP_SECS   = 600         # re-scan overlap so nothing is missed
 MIN_EXAMPLES   = 8           # per-destination examples needed before predicting
-TUNING_SCHEMA_VERSION = 3    # coordinate-descent search over all nine knobs
+TUNING_SCHEMA_VERSION = 4    # + reporterWeight in the search space
 # Cap on remembered transition IDs. Kept as an *ordered* collection so the
 # trim drops the oldest — truncating a set (the old behaviour) kept an
 # arbitrary subset, letting already-learned transitions be re-learned.
@@ -148,6 +148,7 @@ TUNING = {
     "confTemp": 4.0,      # tokens per unit of softmax temperature (confidence)
     "reqSmooth": 10,      # smoothing for the request-type channel
     "repSmooth": 20,      # smoothing for the reporter channel
+    "reporterWeight": 1.0,  # how much who-raised-it counts vs the wording
     "logOdds": 1,         # score tokens against the OTHER destinations, so
                           # vocabulary shared by all classes cancels out
     "priorWeight": 1.0,   # 1 = trust class frequencies, 0 = all classes equal
@@ -172,6 +173,7 @@ BALANCED_TUNED_CONFIG = {
     "knnThresh": 0.7,
     "priorWeight": 0.5,
     "requestTypeHintWeight": 3.0,
+    "reporterWeight": 1.0,
 }
 
 # ── Outcome labels ─────────────────────────────────────────────────────────
@@ -871,6 +873,7 @@ class Learner:
         prior_w   = TUNING.get("priorWeight", 1.0)
         req_smooth = TUNING["reqSmooth"]
         rep_smooth = TUNING["repSmooth"]
+        rep_w      = TUNING.get("reporterWeight", 1.0)
         hint_for_type = self.request_type_hint(req_type)
         scores: dict[str, float] = {}
         for d, tok in zip(ready, tok_tables):
@@ -902,8 +905,12 @@ class Learner:
             if reporter:
                 rp = m.get("reporters", {}).get(d, {})
                 n_rp = sum(rp.values()) * S
-                score += math.log((rp.get(reporter, 0) * S + 1)
-                                  / (n_rp + rep_smooth))
+                # Who raised it is one log term against one per token, and
+                # the summary's tokens are repeated summaryWeight times — so
+                # a strong reporter signal is easily drowned by wording.
+                # Weighting it lets the tuner decide how much it is worth.
+                score += rep_w * math.log((rp.get(reporter, 0) * S + 1)
+                                          / (n_rp + rep_smooth))
             scores[d] = score
 
         # Temperature-scaled softmax: raw NB log-score gaps grow with text
@@ -1719,6 +1726,13 @@ class ShadowWatcher:
         "priorWeight":           [0.0, 0.25, 0.5, 0.75, 1.0],
         "knnThresh":             [0.0, 0.6, 0.7, 0.8, 0.9],
         "requestTypeHintWeight": [0.0, 1.5, 3.0, 5.0],
+        # Who raised a ticket predicts the receiving team on its own far
+        # better than chance, but contributes a single log term against one
+        # per token. Whether amplifying it actually helps was inconclusive on
+        # a 400-ticket holdout — a real peak, but worth about one ticket — so
+        # it is offered to the tuner at a default of 1.0 (today's behaviour)
+        # rather than hard-coded, and adopted only if the evidence grows.
+        "reporterWeight":        [0.0, 1.0, 2.0, 3.0, 5.0],
         "reviewConf":            [65, 70, 75, 80, 85],
         "reviewMargin":          [10, 15, 20, 25],
     }

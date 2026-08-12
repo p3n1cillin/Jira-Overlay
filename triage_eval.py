@@ -240,7 +240,7 @@ DEFAULT_CFG = {"logOdds": 1, "summaryWeight": 6, "mistakeWeight": 3,
                "confTemp": 4.0, "reqSmooth": 10, "repSmooth": 20,
                "priorWeight": 0.5, "knnThresh": 0.7, "decayFactor": 0.997,
                "reviewConf": 75, "reviewMargin": 20,
-               "requestTypeHintWeight": 3.0}
+               "requestTypeHintWeight": 3.0, "reporterWeight": 1.0}
 
 
 def review_bands() -> None:
