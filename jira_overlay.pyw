@@ -1034,20 +1034,48 @@ def report_users(cfg: dict) -> list[dict]:
     Falls back to parsing the completed-today filter, which is where an
     existing install already lists its team.
     """
+    def dedupe(people: list[dict]) -> list[dict]:
+        """One entry per human.
+
+        The same person can legitimately end up listed twice — seeded from
+        the completed-today filter and then also ticked from Jira, or simply
+        hand-edited. Counted twice they get a double-length bar, inflate the
+        total, and push the coverage figure above 100%, which is nonsense on
+        its face. Matched on accountId where there is one, since that is the
+        only identifier two entries for one person are guaranteed to share.
+        """
+        # A name that appears anywhere with an accountId is that person, so a
+        # bare-name entry for the same name is the same human listed twice —
+        # which is exactly what happens when a list seeded from the filter is
+        # later topped up from Jira.
+        identified = {p["name"].casefold() for p in people if p["accountId"]}
+        seen: set = set()
+        unique = []
+        for person in people:
+            name = person["name"].casefold()
+            if not person["accountId"] and name in identified:
+                continue
+            key = person["accountId"] or f"name:{name}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(person)
+        return unique
+
     raw = cfg.get("reportUsers")
     if isinstance(raw, list) and raw:
         out = []
         for item in raw:
-            if isinstance(item, str):
+            if isinstance(item, str) and item.strip():
                 out.append({"name": item, "accountId": ""})
             elif isinstance(item, dict) and item.get("name"):
-                out.append({"name": item["name"],
-                            "accountId": item.get("accountId", "")})
-        return out
+                out.append({"name": str(item["name"]),
+                            "accountId": str(item.get("accountId") or "")})
+        return dedupe(out)
     # Nothing configured — seed from `assignee in ("A", "B")` if it's there.
     found = re.findall(r'"([^"]+)"',
                        cfg.get("completedTodayFilter", "") or "")
-    return [{"name": n, "accountId": ""} for n in found]
+    return dedupe([{"name": n, "accountId": ""} for n in found])
 
 
 class TeamReportWindow:
@@ -1264,7 +1292,12 @@ class TeamReportWindow:
             self._set_status(f"Could not count: {', '.join(failed)}", warn=True)
             return
         if completed:
-            share = 100 * total // completed
+            # The per-person counts and the project total are separate
+            # queries taken moments apart, so a ticket resolved in between
+            # can make the parts add to more than the whole. Report at most
+            # 100%: a coverage figure above it is visibly nonsense and
+            # discredits the number next to it.
+            share = min(100, 100 * total // completed)
             text = f"{total} of {completed} completed ({share}%)"
             if unassigned:
                 text += f" · {unassigned} had no assignee"

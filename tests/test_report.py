@@ -26,6 +26,34 @@ check("seeds from an existing assignee filter",
       [p["name"] for p in seeded] == ["Sam Carter", "Ada Nkemi"])
 check("empty config gives nobody", R({}) == [])
 
+# The same human can legitimately be listed twice — seeded from the
+# completed-today filter and then also ticked from Jira, or hand-edited.
+# Counted twice they get a double-length bar, inflate the total, and push
+# the coverage figure past 100%, which is nonsense on its face.
+for label, users, expected in (
+        ("the same name twice",
+         [{"name": "Sam", "accountId": ""}, {"name": "Sam", "accountId": ""}], 1),
+        ("one accountId under two names",
+         [{"name": "Sam", "accountId": "a1"},
+          {"name": "Sam Carter", "accountId": "a1"}], 1),
+        ("the same name with and without an accountId",
+         [{"name": "Sam", "accountId": ""},
+          {"name": "Sam", "accountId": "a1"}], 1),
+        ("the same name in different case",
+         [{"name": "sam carter", "accountId": ""},
+          {"name": "Sam Carter", "accountId": ""}], 1),
+        ("two genuinely different people",
+         [{"name": "Sam", "accountId": "a1"},
+          {"name": "Ada", "accountId": "a2"}], 2)):
+    got = R({"reportUsers": users})
+    check(f"{label} -> {expected} person(s)", len(got) == expected,
+          str([p["name"] for p in got]))
+
+check("a repeated name in the seeded filter is counted once",
+      [p["name"] for p in
+       R({"completedTodayFilter": 'assignee in ("Sam","Ada","Sam")'})]
+      == ["Sam", "Ada"])
+
 # --- period maths ----------------------------------------------------------
 import tkinter as tk
 root = tk.Tk(); root.withdraw()
@@ -201,6 +229,14 @@ check("well under half attributed does flag the colour", s["warn"])
 s = coverage_status(None, None)
 check("if Jira refuses the extra queries, the total alone is still shown",
       "completed in total" in s["text"], s["text"])
+
+# The per-person counts and the project total are separate queries taken
+# moments apart, so a ticket resolved in between can make the parts add to
+# more than the whole. A coverage figure above 100% is visibly nonsense and
+# discredits the number beside it.
+s = coverage_status(300, 100)          # sum 526 against a smaller total
+check("coverage never claims more than 100%",
+      "(100%)" in s["text"] and "%" in s["text"], s["text"])
 
 
 # --- CSV export: a name is not safe to write verbatim ----------------------
