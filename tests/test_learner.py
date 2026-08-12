@@ -228,4 +228,84 @@ check("an unassociated extension falls back to Notepad, not silence",
 import subprocess as _sp
 _sp.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
 
+
+# --- Jira sends null, not just absent ---------------------------------------
+# .get(key, default) only substitutes the default when the key is MISSING; a
+# present null passes straight through. Jira returns an explicit null for a
+# field the requesting account cannot see, or one that doesn't apply to the
+# issue type — so which fields arrive as null depends on the account and the
+# site. A null that never appears here can be routine on someone else's desk,
+# and the TypeError it caused would fail every cycle while the learner still
+# appeared to be running.
+parser = object.__new__(tl.ShadowWatcher)
+parser.project = "SD"
+parser.req_field = "customfield_10010"
+parser.context_fields = ["customfield_10332"]
+
+MALFORMED = {
+    "fields missing":          {"key": "SD-1"},
+    "fields null":             {"key": "SD-1", "fields": None},
+    "summary null":            {"key": "SD-1", "fields": {"summary": None}},
+    "summary not a string":    {"key": "SD-1", "fields": {"summary": 42}},
+    "description null":        {"key": "SD-1", "fields": {"summary": "x",
+                                                          "description": None}},
+    "labels null":             {"key": "SD-1", "fields": {"summary": "x",
+                                                          "labels": None}},
+    "components null":         {"key": "SD-1", "fields": {"summary": "x",
+                                                          "components": None}},
+    "reporter null":           {"key": "SD-1", "fields": {"summary": "x",
+                                                          "reporter": None}},
+    "issuelinks null":         {"key": "SD-1", "fields": {"summary": "x",
+                                                          "issuelinks": None}},
+    "component without name":  {"key": "SD-1", "fields": {"summary": "x",
+                                                          "components": [{}]}},
+    "link without an issue":   {"key": "SD-1", "fields": {"summary": "x",
+                                                          "issuelinks": [{}]}},
+    "link type null":          {"key": "SD-1", "fields": {"summary": "x",
+                                "issuelinks": [{"type": None,
+                                                "outwardIssue": {"key": "X-1"}}]}},
+    "key null":                {"key": None, "fields": {"summary": "x"}},
+}
+
+for label, payload in MALFORMED.items():
+    try:
+        det = tl.ShadowWatcher._issue_details(parser, payload)
+        feats = tl.features_for(det, det.get("requestType", ""))
+        lr = tl.Learner({})
+        lr.learn("Somewhere", feats, det.get("requestType", ""), [],
+                 det.get("reporter", ""), exemplar=tl.tokenize(det["summary"]))
+        ok = isinstance(det["summary"], str) and isinstance(det["labels"], list)
+    except Exception as exc:                            # noqa: BLE001
+        ok = False
+        feats = f"{type(exc).__name__}: {exc}"
+    check(f"an issue with {label} is parsed and learned from",
+          ok, str(feats)[:60])
+
+# The hardening must not change what a well-formed ticket looks like.
+WELL_FORMED = {
+    "key": "SD-9",
+    "fields": {
+        "summary": "Printer offline in Legal",
+        "description": {"content": [{"content": [{"text": "stopped working"}]}]},
+        "labels": ["hardware", "urgent"],
+        "components": [{"name": "Printers"}],
+        "reporter": {"displayName": "Sam Carter"},
+        "issuelinks": [{"type": {"name": "Escalation"},
+                        "outwardIssue": {"key": "DEV-9"}}],
+        "customfield_10010": {"requestType": {"name": "Get IT help"}},
+        "customfield_10332": [{"value": "Printing"}],
+    },
+}
+good = tl.ShadowWatcher._issue_details(parser, WELL_FORMED)
+check("a normal ticket still yields its summary", good["summary"]
+      == "Printer offline in Legal")
+check("  its description is still flattened", "stopped working" in good["desc"])
+check("  its labels and components survive",
+      good["labels"] == ["hardware", "urgent"]
+      and good["components"] == ["Printers"])
+check("  its reporter survives", good["reporter"] == "Sam Carter")
+check("  its request type survives", good["requestType"] == "Get IT help")
+check("  a link to another project is still a clone",
+      [c["key"] for c in good["clones"]] == ["DEV-9"], str(good["clones"]))
+
 sys.exit(check.done())

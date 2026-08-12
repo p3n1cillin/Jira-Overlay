@@ -1128,11 +1128,23 @@ class ShadowWatcher:
         return self._issue_fields
 
     def _issue_details(self, issue: dict) -> dict:
-        """Normalise the bits we learn from."""
-        f       = issue.get("fields", {})
+        """Normalise the bits we learn from.
+
+        Every field here is treated as possibly null rather than merely
+        possibly absent. Jira sends an explicit null for a field the
+        requesting account cannot see or that doesn't apply to the issue
+        type, and `.get(key, default)` only substitutes the default when the
+        key is MISSING — a present null passes straight through. Since field
+        visibility varies by account and by site, a null that never appears
+        here can be routine on someone else's desk, and the resulting
+        TypeError would fail every cycle while the learner still looked like
+        it was running.
+        """
+        f       = issue.get("fields") or {}
         desc    = flatten_adf(f.get("description"))
-        comps   = [c.get("name", "") for c in f.get("components", [])]
-        labels  = f.get("labels", [])
+        comps   = [c.get("name", "") for c in (f.get("components") or [])
+                   if isinstance(c, dict)]
+        labels  = [str(x) for x in (f.get("labels") or [])]
         req_type = (request_type_name(f.get(self.req_field))
                     if self.req_field else "")
         # Extra context fields are user-chosen; tag each value with its field
@@ -1142,15 +1154,18 @@ class ShadowWatcher:
             for name in field_names(f.get(fid)):
                 structured.append(f"{fid} {name}")
         clones  = []
-        for link in f.get("issuelinks", []):
+        for link in (f.get("issuelinks") or []):
+            if not isinstance(link, dict):
+                continue
             other = link.get("outwardIssue") or link.get("inwardIssue") or {}
             key   = other.get("key", "")
             if key and not key.startswith(self.project + "-"):
                 clones.append({"key": key,
-                               "linkType": link.get("type", {}).get("name", "")})
+                               "linkType": (link.get("type") or {})
+                               .get("name", "")})
         return {
-            "key":      issue.get("key", ""),
-            "summary":  f.get("summary", ""),
+            "key":      issue.get("key") or "",
+            "summary":  str(f.get("summary") or ""),
             "desc":     desc[:800],
             "labels":   labels,
             "components": comps,
