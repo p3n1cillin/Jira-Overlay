@@ -308,4 +308,29 @@ check("  its request type survives", good["requestType"] == "Get IT help")
 check("  a link to another project is still a clone",
       [c["key"] for c in good["clones"]] == ["DEV-9"], str(good["clones"]))
 
+
+# --- Hand-edited settings: a bare string is worse than a null ---------------
+# list("With DEV") is eight single characters, not one status. That turned a
+# plausible hand-edit into eight bogus statuses, every query built from them
+# was nonsense, and nothing said so — silent corruption rather than a crash.
+check("a bare string becomes one name, not one per character",
+      tl.as_name_list("With DEV") == ["With DEV"],
+      str(tl.as_name_list("With DEV")))
+check("a null becomes an empty list", tl.as_name_list(None) == [])
+check("a proper list is unchanged",
+      tl.as_name_list(["With BI", "With DEV"]) == ["With BI", "With DEV"])
+check("nulls inside a list are dropped",
+      tl.as_name_list(["With DEV", None, ""]) == ["With DEV"])
+check("a number becomes its text rather than exploding",
+      tl.as_name_list([42]) == ["42"])
+check("something not iterable at all is survivable",
+      tl.as_name_list(object()) == [])
+check("a blank string yields nothing", tl.as_name_list("   ") == [])
+
+check("a label map survives", tl.as_label_map({"PPS": "Proclaim bug"})
+      == {"PPS": "Proclaim bug"})
+check("a list where a map belongs doesn't crash",
+      tl.as_label_map(["PPS"]) == {})
+check("a null label map is empty", tl.as_label_map(None) == {})
+
 sys.exit(check.done())

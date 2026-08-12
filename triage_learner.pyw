@@ -200,6 +200,29 @@ _STOPWORDS = {
 }
 
 
+def as_name_list(value) -> list[str]:
+    """A config setting that must be a list of names, whatever it holds.
+
+    A bare string is the likely hand-edit, and it is the dangerous case:
+    list("With DEV") is eight single characters, not one status, so the
+    setting silently became eight bogus statuses and every query built from
+    it was nonsense. Wrapping it keeps what the user meant.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    try:
+        return [str(v) for v in value if v is not None and str(v).strip()]
+    except TypeError:          # not iterable at all
+        return []
+
+
+def as_label_map(value) -> dict:
+    """A config setting that must map a project key to a label."""
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _log_error(msg: str) -> None:
     with open(ERROR_LOG, "a", encoding="utf-8") as f:
         f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
@@ -414,12 +437,14 @@ class Discovery:
         Field ids are per-site, so we match on the Request Type schema (stable
         across JSM) and on human field NAMES for context fields.
         """
-        pinned_rt   = self.cfg.get("requestTypeField", "")
+        pinned_rt   = self.cfg.get("requestTypeField") or ""
+        configured  = self.cfg.get("contextFields")
         want_names  = [n.lower() for n in
-                       self.cfg.get("contextFields", DEFAULT_CONTEXT_FIELDS)]
+                       (as_name_list(configured) if configured is not None
+                        else DEFAULT_CONTEXT_FIELDS)]
         pinned_ctx  = self.cfg.get("contextFieldIds")
         if pinned_rt and pinned_ctx is not None:
-            return pinned_rt, list(pinned_ctx)
+            return pinned_rt, as_name_list(pinned_ctx)
 
         catalogue = self.jira.get("/rest/api/3/field") or []
         req_field, context = pinned_rt, []
@@ -935,15 +960,17 @@ class ShadowWatcher:
                 self.cfg.get("contextFieldIds") != self.context_fields:
             self._save_cfg({"requestTypeField": self.req_field,
                             "contextFieldIds": self.context_fields})
-        self.dests     = list(self.cfg.get("triageStatuses") or [])
-        self.resolved  = set(self.cfg.get("resolvedStatuses")
-                             or ([self.cfg["resolvedStatus"]]
-                                 if self.cfg.get("resolvedStatus") else []))
-        self.move_targets = list(self.cfg.get("moveTargetProjects") or [])
+        # These are hand-editable, so none of them can be trusted to hold the
+        # type they are documented with — see as_name_list for why a bare
+        # string is worse than a null here.
+        self.dests     = as_name_list(self.cfg.get("triageStatuses"))
+        self.resolved  = set(as_name_list(self.cfg.get("resolvedStatuses"))
+                             or as_name_list(self.cfg.get("resolvedStatus")))
+        self.move_targets = as_name_list(self.cfg.get("moveTargetProjects"))
         self.resolved_label = (self.cfg.get("resolvedLabel")
                                or RESOLVED_LABEL_FMT.format(project=self.project))
         self.moved_label_fmt = self.cfg.get("movedLabel") or MOVED_LABEL_FMT
-        self.moved_label_overrides = dict(self.cfg.get("movedLabels") or {})
+        self.moved_label_overrides = as_label_map(self.cfg.get("movedLabels"))
         self._issue_fields = ["summary", "description", "labels", "components",
                               "issuelinks", "reporter", "status"]
         if self.req_field:
