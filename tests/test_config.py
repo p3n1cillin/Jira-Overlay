@@ -144,4 +144,73 @@ drift = sorted(k for k in set(ROUND_TRIP) | set(after)
 check("saving Settings unchanged rewrites nothing", not drift, str(drift))
 app.root.destroy()
 
+
+# --- A hand-edited config must not stop the app starting -------------------
+# This file is meant to be editable by hand and is also rewritten by the
+# learner, so a value can be null or the wrong type without the JSON being
+# malformed enough for json.load to object. dict.get(key, default) only
+# substitutes the default when the key is MISSING, so a present null reached
+# arithmetic and crashed startup.
+import copy                                            # noqa: E402
+
+BROKEN = {
+    "alertQueues null":      {"alertQueues": None},
+    "alertQueues a string":  {"alertQueues": "Newly Opened"},
+    "hiddenQueues null":     {"hiddenQueues": None},
+    "skipKeywords a string": {"skipKeywords": "test"},
+    "maxQueueSize null":     {"maxQueueSize": None},
+    "maxQueueSize a string": {"maxQueueSize": "500"},
+    "alpha null":            {"alpha": None},
+    "alpha out of range":    {"alpha": 5.0},
+    "overlayWidth null":     {"overlayWidth": None},
+    "overlayWidth a string": {"overlayWidth": "260"},
+    "overlayWidth zero":     {"overlayWidth": 0},
+    "refreshSeconds null":   {"refreshSeconds": None},
+    "slaField null":         {"slaField": None},
+    "trayBadgeQueue null":   {"trayBadgeQueue": None},
+    "reportUsers null":      {"reportUsers": None},
+}
+
+for label, extra in BROKEN.items():
+    cfg = ov.normalise_config(dict(FULL, **extra))
+    key = next(iter(extra))
+    value = cfg.get(key)
+    if key in ("alertQueues", "hiddenQueues", "skipKeywords", "reportUsers"):
+        ok = isinstance(value, list)
+    elif key in ("slaField", "trayBadgeQueue"):
+        ok = isinstance(value, str)
+    elif key == "maxQueueSize":
+        # 0 is meaningful here — it's how "no limit" is expressed.
+        ok = isinstance(value, int) and value >= 0
+    else:
+        ok = isinstance(value, (int, float)) and value > 0
+    check(f"{label} is made usable", ok, f"{key}={value!r}")
+
+# Crucially, a perfectly good config must come back untouched — normalising
+# is there to stop crashes, not to overrule choices. Bounds are the limits of
+# what the app can work with, NOT the values the Settings dropdown offers: an
+# earlier version clamped refreshSeconds to the dropdown's 30s floor and
+# would have quietly halved the poll rate of an install deliberately set to
+# 15.
+VALID = {
+    "domain": "acme.atlassian.net", "email": "a@b.c", "token": "SECRET",
+    "serviceDeskId": 11, "serviceDeskName": "Desk", "projectKey": "SD",
+    "alertQueues": ["Open"], "trayBadgeQueue": "Open",
+    "hiddenQueues": ["Archive"], "skipKeywords": ["test"],
+    "maxQueueSize": 500, "refreshSeconds": 15,          # below the dropdown
+    "alpha": 0.95, "overlayWidth": 300,
+    "slaField": "Time to resolution",
+    "completedTodayFilter": 'assignee in ("Sam")',
+    "reportUsers": [{"name": "Sam", "accountId": "a1"}],
+    "triageStatuses": ["With DEV"],                      # another tool's key
+}
+kept = ov.normalise_config(copy.deepcopy(VALID))
+changed = {k: (VALID.get(k), kept.get(k)) for k in set(VALID) | set(kept)
+           if VALID.get(k) != kept.get(k)}
+check("a valid config is returned completely unchanged", not changed,
+      str(changed))
+check("  including a deliberate refreshSeconds below the dropdown's range",
+      kept["refreshSeconds"] == 15, repr(kept["refreshSeconds"]))
+check("  and another tool's keys", kept["triageStatuses"] == ["With DEV"])
+
 sys.exit(check.done())

@@ -326,10 +326,58 @@ def _get_tray_font() -> ImageFont.ImageFont:
 # Config helpers
 # ---------------------------------------------------------------------------
 
+# Settings whose *type* the rest of the app relies on, with the value used
+# when what's on disk can't be made sense of. This file is meant to be
+# hand-editable, and is also written by a second process, so a value can be
+# null, the wrong type, or nonsense without anything being corrupt enough
+# for json.load to complain. Coercing once here beats guarding at every
+# read: the same "present but null" mistake has already cost this project
+# four separate bugs, because dict.get(key, default) only substitutes the
+# default when the key is MISSING.
+# Bounds here are the limits of what the app can physically work with, NOT
+# the choices the Settings panel offers. Someone who hand-edits a value the
+# dropdown doesn't list has chosen it deliberately — clamping refreshSeconds
+# to the dropdown's 30s floor would have quietly halved the poll rate of an
+# install running a deliberate 15.
+_NUMERIC_SETTINGS = {           # key: (caster, default, low, high)
+    "overlayWidth":   (int,   260,  120, 4000),   # below ~120 nothing fits
+    "alpha":          (float, 0.93, 0.1, 1.0),    # Tk requires 0..1
+    "refreshSeconds": (int,   60,   5,   86400),  # don't hammer the API
+    "maxQueueSize":   (int,   0,    0,   10 ** 7),
+}
+_LIST_SETTINGS   = ("alertQueues", "hiddenQueues", "skipKeywords",
+                    "reportUsers")
+_STRING_SETTINGS = ("slaField", "completedTodayFilter", "trayBadgeQueue",
+                    "alertQueue", "serviceDeskName", "projectKey",
+                    "snapCorner", "reportRange", "reportBasis")
+
+
+def normalise_config(cfg: dict) -> dict:
+    """Make a config safe to use, whatever is actually in the file."""
+    for key, (cast, default, low, high) in _NUMERIC_SETTINGS.items():
+        if key not in cfg:
+            continue
+        try:
+            cfg[key] = min(high, max(low, cast(cfg[key])))
+        except (TypeError, ValueError):
+            cfg[key] = default
+    for key in _LIST_SETTINGS:
+        if key in cfg and not isinstance(cfg[key], list):
+            # A bare string is the likely hand-edit; keep it as one entry
+            # rather than silently discarding what the user meant.
+            cfg[key] = [cfg[key]] if isinstance(cfg[key], str) and cfg[key] \
+                else []
+    for key in _STRING_SETTINGS:
+        if key in cfg and not isinstance(cfg[key], str):
+            cfg[key] = "" if cfg[key] is None else str(cfg[key])
+    return cfg
+
+
 def load_config() -> Optional[dict]:
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            loaded = json.load(f)
+        return normalise_config(loaded) if isinstance(loaded, dict) else None
     except FileNotFoundError:
         return None
     except (json.JSONDecodeError, OSError):
@@ -1592,7 +1640,10 @@ class JiraOverlay:
     _SETTINGS_W = 420   # overlay width when inline settings are open
 
     def __init__(self, config: dict) -> None:
-        self.config            = config
+        # Normalise here too, not just in load_config: the config also
+        # arrives straight from the setup window, and the learner rewrites
+        # the file underneath us, so this is the one place every path meets.
+        self.config            = normalise_config(config)
         self.queues: list[dict]      = []
         self._all_queue_names: list[str] = []
         self.new_issues: list[dict]  = []
