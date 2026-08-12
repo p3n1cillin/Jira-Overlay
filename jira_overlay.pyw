@@ -2363,7 +2363,16 @@ class JiraOverlay:
 
     def _fetch_finished(self) -> None:
         """Main-thread tail of a fetch: repaint, then queue the next poll."""
-        self._update_ui()
+        # Repainting must never be able to stop the clock. The pump swallows
+        # a failed callback so the app survives, but this method is that
+        # callback — an exception out of _update_ui used to skip the
+        # scheduling below entirely, and the overlay went quiet for good with
+        # nothing on screen to say so. Scheduling the next poll is the one
+        # thing here that has to happen either way.
+        try:
+            self._update_ui()
+        except Exception:
+            self._log_error("repaint failed:\n" + traceback.format_exc())
         # Replace any poll already queued rather than just overwriting the
         # handle. The first-run queue picker starts a second fetch of its own,
         # so two completions can land back to back — and each orphaned timer
@@ -2439,6 +2448,17 @@ class JiraOverlay:
         # particular only bites once a queue gets busy, which is exactly when
         # the alert matters most.
         every_queue = r.json().get("values", [])
+        # Normalise the count once, here, rather than defending at each of
+        # the five places that read it. dict.get(key, 0) returns None when
+        # the key is present but null — which Jira does send — and the
+        # resulting None flowed into a `>` comparison, raised TypeError out
+        # of _update_ui, and (before the guard in _fetch_finished) stopped
+        # the poll loop for good.
+        for q in every_queue:
+            try:
+                q["issueCount"] = max(0, int(q.get("issueCount") or 0))
+            except (TypeError, ValueError):
+                q["issueCount"] = 0
         all_queues = [
             q for q in every_queue
             if not any(kw in q["name"].upper() for kw in skip_kw)

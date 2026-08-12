@@ -150,4 +150,90 @@ elapsed = time.perf_counter() - started
 check("Quit aborts a backoff instead of waiting it out", elapsed < 2.0,
       f"{elapsed:.2f}s")
 
+# --- A malformed queue count must not stop the clock ----------------------
+# dict.get(key, 0) returns None when the key is present but null, which Jira
+# does send. That None reached a `>` comparison and raised TypeError out of
+# _update_ui — and because _fetch_finished repaints BEFORE scheduling the
+# next poll, the scheduling was skipped and the overlay went quiet for good
+# with nothing on screen to say so.
+O = ov.JiraOverlay
+
+
+class _QR:
+    ok = True
+    status_code = 200
+
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        pass
+
+
+def _counts_for(raw_count):
+    """Run a real fetch with `raw_count` as Jira's issueCount."""
+    queues = [{"name": "Q", "id": 1, "issueCount": raw_count}] \
+        if raw_count is not ... else [{"name": "Q", "id": 1}]
+    o = object.__new__(O)
+    o.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
+                "alertQueues": ["Q"], "alertQueuesAsked": True}
+    o._jira_url = lambda p="": "https://x" + p
+
+    def fake_get(url, **kw):
+        return _QR({"values": [{"key": "SD-1", "fields": {"summary": "t"}}]}
+                   if "/queue/1/issue" in url else {"values": queues})
+
+    o._session = type("S", (), {"get": staticmethod(fake_get)})()
+    o.queues = []
+    o._all_queue_names = []
+    o.new_issues = []
+    o._reconciled_counts = {}
+    o._alert_count = 0
+    o._last_full_fetch = 9e18
+    o._alert_queues_missing = []
+    o._post = lambda fn: None
+    o._fetch_completion_stats = lambda c: None
+    O._fetch_data(o)
+    return o.queues[0].get("issueCount") if o.queues else None
+
+
+for label, raw in (("null", None), ("a string", "12"), ("a float", 3.7),
+                   ("negative", -5), ("garbage text", "many"),
+                   ("absent", ...), ("a bool", True)):
+    got = _counts_for(raw)
+    check(f"an issueCount of {label} becomes a usable integer",
+          isinstance(got, int) and got >= 0, repr(got))
+
+# And the scheduling itself must survive any repaint failure at all.
+import queue as _queue                                 # noqa: E402
+import tkinter as _tk                                  # noqa: E402
+
+_root = _tk.Tk()
+_root.withdraw()
+sched = object.__new__(O)
+sched.root = _root
+sched._events = _queue.Queue()
+sched._PUMP_MS = 20
+sched._settings_changed = False
+sched._retry_after_ms = None
+sched._conn_error = False
+sched._error_count = 0
+sched._refresh_job = None
+sched._last_full_fetch = 0.0
+sched._fetch = lambda: None
+sched._update_ui = lambda: (_ for _ in ()).throw(RuntimeError("repaint blew up"))
+O._post(sched, sched._fetch_finished)
+O._pump(sched)
+_root.update()
+check("a repaint that raises still leaves the next poll scheduled",
+      sched._refresh_job is not None, repr(sched._refresh_job))
+try:
+    _root.after_cancel(sched._refresh_job)
+except Exception:
+    pass
+_root.destroy()
+
 sys.exit(check.done())
