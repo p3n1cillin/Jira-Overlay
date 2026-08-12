@@ -107,4 +107,78 @@ os.utime(_path, (old, old))
 check("suggestions older than the staleness window are dropped",
       ov.JiraOverlay._load_suggestions(_reader()) == {})
 
+
+# --- One empty reading must not re-notify the whole queue ------------------
+# JSM's cached issueCount decides whether a queue is fetched at all, so a
+# single stale zero for a queue that really has tickets emptied new_issues
+# with no fetch failure involved. The seen-set was then replaced outright,
+# and every ticket re-notified on the next poll. Keys now survive one absent
+# poll before being forgotten.
+O = ov.JiraOverlay
+TICKETS = [{"key": f"SD-{i}", "fields": {"summary": f"t{i}"}} for i in range(1, 6)]
+
+
+class _R:
+    ok = True
+    status_code = 200
+
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        pass
+
+
+def _cycle(o, cached_count):
+    queues = [{"name": "Newly Opened", "id": 1, "issueCount": cached_count}]
+
+    def fake_get(url, **kw):
+        return _R({"values": TICKETS if "/queue/1/issue" in url else queues})
+
+    o._session = type("S", (), {"get": staticmethod(fake_get)})()
+    O._fetch_data(o)
+    # the dedup step _update_ui performs, isolated from Tk
+    cur = {k for k in (i.get("issueKey") or i.get("key", "")
+                       for i in o.new_issues) if k}
+    fresh = cur - o._seen_newly_ids
+    vanished = o._seen_newly_ids - cur
+    o._seen_newly_ids = cur | (vanished - o._missing_once)
+    o._missing_once = vanished
+    return fresh
+
+
+watcher = object.__new__(O)
+watcher.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
+                  "alertQueues": ["Newly Opened"], "alertQueuesAsked": True}
+watcher._jira_url = lambda p="": "https://x" + p
+watcher.queues = []
+watcher._all_queue_names = []
+watcher.new_issues = []
+watcher._reconciled_counts = {}
+watcher._alert_count = 0
+watcher._last_full_fetch = 9e18
+watcher._alert_queues_missing = []
+watcher._post = lambda fn: None
+watcher._fetch_completion_stats = lambda c: None
+watcher._seen_newly_ids = set()
+watcher._missing_once = set()
+
+first = _cycle(watcher, 5)
+check("all five tickets are new on the first poll", len(first) == 5, str(len(first)))
+blip = _cycle(watcher, 0)          # stale zero: queue not fetched at all
+recovered = _cycle(watcher, 5)     # cache catches up
+check("a single stale-zero poll does not re-notify the queue",
+      not recovered, f"re-notified {sorted(recovered)}")
+
+# A ticket genuinely gone for two polls is forgotten, so a real reopen still
+# notifies rather than being suppressed for ever.
+_cycle(watcher, 0)
+_cycle(watcher, 0)
+reopened = _cycle(watcher, 5)
+check("a ticket absent for two polls notifies again if it returns",
+      len(reopened) == 5, f"{len(reopened)} notified")
+
 sys.exit(check.done())

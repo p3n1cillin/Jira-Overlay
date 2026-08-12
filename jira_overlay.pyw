@@ -1565,6 +1565,8 @@ class JiraOverlay:
     _alert_count      Total tickets across ALL alert queues (unfiltered list)
     _prev_newly       Alert-queue count from the previous cycle (None = first)
     _seen_newly_ids   Set of ticket keys already notified (deduplication)
+    _missing_once     Keys gone from the last poll, kept one more cycle so a
+                      single empty reading can't re-notify everything
     _dismissed        User hid the overlay; stay hidden until a NEW ticket lands
     _manual_show      User explicitly showed via tray; keep visible until hidden
     _snooze_until     Datetime when snooze expires, or None
@@ -1612,6 +1614,9 @@ class JiraOverlay:
         self._reconciled_counts: dict[str, int] = {}   # alert queue → live count
         self._prev_newly: Optional[int] = None
         self._seen_newly_ids: set[str]  = set()
+        # Keys absent from the last poll but not yet forgotten — see the
+        # two-poll grace in _update_ui.
+        self._missing_once: set[str]    = set()
         self._dismissed        = False
         self._manual_show      = False
         self._snooze_until: Optional[datetime] = None
@@ -2718,7 +2723,17 @@ class JiraOverlay:
         current_ids = {k for k in (i.get("issueKey") or i.get("key", "")
                                    for i in self.new_issues) if k}
         truly_new   = current_ids - self._seen_newly_ids
-        self._seen_newly_ids = current_ids
+        # Forget a ticket only once it has been absent from TWO consecutive
+        # polls. Replacing the set outright meant any single empty reading
+        # re-notified everything on the next poll — and an empty reading does
+        # not require a fetch failure: JSM's cached issueCount is what decides
+        # whether a queue is even fetched, so one stale zero for a queue that
+        # actually has tickets was enough to trigger the whole burst.
+        vanished = self._seen_newly_ids - current_ids
+        # Keep a key that has just gone missing; drop it only if it was
+        # already missing last time too.
+        self._seen_newly_ids = current_ids | (vanished - self._missing_once)
+        self._missing_once = vanished
 
         # A genuinely new ticket cancels any manual dismissal
         if truly_new:
