@@ -115,6 +115,11 @@ TUNING_SCHEMA_VERSION = 4    # + reporterWeight in the search space
 # trim drops the oldest — truncating a set (the old behaviour) kept an
 # arbitrary subset, letting already-learned transitions be re-learned.
 SEEN_CAP       = 20000
+# Decisions the nightly search replays. The search costs
+# (history x candidate configs), so an unbounded history turns a
+# two-minute job into an hour-long one on a busy desk. The model itself
+# is still fitted on the whole history — only the search is windowed.
+TUNE_WINDOW    = 6000
 # Per slow cycle, how many departed tickets to re-fetch when looking for ones
 # that left intake by being MOVED to another project (see _learn_moved_out).
 MOVE_LOOKUPS_PER_CYCLE = 20
@@ -1870,7 +1875,18 @@ class ShadowWatcher:
             self.state["lastTuneDate"] = today
             self._save_state()
             return
-        best = self._self_tune(recs)
+        # Search over a bounded window, but fit the final model on everything.
+        # The search replays the history once per candidate config, so its
+        # cost is (history x budget): fine at a few thousand decisions,
+        # roughly an hour of CPU a night at twenty-five thousand — on a
+        # machine somebody is trying to work on. Recency decay already means
+        # the oldest decisions barely move the result, so the tail they would
+        # contribute isn't worth the time it costs a busy desk.
+        search_recs = recs[-TUNE_WINDOW:]
+        if len(search_recs) < len(recs):
+            _log_error(f"self-tune searching the most recent "
+                       f"{len(search_recs)} of {len(recs)} decisions")
+        best = self._self_tune(search_recs)
         if best:
             TUNING.update(best["cfg"])
             self.state["tunedConfig"] = best["cfg"]

@@ -382,4 +382,30 @@ check("a re-fit survives unusable records and keeps the good ones",
       rebuild.state["model"]["priors"].get("With DEV", 0) > 0,
       str(rebuild.state["model"]["priors"]))
 
+# The nightly search replays the history once per candidate config, so its
+# cost is (history x budget) — about an hour of CPU a night at twenty-five
+# thousand decisions, on a machine somebody is trying to work on. The search
+# is windowed to bound that; the model itself is still fitted on everything.
+check("the tuning window is smaller than a busy desk's history",
+      isinstance(tl.TUNE_WINDOW, int) and 0 < tl.TUNE_WINDOW <= 20000,
+      str(tl.TUNE_WINDOW))
+
+searched = {}
+tuner = object.__new__(tl.ShadowWatcher)
+tuner.state = {"lastTuneDate": ""}
+tuner.plans = {}
+tuner.learner = tl.Learner({})
+tuner._save_state = lambda: None
+tuner.write_report = lambda: None
+tuner._load_history = lambda: [
+    {"summary": f"t{i}", "desc": "", "labels": [], "components": [],
+     "structured": [], "reporter": "r", "dest": "D",
+     "cloneProjects": [], "requestType": ""}
+    for i in range(tl.TUNE_WINDOW + 2500)]
+tuner._self_tune = lambda recs: searched.update(n=len(recs)) or None
+tuner.maybe_daily_tune()
+check("the search is capped at the window, not the whole history",
+      searched.get("n") == tl.TUNE_WINDOW,
+      f"searched {searched.get('n')} of {tl.TUNE_WINDOW + 2500}")
+
 sys.exit(check.done())
