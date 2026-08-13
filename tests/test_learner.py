@@ -408,4 +408,47 @@ check("the search is capped at the window, not the whole history",
       searched.get("n") == tl.TUNE_WINDOW,
       f"searched {searched.get('n')} of {tl.TUNE_WINDOW + 2500}")
 
+
+# --- Don't rewrite megabytes when nothing was learned ----------------------
+# The state file holds the whole model, and lastPollEpoch is stamped every
+# cycle — so the state looked changed every time and the file was rewritten
+# at 1.2 times a minute, roughly 4GB of disk a day, on a tool that is
+# usually idle. Learning is still written immediately.
+import time as _t                                       # noqa: E402
+
+saver = object.__new__(tl.ShadowWatcher)
+saver.state = {"model": {}}
+saver.plans = {}
+saver.learner = tl.Learner(saver.state, plans={})
+saver._saved_mutations = 0
+saver._last_state_save = 0.0
+_written = []
+_real_write = tl._atomic_json_write
+tl._atomic_json_write = lambda p, d: _written.append(p)
+try:
+    saver._save_state(force=False)          # never saved before
+    first = len(_written)
+    for _ in range(5):
+        saver._save_state(force=False)      # idle
+    check("idle cycles don't rewrite the state",
+          len(_written) == first, f"{len(_written) - first} extra writes")
+
+    saver.learner.learn("D", ["a", "b", "c"], "rt", [], "Sam", exemplar=["a"])
+    before = len(_written)
+    saver._save_state(force=False)
+    check("anything learned is persisted straight away",
+          len(_written) == before + 1)
+
+    before = len(_written)
+    saver._save_state()                     # shutdown / tune / discovery
+    check("a forced save always writes", len(_written) == before + 1)
+
+    saver._last_state_save = _t.time() - tl.ShadowWatcher._IDLE_SAVE_SECS - 1
+    before = len(_written)
+    saver._save_state(force=False)
+    check("bookkeeping is still flushed once the idle interval passes",
+          len(_written) == before + 1)
+finally:
+    tl._atomic_json_write = _real_write
+
 sys.exit(check.done())

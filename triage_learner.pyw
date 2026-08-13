@@ -685,6 +685,9 @@ class Learner:
         self._ex_index: Optional[dict] = None
         self._ex_lens: Optional[list[int]] = None
         self._vocab: Optional[dict] = None   # token -> #destinations using it
+        # Bumped by learn(); lets the watcher skip rewriting a
+        # multi-megabyte state file when nothing was actually learned.
+        self._mutations = 0
 
     # -- lazy decay ----------------------------------------------------------
 
@@ -730,6 +733,7 @@ class Learner:
               clone_projects: list[str], reporter: str = "",
               weight: int = 1, exemplar: Optional[list[str]] = None) -> None:
         m = self.m
+        self._mutations += 1
         boost = self._advance_decay()
         w = weight * boost
         m["priors"][dest] = m["priors"].get(dest, 0) + boost
@@ -1044,6 +1048,8 @@ class ShadowWatcher:
             self.plans[self.moved_label(target)] = (
                 f"move the ticket to the {target} project")
         self.learner = Learner(self.state, plans=self.plans)
+        self._saved_mutations = 0
+        self._last_state_save = 0.0
         self.stop    = threading.Event()
         self.jira.stop = self.stop     # let retry backoff abort on Quit
         # incremental report metrics (see _live_metrics)
@@ -1165,8 +1171,33 @@ class ShadowWatcher:
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-    def _save_state(self) -> None:
+    # Bookkeeping-only saves are throttled to this. A crash loses at most
+    # this much prediction bookkeeping, which costs a little scoring
+    # accuracy and nothing that can't be re-derived.
+    _IDLE_SAVE_SECS = 300
+
+    def _save_state(self, force: bool = True) -> None:
+        """Persist state. `force=False` skips the write when only the poll
+        clock has moved on.
+
+        The state file holds the whole model, so every save rewrites a few
+        megabytes. lastPollEpoch is stamped every cycle, which made the state
+        look changed every single time — measured at 1.2 writes a minute,
+        about 4GB of disk a day, on a tool that is usually idle. Learning is
+        always written immediately; a cycle that merely ticked the clock is
+        not worth the write.
+        """
+        # Read through getattr: this runs from shutdown and error paths too,
+        # and a save is the last thing that should introduce a failure.
+        if not force:
+            mutations = getattr(self.learner, "_mutations", 0)
+            unchanged = mutations == getattr(self, "_saved_mutations", None)
+            since = time.time() - getattr(self, "_last_state_save", 0.0)
+            if unchanged and since < self._IDLE_SAVE_SECS:
+                return
         _atomic_json_write(STATE_FILE, self.state)
+        self._saved_mutations = getattr(self.learner, "_mutations", 0)
+        self._last_state_save = time.time()
 
     def _log(self, record: dict) -> None:
         record["ts"] = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
@@ -1576,7 +1607,7 @@ class ShadowWatcher:
         self.state["predicted"] = {k: v for k, v in predicted.items()
                                    if v.get("at", "9999") >= cutoff}
         self.state["lastPollEpoch"] = datetime.now().timestamp()
-        self._save_state()
+        self._save_state(force=False)
         self._write_suggestions(self.state["predicted"])
         self.write_report()
 

@@ -225,6 +225,9 @@ sched._refresh_job = None
 sched._last_full_fetch = 0.0
 sched._fetch = lambda: None
 sched._update_ui = lambda: (_ for _ in ()).throw(RuntimeError("repaint blew up"))
+# Keep the deliberate failure out of the real app's log, where it
+# reads like a live fault to anyone checking on the running overlay.
+sched._log_error = lambda detail: None
 O._post(sched, sched._fetch_finished)
 O._pump(sched)
 _root.update()
