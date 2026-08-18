@@ -476,6 +476,44 @@ tl.ShadowWatcher._self_tune(hungry, [{} for _ in range(10)])
 check("an insatiable first descent doesn't starve the second of its budget",
       baseline_seen["n"] >= 1, repr(baseline_seen))
 
+# --- A truncated log line must not blank the whole report ------------------
+# _log() is a plain append, not atomic, so a kill mid-write (a forced
+# restart, a crash, Windows updating) can leave a half-written last line.
+# _load_history and _live_metrics already skip a line like that; write_report
+# read the same file's tail without the same guard, so one bad line would
+# raise out of resolve_and_learn every cycle from then on — freezing
+# TRIAGE_REPORT.md and, since the exception fires before last_slow is
+# updated, pulling the "slow" Jira queries up to the 12s fast-poll cadence.
+reporter = object.__new__(tl.ShadowWatcher)
+reporter.state = {}
+reporter.plans = {}
+reporter.project = "SD"
+reporter.dests = []
+reporter.resolved_label = "Resolved"
+reporter.move_targets = []
+reporter.learner = tl.Learner({})
+reporter._metrics = None
+with open(tl.LOG_FILE, "w", encoding="utf-8") as f:
+    f.write(json.dumps({"event": "routed", "key": "SD-1", "dest": "D",
+                        "by": "Sam", "when": "2026-01-01 00:00",
+                        "clones": [], "predicted": None}) + "\n")
+    f.write('{"event": "routed", "key": "SD-2", "dest": "D", "by": "Sam"')
+    # no closing brace/newline — an interrupted write
+
+report_ok = True
+try:
+    tl.ShadowWatcher.write_report(reporter)
+except Exception as exc:                                  # noqa: BLE001
+    report_ok = False
+    report_exc = repr(exc)
+check("a truncated final log line doesn't crash the report",
+      report_ok, "" if report_ok else report_exc)
+if report_ok:
+    with open(tl.REPORT_FILE, encoding="utf-8") as f:
+        report_text = f.read()
+    check("the entry before the truncated line still made it into the report",
+          "SD-1" in report_text, report_text[-300:])
+
 
 # --- Don't rewrite megabytes when nothing was learned ----------------------
 # The state file holds the whole model, and lastPollEpoch is stamped every

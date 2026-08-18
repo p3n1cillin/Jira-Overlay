@@ -2262,7 +2262,15 @@ class ShadowWatcher:
             for raw in reversed(tail):
                 if shown >= 15:
                     break
-                rec = json.loads(raw)
+                # A line can be truncated (the writer is a plain append, not
+                # atomic) or from an older schema missing a field the report
+                # expects. One bad line among thousands must not blank the
+                # whole report — _live_metrics and _load_history skip a bad
+                # line the same way when reading this file.
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
                 ev  = rec.get("event")
                 if ev == "routed":
                     p = rec.get("predicted")
