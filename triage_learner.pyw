@@ -2298,6 +2298,23 @@ class ShadowWatcher:
             f"_Updated {datetime.now():%Y-%m-%d %H:%M:%S} · shadow mode — "
             "no tickets are ever actioned._",
             "",
+        ]
+        # This file is rewritten every cycle regardless of whether Jira
+        # actually answered, so "Updated just now" alone can't be trusted
+        # to mean "still getting real data" — a broken token would look
+        # identical to a healthy quiet desk otherwise. _note_refusal
+        # already tracks this per process run; it just never surfaced here.
+        refusals = getattr(getattr(self, "jira", None), "_refusals", set())
+        if refusals:
+            codes = ", ".join(str(c) for c in sorted(refusals))
+            lines += [f"## ⚠ Jira has been refusing requests ({codes}) "
+                     "since this run started",
+                     "",
+                     "Figures below stopped updating with real data when "
+                     "this began — check the credentials and permissions "
+                     "in jira_config.json, then restart.",
+                     ""]
+        lines += [
             "## Model provenance",
             "",
             f"- **Trained on:** {sum(seen_counts.values())} labelled decisions"

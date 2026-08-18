@@ -710,6 +710,42 @@ if report_ok:
     check("the entry before the truncated line still made it into the report",
           "SD-1" in report_text, report_text[-300:])
 
+# --- A persistent auth failure must not hide behind a fresh-looking report -
+# The report is rewritten every cycle whether or not Jira actually answered,
+# so "Updated just now" alone can't be trusted to mean "still getting real
+# data" - a dead token looks identical to a healthy quiet desk otherwise.
+# _note_refusal already tracks this per process run; it just never surfaced
+# in the one place a person actually looks.
+class _RefusingJira:
+    _refusals = {401}
+
+
+reporter.jira = _RefusingJira()
+tl.ShadowWatcher.write_report(reporter)
+with open(tl.REPORT_FILE, encoding="utf-8") as f:
+    report_text = f.read()
+check("a tracked auth refusal is surfaced at the top of the report",
+      "401" in report_text and "refusing requests" in report_text,
+      report_text[:300])
+
+reporter.jira = object.__new__(tl.Jira)
+reporter.jira._refusals = set()
+tl.ShadowWatcher.write_report(reporter)
+with open(tl.REPORT_FILE, encoding="utf-8") as f:
+    report_text = f.read()
+check("no refusals means no banner",
+      "refusing requests" not in report_text, report_text[:200])
+
+del reporter.jira            # matches how the earlier fixtures never set it
+try:
+    tl.ShadowWatcher.write_report(reporter)
+    no_jira_ok = True
+except Exception as exc:                                  # noqa: BLE001
+    no_jira_ok = False
+    no_jira_exc = repr(exc)
+check("write_report survives not even having a jira attribute",
+      no_jira_ok, "" if no_jira_ok else no_jira_exc)
+
 
 # --- Don't rewrite megabytes when nothing was learned ----------------------
 # The state file holds the whole model, and lastPollEpoch is stamped every
