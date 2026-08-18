@@ -39,7 +39,7 @@ def load_learner(isolate_files: bool = True):
     if isolate_files:
         tmp = tempfile.mkdtemp()
         for attr in ("CONFIG_FILE", "STATE_FILE", "LOG_FILE", "HISTORY_FILE",
-                     "REPORT_FILE", "ERROR_LOG", "SUGGEST_FILE"):
+                     "REPORT_FILE", "ERROR_LOG", "SUGGEST_FILE", "STATUS_FILE"):
             if hasattr(tl, attr):
                 setattr(tl, attr, os.path.join(tmp, attr.lower() + ".dat"))
     return tl

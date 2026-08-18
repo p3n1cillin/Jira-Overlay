@@ -728,6 +728,15 @@ check("a tracked auth refusal is surfaced at the top of the report",
       "401" in report_text and "refusing requests" in report_text,
       report_text[:300])
 
+# The same signal should be scrapeable without parsing markdown.
+status = json.load(open(tl.STATUS_FILE, encoding="utf-8"))
+check("the status file marks itself unhealthy during a refusal",
+      status["healthy"] is False and status["refusals"] == [401], status)
+check("  and still carries the provenance fields a monitor would want",
+      set(status["provenance"]) >= {"trainedOnDecisions", "backfillComplete",
+                                    "lastTuneDate", "outcomes"},
+      status["provenance"])
+
 reporter.jira = object.__new__(tl.Jira)
 reporter.jira._refusals = set()
 tl.ShadowWatcher.write_report(reporter)
@@ -735,6 +744,25 @@ with open(tl.REPORT_FILE, encoding="utf-8") as f:
     report_text = f.read()
 check("no refusals means no banner",
       "refusing requests" not in report_text, report_text[:200])
+check("  and the status file agrees it's healthy",
+      json.load(open(tl.STATUS_FILE, encoding="utf-8"))["healthy"] is True)
+
+# The "Mistakes learned from" section loops `for pair, n in wrong[:10]` -
+# and a plain `n`/`c` earlier in this same function, meant to hold
+# stats["predictions"]/["correct"], is not a different variable from that
+# loop's `n` in Python. It silently got overwritten with a confusion-pair
+# count, and the status file above reported that count as the total number
+# of predictions ever made instead. Caught live, against the real running
+# model, not by any test - this reproduces it with a populated confusion
+# dict, which the fixtures above never had.
+reporter.state["stats"] = {"predictions": 1313, "correct": 1178}
+reporter.state["confusion"] = {"With DEV → With BI": 3, "With BI → With DEV": 5}
+tl.ShadowWatcher.write_report(reporter)
+status = json.load(open(tl.STATUS_FILE, encoding="utf-8"))
+check("a populated confusion table doesn't clobber the prediction total",
+      status["accuracy"] == {"predictions": 1313, "correct": 1178,
+                             "pct": round(100 * 1178 / 1313, 1)},
+      status["accuracy"])
 
 del reporter.jira            # matches how the earlier fixtures never set it
 try:

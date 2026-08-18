@@ -99,6 +99,10 @@ CONFIG_FILE  = os.path.join(_DIR, "jira_config.json")
 STATE_FILE   = os.path.join(_DIR, "triage_state.json")
 LOG_FILE     = os.path.join(_DIR, "triage_log.jsonl")
 REPORT_FILE  = os.path.join(_DIR, "TRIAGE_REPORT.md")
+# machine-readable twin of the report's health/provenance section, for
+# external monitoring — nobody should have to scrape markdown to find out
+# whether this is still getting real data from Jira
+STATUS_FILE  = os.path.join(_DIR, "triage_status.json")
 ERROR_LOG    = os.path.join(_DIR, "triage_learner.log")
 # suggestions the overlay picks up and shows next to incoming tickets
 SUGGEST_FILE = os.path.join(_DIR, "triage_suggestions.json")
@@ -2288,8 +2292,14 @@ class ShadowWatcher:
     def write_report(self) -> None:
         m     = self.learner.m
         stats = self.state.get("stats", {"predictions": 0, "correct": 0})
-        n, c  = stats["predictions"], stats["correct"]
-        acc   = f"{100 * c // n}% ({c}/{n})" if n else "no resolved predictions yet"
+        # Named distinctly from any loop variable in this function on
+        # purpose: a `for pair, n in wrong[:10]` loop further down silently
+        # overwrote a plain `n`/`c` here — Python for-loops don't scope —
+        # and the status JSON at the end of this method ended up reporting
+        # a confusion-pair count as the prediction total.
+        pred_n, pred_c = stats["predictions"], stats["correct"]
+        acc = (f"{100 * pred_c // pred_n}% ({pred_c}/{pred_n})"
+               if pred_n else "no resolved predictions yet")
 
         seen_counts = m.get("seen", {})
         lines = [
@@ -2484,6 +2494,31 @@ class ShadowWatcher:
 
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+        # Machine-readable twin of the same health signal, for anything
+        # that wants to alert on this without parsing markdown.
+        status = {
+            "updatedAt": datetime.now().isoformat(timespec="seconds"),
+            "healthy": not refusals,
+            "refusals": sorted(refusals),
+            "provenance": {
+                "trainedOnDecisions": sum(seen_counts.values()),
+                "trainingSince": self.state.get("processStart"),
+                "backfillComplete": bool(self.state.get("backfillDone")),
+                "backfillCount": self.state.get("backfillCount", 0),
+                "lastTuneDate": self.state.get("lastTuneDate"),
+                "tuningSchemaVersion": self.state.get("tuningSchemaVersion", 0),
+                "outcomes": self.all_dests,
+            },
+            "accuracy": {"predictions": pred_n, "correct": pred_c,
+                        "pct": round(100 * pred_c / pred_n, 1)
+                        if pred_n else None},
+            "drift": self.state.get("tuneDrift"),
+        }
+        try:
+            _atomic_json_write(STATUS_FILE, status)
+        except OSError as exc:
+            _log_error(f"could not write {STATUS_FILE}: {exc}")
 
     # -- main loop --------------------------------------------------------------
 
