@@ -408,6 +408,74 @@ check("the search is capped at the window, not the whole history",
       searched.get("n") == tl.TUNE_WINDOW,
       f"searched {searched.get('n')} of {tl.TUNE_WINDOW + 2500}")
 
+# --- The nightly search must not stay stuck in one basin -------------------
+# _self_tune used to warm-start every night from whatever TUNING already
+# was. Proven against real history: with decayFactor stuck at 0.999 the
+# smallest destination class scored 54.5%; restarting the search from the
+# offline BALANCED_TUNED_CONFIG baseline as well found decayFactor=1.0 and
+# lifted it to 81.8%. Pin the mechanism without the cost of a real replay:
+# make the live-config seed score as a local optimum (no single-axis move
+# beats it) while the baseline seed scores higher outright everywhere, and
+# check the search still ends up at the baseline.
+def _m(balanced: float) -> dict:
+    return {"n": 1, "balanced": balanced, "worst": balanced,
+            "firmBalanced": balanced, "firmWorst": balanced,
+            "firmAcc": balanced, "firmCov": balanced, "acc": balanced,
+            "per": {}, "firmPer": {}, "perCounts": {}, "firmPerCounts": {},
+            "sources": {}}
+
+
+def _matches(cfg: dict, seed: dict) -> bool:
+    return all(cfg.get(k) == v for k, v in seed.items()
+               if k in tl.ShadowWatcher._TUNE_KEEP)
+
+
+def _fake_replay(self, recs, cfg, score_start=None, score_end=None):
+    if _matches(cfg, tl.BALANCED_TUNED_CONFIG):
+        return _m(0.95)
+    if _matches(cfg, TUNING_SEED):
+        return _m(0.80)
+    return _m(0.10)          # any single-axis move away from either seed
+
+
+TUNING_SEED = dict(tl.TUNING)
+trap = object.__new__(tl.ShadowWatcher)
+trap.state = {}
+trap.plans = {}
+trap.learner = tl.Learner({})
+trap._replay_history = _fake_replay.__get__(trap)
+picked = tl.ShadowWatcher._self_tune(trap, [{} for _ in range(10)])
+check("two starting points are tried and the better one wins",
+      picked is not None and picked["score"][0] == 0.95,
+      repr(picked["score"] if picked else None))
+
+# A descent that never plateaus (every trial looks like an improvement)
+# used to be able to spend the WHOLE shared budget before the second start
+# ever got to run — confirmed on real history, where the first (warm)
+# descent alone consumed all 120 evaluations, leaving the offline baseline
+# unexamined. Each start now gets its own guaranteed half; check the
+# baseline's own seed config still gets at least one real evaluation even
+# against a first descent designed to be insatiable.
+baseline_seen = {"n": 0}
+call_n = {"n": 0}
+
+
+def _fake_replay_hungry(self, recs, cfg, score_start=None, score_end=None):
+    call_n["n"] += 1
+    if _matches(cfg, tl.BALANCED_TUNED_CONFIG):
+        baseline_seen["n"] += 1
+    return _m(0.001 * call_n["n"])   # strictly increasing: never plateaus
+
+
+hungry = object.__new__(tl.ShadowWatcher)
+hungry.state = {}
+hungry.plans = {}
+hungry.learner = tl.Learner({})
+hungry._replay_history = _fake_replay_hungry.__get__(hungry)
+tl.ShadowWatcher._self_tune(hungry, [{} for _ in range(10)])
+check("an insatiable first descent doesn't starve the second of its budget",
+      baseline_seen["n"] >= 1, repr(baseline_seen))
+
 
 # --- Don't rewrite megabytes when nothing was learned ----------------------
 # The state file holds the whole model, and lastPollEpoch is stamped every

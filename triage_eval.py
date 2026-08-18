@@ -331,30 +331,53 @@ def tune() -> None:
     seen: dict[tuple, tuple] = {}
     results = []
 
-    def evaluate(cfg: dict):
+    def evaluate(cfg: dict, budget: list[int]):
         sig = tuple(cfg[k] for k in axes)
         if sig not in seen:
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
             m = replay(tuning_records, cfg, tuning_warmup)
             seen[sig] = m
             results.append((dict(cfg), m))
         return seen[sig]
 
-    cur  = dict(DEFAULT_CFG)
-    best = score(evaluate(cur))
-    for _ in range(tl.ShadowWatcher._TUNE_PASSES):
-        improved = False
-        for axis, values in axes.items():
-            for value in values:
-                if cur.get(axis) == value:
-                    continue
-                trial = dict(cur, **{axis: value})
-                s = score(evaluate(trial))
-                if s > best:
-                    best, cur, improved = s, trial, True
-            if len(seen) >= tl.ShadowWatcher._TUNE_BUDGET:
+    def descend(seed: dict, budget: list[int]):
+        cur = dict(seed)
+        got = evaluate(cur, budget)
+        if got is None:
+            return None
+        best = score(got)
+        for _ in range(tl.ShadowWatcher._TUNE_PASSES):
+            improved = False
+            for axis, values in axes.items():
+                for value in values:
+                    if cur.get(axis) == value:
+                        continue
+                    trial = dict(cur, **{axis: value})
+                    got = evaluate(trial, budget)
+                    if got is None:
+                        break
+                    s = score(got)
+                    if s > best:
+                        best, cur, improved = s, trial, True
+                if budget[0] <= 0:
+                    break
+            if not improved or budget[0] <= 0:
                 break
-        if not improved or len(seen) >= tl.ShadowWatcher._TUNE_BUDGET:
-            break
+        return best, cur
+
+    # Two starting points, same as the live learner: greedy descent only
+    # explores the basin it starts in, so run it once from the plain
+    # defaults and once from the offline-validated baseline, and keep
+    # whichever ends up better. A single descent can exhaust the whole
+    # budget before converging, so each gets its own guaranteed half.
+    half = max(1, tl.ShadowWatcher._TUNE_BUDGET // 2)
+    runs = [descend(DEFAULT_CFG, [half]),
+            descend(tl.BALANCED_TUNED_CONFIG,
+                    [tl.ShadowWatcher._TUNE_BUDGET - half])]
+    runs = [r for r in runs if r is not None]
+    best, cur = max(runs, key=lambda r: r[0])
     print(f"searched {len(seen)} configs by coordinate descent\n")
 
     # Rank balanced first so small buckets such as BI/DEV cannot be hidden by

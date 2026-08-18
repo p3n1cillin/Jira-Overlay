@@ -1797,45 +1797,75 @@ class ShadowWatcher:
         cache: dict[tuple, tuple] = {}
         spent = 0
 
-        def evaluate(cfg: dict):
-            """Scored replay of `cfg`, memoised; None once out of budget."""
+        def evaluate(cfg: dict, budget: list[int]):
+            """Scored replay of `cfg`, memoised; None once out of budget.
+
+            `budget` is this descent's own remaining allowance, not the
+            shared total — a cache hit costs nothing, but a fresh replay
+            draws only from the caller's share, so one hungry descent can't
+            spend the whole night's budget before the other gets to run.
+            """
             nonlocal spent
             sig = tuple(cfg[k] for k in self._TUNE_KEEP)
             if sig in cache:
                 return cache[sig]
-            if spent >= self._TUNE_BUDGET:
+            if budget[0] <= 0:
                 return None
+            budget[0] -= 1
             spent += 1
             m = self._replay_history(tuning_recs, cfg)
             cache[sig] = (self._tune_score(m), m)
             return cache[sig]
 
-        cur = dict(TUNING)
-        got = evaluate(cur)
-        if got is None:
-            return None
-        best_score, best_m = got
-
-        # Coordinate descent: sweep each knob against the current best, keep
-        # any improvement, repeat until a full pass changes nothing.
-        for _ in range(self._TUNE_PASSES):
-            improved = False
-            for axis, values in self._TUNE_AXES.items():
-                for value in values:
-                    if cur.get(axis) == value:
-                        continue
-                    trial = dict(cur, **{axis: value})
-                    got = evaluate(trial)
-                    if got is None:
+        def descend(seed: dict, budget: list[int]):
+            """Coordinate descent from `seed`: sweep each knob against the
+            current best, keep any improvement, repeat until a full pass
+            changes nothing."""
+            cur = dict(seed)
+            got = evaluate(cur, budget)
+            if got is None:
+                return None
+            best_score, best_m = got
+            for _ in range(self._TUNE_PASSES):
+                improved = False
+                for axis, values in self._TUNE_AXES.items():
+                    for value in values:
+                        if cur.get(axis) == value:
+                            continue
+                        trial = dict(cur, **{axis: value})
+                        got = evaluate(trial, budget)
+                        if got is None:
+                            break
+                        score, m = got
+                        if score > best_score:
+                            best_score, best_m, cur = score, m, trial
+                            improved = True
+                    if budget[0] <= 0:
                         break
-                    score, m = got
-                    if score > best_score:
-                        best_score, best_m, cur = score, m, trial
-                        improved = True
-                if spent >= self._TUNE_BUDGET:
+                if not improved or budget[0] <= 0:
                     break
-            if not improved or spent >= self._TUNE_BUDGET:
-                break
+            return best_score, best_m, cur
+
+        # Greedy descent only ever explores the basin it starts in: once a
+        # knob such as decayFactor settles near last night's value, testing
+        # it alone rarely looks better, even when a very different value
+        # would win once paired with other knobs the search already moved
+        # away from. Descending twice - once warm-started from tonight's
+        # live config, once from the fixed, offline-validated baseline -
+        # and keeping whichever finishes with the better score is what
+        # surfaced decayFactor=1.0 (never forget) as far better for the
+        # low-volume BI class than the 0.999 the live config was stuck on.
+        # A single descent alone can exhaust the whole budget before
+        # converging, so each gets its own guaranteed half rather than
+        # sharing one pool the first descent could spend in full.
+        half = max(1, self._TUNE_BUDGET // 2)
+        runs = [descend(dict(TUNING), [half]),
+                descend(dict(BALANCED_TUNED_CONFIG),
+                        [self._TUNE_BUDGET - half])]
+        runs = [r for r in runs if r is not None]
+        if not runs:
+            return None
+        best_score, best_m, cur = max(runs, key=lambda r: r[0])
 
         best = {"score": best_score,
                 "cfg": {k: cur[k] for k in self._TUNE_KEEP},
