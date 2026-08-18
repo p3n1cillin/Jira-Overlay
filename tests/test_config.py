@@ -219,6 +219,33 @@ check("an unhealthy/drifting learner renders without raising",
       any("refusing requests" in t for t in texts), texts[:3])
 check("  and the drift detail is shown",
       any("balanced accuracy dropped 20%" in t for t in texts))
+
+# A status.json shaped in ways a hand-edit, a corrupted write, or a future
+# schema change could produce - provenance/accuracy/refusals/drift present
+# but the wrong TYPE, not just missing. `x or {}` only guards against a
+# falsy value, not a wrong-type truthy one (a non-empty string is truthy),
+# and provenance.get(...) on a string blew up the whole panel.
+MALFORMED_LEARNER_STATUS = [
+    ("missing keys entirely", {}),
+    ("healthy not a bool", {"healthy": "yes"}),
+    ("provenance is a string", {"healthy": True, "provenance": "nope"}),
+    ("provenance is a list", {"healthy": True, "provenance": [1, 2, 3]}),
+    ("accuracy is a string", {"healthy": True, "accuracy": "nope"}),
+    ("accuracy.pct is a string", {"healthy": True, "accuracy": {"pct": "high"}}),
+    ("refusals is a string, not a list", {"healthy": False, "refusals": "oops"}),
+    ("drift is a string, not a dict", {"healthy": True, "drift": "weird"}),
+]
+for label, data in MALFORMED_LEARNER_STATUS:
+    app._load_learner_status = lambda d=data: d
+    try:
+        app._build_settings_panel()
+        ok = True
+    except Exception as exc:                            # noqa: BLE001
+        ok = False
+        err = f"{type(exc).__name__}: {exc}"
+    check(f"a status file with {label} doesn't crash Settings",
+          ok, "" if ok else err)
+
 app.root.destroy()
 
 

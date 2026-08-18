@@ -3575,9 +3575,16 @@ class JiraOverlay:
         learner = self._load_learner_status()
         if learner is not None:
             section("Triage learner")
+            # A different process writes this file, so nothing about its
+            # shape can be trusted — a dict-shaped value can arrive as a
+            # string or a list from a hand-edit or an older/newer version
+            # writing a different schema, and `x or {}` only guards against
+            # falsy values, not wrong types.
             healthy = bool(learner.get("healthy", True))
-            prov    = learner.get("provenance") or {}
-            acc     = learner.get("accuracy") or {}
+            prov_raw = learner.get("provenance")
+            prov     = prov_raw if isinstance(prov_raw, dict) else {}
+            acc_raw  = learner.get("accuracy")
+            acc      = acc_raw if isinstance(acc_raw, dict) else {}
             row = tk.Frame(body, bg=BG)
             row.pack(fill="x", padx=16, pady=(0, 1))
             tk.Label(row, text="●", font=_font(10),
@@ -3586,7 +3593,9 @@ class JiraOverlay:
             if healthy:
                 headline = "Healthy"
             else:
-                codes = ", ".join(str(c) for c in (learner.get("refusals") or []))
+                refusals = learner.get("refusals")
+                codes = (", ".join(str(c) for c in refusals)
+                        if isinstance(refusals, list) else "")
                 headline = f"Jira is refusing requests ({codes or '?'})"
             tk.Label(row, text=headline, font=_font(9, "bold"),
                      fg=_C["fg_bright"] if healthy else _C["alert"],
