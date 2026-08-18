@@ -147,6 +147,36 @@ w3.backfill()
 check("backfill avoids the same malformed query",
       not [q for q in w3.jira.queries if "CHANGED TO ()" in q])
 
+# --- ADF description nodes can carry null content, not just omit it -------
+# .get("content", []) only falls back when the key is MISSING; a leaf node
+# that instead carries an explicit "content": null passed the null straight
+# through and crashed on the following `for child in ...`. flatten_adf runs
+# on every issue's description, with no per-issue guard around it anywhere
+# it's called - a single ticket shaped like this would have permanently
+# stalled backfill on every retry, and silently truncated every
+# predict_intake cycle at that same ticket.
+for label, node in (
+        ("a leaf with content: null",
+         {"type": "paragraph", "text": "hi", "content": None}),
+        ("a nested child with content: null",
+         {"type": "doc", "content": [
+             {"type": "paragraph", "content": None},
+             {"type": "text", "text": "still here"}]}),
+        ("content missing entirely (the normal leaf shape)",
+         {"type": "text", "text": "fine"})):
+    try:
+        result = tl.flatten_adf(node)
+        ok = isinstance(result, str)
+    except Exception as exc:                            # noqa: BLE001
+        ok = False
+        result = f"{type(exc).__name__}: {exc}"
+    check(f"flatten_adf survives {label}", ok, repr(result))
+check("text from other nodes is kept when one sibling has null content",
+      "still here" in tl.flatten_adf(
+          {"type": "doc", "content": [
+              {"type": "paragraph", "content": None},
+              {"type": "text", "text": "still here"}]}))
+
 # --- An interrupted backfill must not discard what it already learned -----
 # backfill() is a one-time pass that can mean thousands of Jira calls on a
 # busy desk - one changelog fetch per issue. It used to write history and

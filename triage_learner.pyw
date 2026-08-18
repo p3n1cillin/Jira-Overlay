@@ -568,7 +568,11 @@ def flatten_adf(node) -> str:
     if isinstance(node, dict):
         if node.get("text"):
             parts.append(node["text"])
-        for child in node.get("content", []):
+        # A leaf node can carry an explicit "content": null rather than
+        # omitting the key — the same present-but-null shape as everywhere
+        # else Jira sends data — and .get(key, []) only falls back to []
+        # when the key is MISSING, not when it's there and null.
+        for child in node.get("content") or []:
             parts.append(flatten_adf(child))
     elif isinstance(node, list):
         parts.extend(flatten_adf(c) for c in node)
