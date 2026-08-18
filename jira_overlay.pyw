@@ -1599,7 +1599,10 @@ class _PeoplePicker:
                  font=_font(9), fg=_C["fg"], bg=BG).pack(anchor="w",
                                                          padx=16, pady=(14, 8))
         wrap = tk.Frame(self.win, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=12)
+        # padx=16, matching the label above (and its checkboxes carry no
+        # padx of their own) - this used to be 12, leaving every checkbox
+        # sitting 4px left of the heading that introduces them.
+        wrap.pack(fill="both", expand=True, padx=16)
         canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         sb = tk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
         body = tk.Frame(canvas, bg=BG)
@@ -3522,9 +3525,14 @@ class JiraOverlay:
 
         # ── Section helpers (defined after body so they target body) ──────────
         def section(title: str) -> None:
+            # padx=16, matching every row of content a section introduces
+            # (check(), and every direct label/entry below) - this used to
+            # be 12, leaving every section title and its divider sitting
+            # 4px left of everything under it, on every section in the
+            # panel.
             tk.Label(body, text=title.upper(), font=_font(7, "bold"),
-                     fg=_C["accent"], bg=BG).pack(anchor="w", padx=12, pady=(12, 0))
-            tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=12, pady=(3, 2))
+                     fg=_C["accent"], bg=BG).pack(anchor="w", padx=16, pady=(12, 0))
+            tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=16, pady=(3, 2))
 
         def check(parent: tk.Widget, text: str, var: tk.BooleanVar) -> None:
             tk.Checkbutton(parent, text=text, variable=var,
