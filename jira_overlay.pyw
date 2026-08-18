@@ -3595,7 +3595,17 @@ class JiraOverlay:
             if details:
                 tk.Label(body, text=" · ".join(details), font=_font(8),
                         fg=_C["fg_dim"], bg=BG, justify="left"
+                        ).pack(anchor="w", padx=16, pady=(0, 2))
+            drift = learner.get("drift")
+            if isinstance(drift, dict) and drift.get("detail"):
+                tk.Label(body,
+                        text=f"⚠ Drift since {drift.get('date', 'last tune')}: "
+                             f"{drift['detail']}",
+                        font=_font(8), fg=_C["warn"], bg=BG,
+                        justify="left", wraplength=280
                         ).pack(anchor="w", padx=16, pady=(0, 8))
+            else:
+                tk.Frame(body, bg=BG, height=6).pack()
 
         # Save / Cancel
         was_sla_on    = bool(cfg.get("slaEnabled", True))

@@ -193,6 +193,32 @@ drift = sorted(k for k in set(ROUND_TRIP) | set(after)
 check("saving Settings unchanged rewrites nothing", not drift, str(drift))
 check("  and the token itself still round-trips to the same value",
       ov.unprotect_secret(after.get("tokenProtected", "")) == ROUND_TRIP["token"])
+
+# --- Learner health/drift renders in Settings without crashing -------------
+# Built from a file a different, optional process writes, so nothing about
+# its shape can be trusted - this actually builds the panel rather than
+# just calling the loader, to catch a widget-construction bug the loader
+# tests alone wouldn't.
+app._load_learner_status = lambda: {
+    "healthy": False, "refusals": [401, 403],
+    "provenance": {"trainedOnDecisions": 500, "lastTuneDate": "2026-08-01"},
+    "accuracy": {"pct": 91.2},
+    "drift": {"date": "2026-08-01",
+             "detail": "balanced accuracy dropped 20% (90% -> 70%)"},
+}
+app._toggle_settings()          # closed after Save above; reopen with new data
+app.root.update()
+time.sleep(0.3)
+app.root.update()
+
+widgets = []
+walk(app.settings_panel)
+texts = [str(w.cget("text")) for w in widgets
+        if "text" in w.keys() and w.winfo_class() == "Label"]
+check("an unhealthy/drifting learner renders without raising",
+      any("refusing requests" in t for t in texts), texts[:3])
+check("  and the drift detail is shown",
+      any("balanced accuracy dropped 20%" in t for t in texts))
 app.root.destroy()
 
 
