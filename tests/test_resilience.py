@@ -207,6 +207,36 @@ for label, raw in (("null", None), ("a string", "12"), ("a float", 3.7),
     check(f"an issueCount of {label} becomes a usable integer",
           isinstance(got, int) and got >= 0, repr(got))
 
+# A queue LIST of "values": null (as opposed to one queue's issueCount being
+# null, covered above) fed straight into a `for` loop two lines below where
+# it's read.
+o = object.__new__(O)
+o.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
+           "alertQueues": ["Q"], "alertQueuesAsked": True}
+o._jira_url = lambda p="": "https://x" + p
+o._session = type("S", (), {"get": staticmethod(
+    lambda url, **kw: _QR({"values": None}))})()
+o.queues = []
+o._all_queue_names = []
+o.new_issues = []
+o._reconciled_counts = {}
+o._alert_count = 0
+o._last_full_fetch = 9e18
+o._alert_queues_missing = []
+o._post = lambda fn: None
+o._fetch_completion_stats = lambda c: None
+try:
+    O._fetch_data(o)
+    ok = True
+except Exception as exc:                                  # noqa: BLE001
+    ok = False
+    err = f"{type(exc).__name__}: {exc}"
+check("a queue list of \"values\": null doesn't crash the fetch",
+      ok, "" if ok else err)
+if ok:
+    check("  and yields an empty queue list rather than stale data",
+          o.queues == [], o.queues)
+
 # And the scheduling itself must survive any repaint failure at all.
 import queue as _queue                                 # noqa: E402
 import tkinter as _tk                                  # noqa: E402

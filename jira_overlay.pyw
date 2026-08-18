@@ -2626,7 +2626,12 @@ class JiraOverlay:
         # switch off a notification the user asked for - maxQueueSize in
         # particular only bites once a queue gets busy, which is exactly when
         # the alert matters most.
-        every_queue = r.json().get("values", [])
+        # `or []`, not `.get("values", [])` alone: the latter only falls
+        # back when the key is missing, and the very next line's whole
+        # reason for existing is that Jira does send present-but-null
+        # fields — "values" itself is no exception, and every_queue feeds
+        # a `for` loop two lines down.
+        every_queue = r.json().get("values") or []
         # Normalise the count once, here, rather than defending at each of
         # the five places that read it. dict.get(key, 0) returns None when
         # the key is present but null — which Jira does send — and the
