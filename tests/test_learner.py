@@ -562,6 +562,40 @@ check("the search is capped at the window, not the whole history",
       searched.get("n") == tl.TUNE_WINDOW,
       f"searched {searched.get('n')} of {tl.TUNE_WINDOW + 2500}")
 
+# --- A failed nightly tune must be left to the next day, not retried every
+# poll cycle for the rest of today. The date used to be stamped only after
+# a successful search; a bug in the search itself meant lastTuneDate never
+# advanced, so the very next poll cycle (~60s later, not tomorrow) would
+# attempt the same multi-minute, doomed-to-fail search again — and again
+# every cycle after that, all day.
+attempts = {"n": 0}
+broken = object.__new__(tl.ShadowWatcher)
+broken.state = {"lastTuneDate": ""}
+broken.plans = {}
+broken.learner = tl.Learner({})
+broken._save_state = lambda: None
+broken.write_report = lambda: None
+broken._load_history = lambda: [
+    {"summary": f"t{i}", "desc": "", "labels": [], "components": [],
+     "structured": [], "reporter": "r", "dest": "D",
+     "cloneProjects": [], "requestType": ""}
+    for i in range(400)]
+
+
+def _boom(recs):
+    attempts["n"] += 1
+    raise RuntimeError("the search itself is broken")
+
+
+broken._self_tune = _boom
+broken.maybe_daily_tune()
+check("a failed tune doesn't raise out and still stamps today's date",
+      broken.state.get("lastTuneDate") == tl.date.today().isoformat(),
+      broken.state.get("lastTuneDate"))
+broken.maybe_daily_tune()          # simulates the next poll cycle, same day
+check("  so a second attempt the same day is skipped, not retried",
+      attempts["n"] == 1, f"attempted {attempts['n']} times")
+
 # --- The nightly search must not stay stuck in one basin -------------------
 # _self_tune used to warm-start every night from whatever TUNING already
 # was. Proven against real history: with decayFactor stuck at 0.999 the

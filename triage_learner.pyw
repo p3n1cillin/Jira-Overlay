@@ -2047,61 +2047,74 @@ class ShadowWatcher:
         """Once a day, replay the accumulated history under candidate configs,
         adopt the best, and re-fit the model — so the learner measurably sharpens
         itself as more real decisions accrue. Fully self-contained; never writes
-        to Jira. Any failure is logged and left to the next day."""
+        to Jira.
+
+        Any failure is logged and left to the next day — meant literally: the
+        date is stamped before the risky work starts, not after it succeeds,
+        so a bug in the search itself retries once tomorrow instead of every
+        poll cycle for the rest of today. A multi-minute search failing and
+        immediately retrying every ~60 seconds is a worse outcome than the
+        model simply not sharpening today.
+        """
         today = date.today().isoformat()
         if self.state.get("lastTuneDate") == today:
             return
         recs = self._load_history()
         if recs is None:
             return
+        self.state["lastTuneDate"] = today
         if len(recs) < 300:                 # too little to tune reliably yet
-            self.state["lastTuneDate"] = today
             self._save_state()
             return
-        # Search over a bounded window, but fit the final model on everything.
-        # The search replays the history once per candidate config, so its
-        # cost is (history x budget): fine at a few thousand decisions,
-        # roughly an hour of CPU a night at twenty-five thousand — on a
-        # machine somebody is trying to work on. Recency decay already means
-        # the oldest decisions barely move the result, so the tail they would
-        # contribute isn't worth the time it costs a busy desk.
-        search_recs = recs[-TUNE_WINDOW:]
-        if len(search_recs) < len(recs):
-            _log_error(f"self-tune searching the most recent "
-                       f"{len(search_recs)} of {len(recs)} decisions")
-        best = self._self_tune(search_recs)
-        if best:
-            TUNING.update(best["cfg"])
-            self.state["tunedConfig"] = best["cfg"]
-            self._rebuild_model(recs)
-            hist = self.state.setdefault("tuneHistory", [])
-            prior = hist[-1] if hist else None
-            drift = self._tune_drift_warning(best, prior)
-            self.state["tuneDrift"] = (
-                {"date": today, "detail": drift} if drift else None)
-            if drift:
-                _log_error(f"self-tune drift {today}: {drift}")
-            hist.append({"date": today, "acc": round(best["acc"], 4),
-                         "balanced": round(best["balanced"], 4),
-                         "worst": round(best["worst"], 4),
-                         "firmAcc": round(best["firmAcc"], 4),
-                         "firmBalanced": round(best["firmBalanced"], 4),
-                         "firmWorst": round(best["firmWorst"], 4),
-                         "firmCov": round(best["firmCov"], 4),
-                         "n": best["n"], "trainN": best["trainN"],
-                         "holdoutN": best["holdoutN"],
-                         "per": {k: round(v, 4)
-                                 for k, v in best["per"].items()},
-                         "firmPer": {k: round(v, 4)
-                                     for k, v in best["firmPer"].items()},
-                         "cfg": best["cfg"]})
-            self.state["tuneHistory"] = hist[-60:]
-            _log_error(f"daily self-tune {today}: holdoutFirm={best['firmAcc']:.1%} "
-                       f"balanced={best['balanced']:.1%} "
-                       f"worst={best['worst']:.1%} "
-                       f"holdoutAcc={best['acc']:.1%} n={best['holdoutN']} "
-                       f"cfg={best['cfg']}")
-        self.state["lastTuneDate"] = today
+        try:
+            # Search over a bounded window, but fit the final model on
+            # everything. The search replays the history once per candidate
+            # config, so its cost is (history x budget): fine at a few
+            # thousand decisions, roughly an hour of CPU a night at twenty-
+            # five thousand — on a machine somebody is trying to work on.
+            # Recency decay already means the oldest decisions barely move
+            # the result, so the tail they would contribute isn't worth the
+            # time it costs a busy desk.
+            search_recs = recs[-TUNE_WINDOW:]
+            if len(search_recs) < len(recs):
+                _log_error(f"self-tune searching the most recent "
+                           f"{len(search_recs)} of {len(recs)} decisions")
+            best = self._self_tune(search_recs)
+            if best:
+                TUNING.update(best["cfg"])
+                self.state["tunedConfig"] = best["cfg"]
+                self._rebuild_model(recs)
+                hist = self.state.setdefault("tuneHistory", [])
+                prior = hist[-1] if hist else None
+                drift = self._tune_drift_warning(best, prior)
+                self.state["tuneDrift"] = (
+                    {"date": today, "detail": drift} if drift else None)
+                if drift:
+                    _log_error(f"self-tune drift {today}: {drift}")
+                hist.append({"date": today, "acc": round(best["acc"], 4),
+                             "balanced": round(best["balanced"], 4),
+                             "worst": round(best["worst"], 4),
+                             "firmAcc": round(best["firmAcc"], 4),
+                             "firmBalanced": round(best["firmBalanced"], 4),
+                             "firmWorst": round(best["firmWorst"], 4),
+                             "firmCov": round(best["firmCov"], 4),
+                             "n": best["n"], "trainN": best["trainN"],
+                             "holdoutN": best["holdoutN"],
+                             "per": {k: round(v, 4)
+                                     for k, v in best["per"].items()},
+                             "firmPer": {k: round(v, 4)
+                                         for k, v in best["firmPer"].items()},
+                             "cfg": best["cfg"]})
+                self.state["tuneHistory"] = hist[-60:]
+                _log_error(
+                    f"daily self-tune {today}: holdoutFirm={best['firmAcc']:.1%} "
+                    f"balanced={best['balanced']:.1%} "
+                    f"worst={best['worst']:.1%} "
+                    f"holdoutAcc={best['acc']:.1%} n={best['holdoutN']} "
+                    f"cfg={best['cfg']}")
+        except Exception:                                    # noqa: BLE001
+            _log_error(f"daily self-tune {today} failed:\n"
+                       + traceback.format_exc())
         self._save_state()
         self.write_report()
 
