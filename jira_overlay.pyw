@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -581,10 +582,26 @@ def save_config(cfg: dict) -> None:
     except OSError:
         pass
 
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+    # mkstemp, not open(path + ".tmp", "w"): the latter follows whatever
+    # already sits at that name - a symlink or a hard link, which NTFS
+    # lets an unprivileged local process create - and would silently write
+    # this file's contents (including the encrypted token) through it into
+    # somewhere else entirely. A fixed, predictable name made that easy to
+    # pre-plant; mkstemp's O_CREAT|O_EXCL fails outright if anything is
+    # already there instead of writing through it.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONFIG_FILE) or ".",
+                               prefix=os.path.basename(CONFIG_FILE) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

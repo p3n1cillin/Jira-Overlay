@@ -56,6 +56,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -326,10 +327,20 @@ def open_in_default_or_notepad(path: str) -> None:
 
 
 def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
-    """Write JSON atomically, tolerating short-lived Windows reader locks."""
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    """Write JSON atomically, tolerating short-lived Windows reader locks.
+
+    mkstemp, not open(f"{path}.{pid}.{tid}.tmp", "w"): a PID and thread id
+    are guessable, and the old name followed whatever already sat there -
+    a symlink or hard link, which NTFS lets an unprivileged local process
+    create - writing this file's contents through it into somewhere else
+    entirely rather than failing. mkstemp's O_CREAT|O_EXCL fails outright
+    if anything is already at the name instead of writing through it.
+    """
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".",
+                               suffix=".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         delay = 0.05
         for attempt in range(attempts):

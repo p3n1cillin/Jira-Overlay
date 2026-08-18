@@ -334,4 +334,31 @@ good = ov.normalise_config({"projectKey": "SD"})
 check("a genuine projectKey passes through untouched",
       good["projectKey"] == "SD")
 
+# --- save_config must not write through a pre-existing file at the temp
+# name -----------------------------------------------------------------
+# The old temp name was CONFIG_FILE + ".tmp" - fixed and fully predictable
+# - and plain open(tmp, "w") follows whatever already sits there rather
+# than refusing. NTFS lets an unprivileged local process create a hard
+# link at a predictable path; this file holds the DPAPI-encrypted token,
+# and this app would have written it straight through such a link into
+# wherever that link actually points. Proven with a real file standing in
+# for that link.
+planted = ov.CONFIG_FILE + ".tmp"
+sentinel = "do not touch — stands in for a pre-planted hard link"
+open(planted, "w", encoding="utf-8").write(sentinel)
+try:
+    ov.save_config({"domain": "acme.atlassian.net", "email": "a@b.c",
+                    "token": "SECRET"})
+    still_intact = (os.path.exists(planted)
+                    and open(planted, encoding="utf-8").read() == sentinel)
+    check("a file already at the old predictable temp name is left untouched",
+          still_intact)
+    check("  and the real config is still written correctly",
+          read().get("domain") == "acme.atlassian.net")
+finally:
+    try:
+        os.unlink(planted)
+    except OSError:
+        pass
+
 sys.exit(check.done())

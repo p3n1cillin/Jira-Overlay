@@ -921,4 +921,36 @@ try:
 finally:
     tl._atomic_json_write = _real_write
 
+# --- Atomic writes must not write through a pre-existing file at the temp
+# name --------------------------------------------------------------------
+# The old temp name was f"{path}.{pid}.{tid}.tmp" - a PID and thread id are
+# both guessable - and plain open(tmp, "w") follows whatever already sits
+# there rather than refusing. NTFS lets an unprivileged local process
+# create a hard link at a predictable path; this app would then write the
+# real content straight through it into wherever that link actually
+# points. Proven here with a real file standing in for that link: it must
+# come out completely untouched, and the real target must still update.
+import os as _os                                                     # noqa: E402
+
+target = _os.path.join(_os.path.dirname(tl.STATE_FILE), "atomic_target.json")
+planted = f"{target}.{_os.getpid()}.{threading.get_ident()}.tmp"
+_os.makedirs(_os.path.dirname(target), exist_ok=True)
+sentinel = "do not touch — stands in for a pre-planted hard link"
+with open(planted, "w", encoding="utf-8") as f:
+    f.write(sentinel)
+try:
+    tl._atomic_json_write(target, {"real": "content"})
+    still_intact = (_os.path.exists(planted)
+                    and open(planted, encoding="utf-8").read() == sentinel)
+    check("a file already at the old predictable temp name is left untouched",
+          still_intact)
+    check("  and the real target is still written correctly",
+          json.load(open(target, encoding="utf-8")) == {"real": "content"})
+finally:
+    for p in (planted, target):
+        try:
+            _os.unlink(p)
+        except OSError:
+            pass
+
 sys.exit(check.done())
