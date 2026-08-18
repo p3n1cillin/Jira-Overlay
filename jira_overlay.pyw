@@ -3563,7 +3563,7 @@ class JiraOverlay:
         tk.Label(body, text=f"Jira Overlay {APP_VERSION}", font=_font(8),
                  fg=_C["fg_dim"], bg=BG).pack(anchor="w", padx=16, pady=(4, 0))
         tk.Frame(body, bg=BG, height=4).pack()
-        tk.Button(body, text="⚙  Reconfigure credentials…",
+        tk.Button(body, text="🔑  Reconfigure credentials…",
                   command=self._reconfigure, bg=SEL, fg=FG,
                   font=_font(9), relief="flat", padx=8, pady=4,
                   cursor="hand2").pack(anchor="w", padx=16, pady=(0, 8))
