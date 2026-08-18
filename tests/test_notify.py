@@ -34,6 +34,22 @@ except Exception as exc:                             # noqa: BLE001
 finally:
     subprocess.Popen = real_popen
 
+# powershell launched by bare name lets Windows run whatever answers to
+# that name first off PATH — a directory earlier than System32, planted
+# deliberately or by another install, runs instead of the real thing.
+toast_calls = []
+subprocess.Popen = lambda args, **kw: toast_calls.append(args)
+try:
+    ov.send_toast("Jira — SD-1", "New ticket in alert queue")
+finally:
+    subprocess.Popen = real_popen
+check("the toast is fired through powershell's fully-qualified path, not "
+      "a bare name a malicious same-named binary earlier in PATH could "
+      "intercept",
+      len(toast_calls) == 1 and os.path.isabs(toast_calls[0][0])
+      and toast_calls[0][0].lower().endswith("powershell.exe"),
+      toast_calls)
+
 AWKWARD = [
     ("an apostrophe",        "Bob's laptop won't boot"),
     ("a quote break-out",    "'; Write-Host PWNED; '"),

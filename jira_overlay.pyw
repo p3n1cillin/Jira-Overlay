@@ -632,8 +632,8 @@ $doc.LoadXml('<toast duration="short"><visual><binding template="ToastGeneric"><
 """
     try:
         subprocess.Popen(
-            ["powershell", "-WindowStyle", "Hidden", "-NonInteractive",
-             "-Command", ps],
+            [_system_binary(r"WindowsPowerShell\v1.0\powershell.exe"),
+             "-WindowStyle", "Hidden", "-NonInteractive", "-Command", ps],
             creationflags=0x08000000,
         )
     except OSError:
@@ -1109,6 +1109,21 @@ def _has_association(ext: str) -> bool:
         return False
 
 
+def _system_binary(relative_path: str) -> str:
+    """Fully-qualified path to a well-known Windows system binary.
+
+    Launching by bare name ("notepad.exe", "powershell") lets Windows'
+    normal search order run whatever answers to that name first — a
+    directory earlier in PATH than System32, planted deliberately or by
+    another install, runs instead of the real thing. Falls back to the
+    bare name only if System32 genuinely doesn't have it there, so an
+    unusual Windows install still works rather than silently doing nothing.
+    """
+    candidate = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                             "System32", relative_path)
+    return candidate if os.path.exists(candidate) else relative_path
+
+
 def open_in_default_or_notepad(path: str) -> None:
     """Open `path` with whatever Windows has registered for it, falling back
     to Notepad — present on every Windows install by definition — rather
@@ -1123,7 +1138,7 @@ def open_in_default_or_notepad(path: str) -> None:
         except OSError:
             pass
     try:
-        subprocess.Popen(["notepad.exe", path])
+        subprocess.Popen([_system_binary("notepad.exe"), path])
     except OSError:
         pass
 

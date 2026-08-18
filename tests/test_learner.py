@@ -488,7 +488,11 @@ try:
 finally:
     _sp.Popen = _real_popen
 check("an unassociated extension falls back to Notepad, not silence",
-      _popen_calls == [["notepad.exe", target]], _popen_calls)
+      len(_popen_calls) == 1 and _popen_calls[0][1] == target
+      and _popen_calls[0][0].lower().endswith("notepad.exe"), _popen_calls)
+check("  launched by its fully-qualified path, not a bare name a malicious "
+      "same-named binary earlier in PATH could intercept",
+      os.path.isabs(_popen_calls[0][0]), _popen_calls)
 
 
 # --- Jira sends null, not just absent ---------------------------------------
