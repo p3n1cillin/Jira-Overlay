@@ -104,6 +104,18 @@ seen.clear(); w.v_basis.set("updated"); w._seq = 2
 w._work(2, date(2026, 1, 1), date(2026, 1, 2))
 check("'Last updated' basis changes the field", 'updated >= "2026-01-01"' in seen[0])
 
+# --- reportBasis names a JQL field, not a value - jql_quote() can't help --
+# v_basis is seeded straight from config ("reportBasis"), hand-editable
+# text, and interpolated as a bare field name (`{basis} >= "..."`), not a
+# quoted literal. A value the "Count by" radio buttons never offer must
+# still be rejected rather than trusted, the same way an unvalidated column
+# name reaching SQL would need to be.
+seen.clear(); w.v_basis.set('resolved" OR project = "SECRET'); w._seq = 3
+w._work(3, date(2026, 1, 1), date(2026, 1, 2))
+check("a basis outside {resolved, updated} falls back to a safe default",
+      all("SECRET" not in q for q in seen if isinstance(q, str)), seen)
+w.v_basis.set("resolved")
+
 # --- Names are user-supplied text, and they go into a query ----------------
 # Display names are set by the people they belong to, so quotes and
 # backslashes turn up legitimately. Interpolated raw, a name either breaks

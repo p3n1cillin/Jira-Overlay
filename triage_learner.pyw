@@ -646,6 +646,27 @@ def field_names(value) -> list[str]:
     return []
 
 
+# A real Jira project key: a letter, then letters/digits/underscore. Used
+# to validate a project key before it's trusted as a bare JQL identifier
+# (`project = {key}`) rather than a quoted literal — there's no quoting
+# syntax for "this is a field/identifier", so the only defence is
+# restricting it to characters a real key can ever contain.
+_SAFE_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def jql_quote(value: str) -> str:
+    """Quote a value for use as a JQL string literal.
+
+    Status names come from this site's own Jira workflow, or from a
+    hand-editable config, so they can contain quotes and backslashes -
+    interpolated raw, one breaks the query outright, and a crafted one
+    changes what it matches. Mirrors jira_overlay.pyw's own jql_quote();
+    kept in step with it deliberately.
+    """
+    escaped = (value or "").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def request_type_name(value) -> str:
     if not isinstance(value, dict):
         return ""
@@ -1103,10 +1124,17 @@ class ShadowWatcher:
             self.cfg["token"] = unprotect_secret(
                 self.cfg.pop("tokenProtected")) or ""
         self.project = self.cfg.get("projectKey", "")
-        if not self.project:
+        # projectKey is interpolated as a bare JQL identifier
+        # (`project = {self.project}`) in every query this file builds,
+        # not a quoted literal jql_quote() could protect - config is
+        # hand-editable, so this is validated the same way a column or
+        # table name reaching SQL would need to be, not just checked for
+        # presence.
+        if not isinstance(self.project, str) \
+                or not _SAFE_PROJECT_KEY.match(self.project):
             raise SystemExit(
-                "No projectKey in jira_config.json — run the overlay first so "
-                "it can discover your service desk.")
+                "No usable projectKey in jira_config.json — run the "
+                "overlay first so it can discover your service desk.")
         self.jira  = Jira(self.cfg)
         self.state = self._load_state()
 
@@ -1125,7 +1153,13 @@ class ShadowWatcher:
         self.dests     = as_name_list(self.cfg.get("triageStatuses"))
         self.resolved  = set(as_name_list(self.cfg.get("resolvedStatuses"))
                              or as_name_list(self.cfg.get("resolvedStatus")))
-        self.move_targets = as_name_list(self.cfg.get("moveTargetProjects"))
+        # Each of these is interpolated the same way self.project is
+        # (`project = {target}`), so the same identifier allowlist applies;
+        # an invalid entry is dropped rather than treated as fatal, since
+        # unlike the intake project this list is never required to be
+        # non-empty.
+        self.move_targets = [p for p in as_name_list(self.cfg.get("moveTargetProjects"))
+                             if _SAFE_PROJECT_KEY.match(p)]
         self.resolved_label = (self.cfg.get("resolvedLabel")
                                or RESOLVED_LABEL_FMT.format(project=self.project))
         self.moved_label_fmt = self.cfg.get("movedLabel") or MOVED_LABEL_FMT
@@ -1253,7 +1287,8 @@ class ShadowWatcher:
     def _remember_move_target(self, project_key: str) -> None:
         """A project we've now seen a ticket moved into; worth scanning on
         future backfills."""
-        if project_key and project_key not in self.move_targets:
+        if project_key and _SAFE_PROJECT_KEY.match(project_key) \
+                and project_key not in self.move_targets:
             self.move_targets.append(project_key)
             self.plans[self.moved_label(project_key)] = (
                 f"move the ticket to the {project_key} project")
@@ -1494,7 +1529,7 @@ class ShadowWatcher:
         # train strictly off the last BACKFILL_DAYS of decisions
         cutoff = f"{datetime.now() - timedelta(days=BACKFILL_DAYS):%Y-%m-%d}"
         jql = (f'project = {self.project} AND status CHANGED TO '
-               f'({", ".join(chr(34) + d + chr(34) for d in self.dests)}) '
+               f'({", ".join(jql_quote(d) for d in self.dests)}) '
                f'AFTER -{BACKFILL_DAYS}d ORDER BY updated DESC')
         # No handoff statuses on this site — every ticket is resolved in place
         # or moved out, so there is nothing for this pass to find.
@@ -1537,8 +1572,7 @@ class ShadowWatcher:
             self.state["processStart"] = cutoff
 
         # Phase 2: tickets resolved inside the intake project, never handed off
-        resolved_list = ", ".join(chr(34) + s + chr(34)
-                                  for s in sorted(self.resolved))
+        resolved_list = ", ".join(jql_quote(s) for s in sorted(self.resolved))
         jql2 = (f'project = {self.project} AND status CHANGED TO '
                 f'({resolved_list}) AFTER -{BACKFILL_DAYS}d '
                 f'ORDER BY updated DESC')
@@ -1677,7 +1711,7 @@ class ShadowWatcher:
         # A project where everything is resolved in place has no handoff
         # statuses; "status CHANGED TO ()" is not valid JQL, so skip the pass
         # rather than issuing a query that fails every cycle.
-        dest_list = ", ".join(chr(34) + d + chr(34) for d in self.dests)
+        dest_list = ", ".join(jql_quote(d) for d in self.dests)
         for issue in (self.jira.search(
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
                 f'AFTER {since}', self._FIELDS, cap=50) if self.dests else []):
@@ -1701,8 +1735,7 @@ class ShadowWatcher:
                 self._append_history(det, tr["dest"], tr["when"])
 
         # 3. Tickets resolved inside the intake project, never handed off
-        resolved_list = ", ".join(chr(34) + s + chr(34)
-                                  for s in sorted(self.resolved))
+        resolved_list = ", ".join(jql_quote(s) for s in sorted(self.resolved))
         for issue in self.jira.search(
                 f'project = {self.project} AND status CHANGED TO '
                 f'({resolved_list}) AFTER {since}', self._FIELDS, cap=50):

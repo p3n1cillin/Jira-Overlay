@@ -317,4 +317,21 @@ check("  including a deliberate refreshSeconds below the dropdown's range",
       kept["refreshSeconds"] == 15, repr(kept["refreshSeconds"]))
 check("  and another tool's keys", kept["triageStatuses"] == ["With DEV"])
 
+# --- projectKey is a bare JQL identifier, not a quotable value -------------
+# Every query this app builds interpolates it as `project = {key}`, and
+# there's no quoting syntax for "this is a field/identifier" the way
+# jql_quote() quotes a literal value - the only defence is restricting it
+# to characters a real Jira project key can ever contain. Config is
+# hand-editable text, so this needs validating the same way an unvalidated
+# table name reaching SQL would.
+for label, key in (("a clause tacked on", 'SD" OR project = "SECRET'),
+                   ("a space", "SD OR 1=1"),
+                   ("starting with a digit", "1SD")):
+    bad = ov.normalise_config({"projectKey": key})
+    check(f"a projectKey with {label} is blanked, not trusted",
+          bad["projectKey"] == "", repr(bad))
+good = ov.normalise_config({"projectKey": "SD"})
+check("a genuine projectKey passes through untouched",
+      good["projectKey"] == "SD")
+
 sys.exit(check.done())

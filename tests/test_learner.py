@@ -169,6 +169,49 @@ if ok:
           (result, null_watcher.resolved))
 
 
+# --- JQL injection --------------------------------------------------------
+# Every query this file builds interpolates a project key as a bare
+# identifier (project = {key}) and status names as quoted literals
+# ("{status}"). Both can originate from a hand-edited config file, so both
+# need to survive a value crafted to break out of the query - the same
+# threat model as an unescaped column name or string value reaching SQL.
+check('jql_quote escapes a literal double quote',
+      tl.jql_quote('O"Brien') == '"O\\"Brien"', tl.jql_quote('O"Brien'))
+check('jql_quote escapes a backslash before the quote escape can be forged',
+      tl.jql_quote('a\\" OR "1"="1') == '"a\\\\\\" OR \\"1\\"=\\"1"',
+      tl.jql_quote('a\\" OR "1"="1'))
+
+for label, key in (('a project key with a JQL clause tacked on',
+                    'HD" OR project = "SECRET'),
+                   ('a project key with a space', 'HD OR 1=1'),
+                   ('an empty project key', ''),
+                   ('a project key starting with a digit', '1HD')):
+    check(f"{label} is rejected as a project-key identifier",
+          not tl._SAFE_PROJECT_KEY.match(key), repr(key))
+
+# A status name containing a quote must not be able to break out of the
+# CHANGED TO (...) clause built from self.dests/self.resolved.
+evil = watcher({"triageStatuses": ['Passed" OR project = "SECRET'],
+               "resolvedStatuses": []})
+evil.backfill()
+queries = "".join(evil.jira.queries)
+check("a malicious status name is quoted, not able to inject a clause",
+      'OR project = "SECRET' not in queries
+      and '\\"' in queries, evil.jira.queries)
+
+# _remember_move_target persists straight to config, so an invalid value
+# reaching it (a tampered response, a bad hand-edit of moveTargetProjects)
+# must never be adopted.
+mt = watcher()
+mt._save_cfg = lambda d: None
+mt._remember_move_target('BUGS" OR project = "SECRET')
+check("an invalid move-target project key is never adopted",
+      mt.move_targets == [], mt.move_targets)
+mt._remember_move_target('BUGS')
+check("  but a genuine one still is", mt.move_targets == ['BUGS'],
+      mt.move_targets)
+
+
 # --- A desk where everything is resolved in place --------------------------
 
 w2 = watcher({"resolvedStatuses": ["Done"], "triageStatuses": []})

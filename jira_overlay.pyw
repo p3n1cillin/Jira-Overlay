@@ -345,6 +345,12 @@ def _get_tray_font() -> ImageFont.ImageFont:
 # dropdown doesn't list has chosen it deliberately — clamping refreshSeconds
 # to the dropdown's 30s floor would have quietly halved the poll rate of an
 # install running a deliberate 15.
+# A real Jira project key: a letter, then letters/digits/underscore. Used to
+# validate projectKey before it's trusted as a JQL identifier — see
+# normalise_config for why a value here needs a character allowlist rather
+# than jql_quote()'s literal-string escaping.
+_SAFE_PROJECT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
 _NUMERIC_SETTINGS = {           # key: (caster, default, low, high)
     "overlayWidth":   (int,   260,  120, 4000),   # below ~120 nothing fits
     "alpha":          (float, 0.93, 0.1, 1.0),    # Tk requires 0..1
@@ -426,6 +432,19 @@ def normalise_config(cfg: dict) -> dict:
     for key in _STRING_SETTINGS:
         if key in cfg and not isinstance(cfg[key], str):
             cfg[key] = "" if cfg[key] is None else str(cfg[key])
+    # projectKey is interpolated straight into JQL as an identifier
+    # (`project = {pk}`), not a quoted value jql_quote() could protect —
+    # there's no quoting syntax for "this is a field/identifier", so the
+    # only defence is restricting it to what a real Jira project key can
+    # ever contain. Config is meant to be hand-editable; an unvalidated
+    # identifier reaching a query is the same class of hole as an
+    # unvalidated column or table name in SQL. Blanked rather than
+    # rejected outright: absent is already a state the rest of the app
+    # recovers from on its own (it re-discovers the project from the
+    # service desk), so this degrades the same way a missing value always
+    # has, instead of opening a new failure mode.
+    if "projectKey" in cfg and not _SAFE_PROJECT_KEY.match(cfg["projectKey"]):
+        cfg["projectKey"] = ""
     return cfg
 
 
@@ -1338,8 +1357,18 @@ class TeamReportWindow:
                          daemon=True).start()
 
     def _work(self, seq: int, start: date, end: date) -> None:
+        # basis names a JQL FIELD, not a value, so it can't be quoted the
+        # way jql_quote() quotes a string literal — the only defence for a
+        # bare identifier is restricting it to the fixed set the UI itself
+        # ever offers. The UI can't produce anything else, but the config
+        # file backing it can: "reportBasis" is user-editable text, and an
+        # unvalidated field name interpolated straight into JQL is an
+        # injection point exactly like an unvalidated column name in SQL.
+        allowed_bases = {v for _label, v in REPORT_BASES}
         basis = self.v_basis.get()
-        pk    = self.app.config.get("projectKey", "")
+        if basis not in allowed_bases:
+            basis = "resolved"
+        pk = self.app.config.get("projectKey", "")
         # `end` is inclusive, so compare against the following midnight.
         window = (f'{basis} >= "{start}" AND {basis} < "{end + timedelta(days=1)}"')
         results: list[tuple[str, Optional[int]]] = []
