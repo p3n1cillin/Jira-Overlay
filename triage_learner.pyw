@@ -121,6 +121,12 @@ SEEN_CAP       = 20000
 # two-minute job into an hour-long one on a busy desk. The model itself
 # is still fitted on the whole history — only the search is windowed.
 TUNE_WINDOW    = 6000
+# A per-destination holdout bucket below this size is too small for its
+# accuracy to mean anything night to night — measured directly on this desk:
+# a 12-ticket bucket for the smallest destination swung 30+ points on one
+# ticket flipping right or wrong. Below this, a swing is sampling noise, not
+# drift, and flagging it would just be alert fatigue.
+MIN_DRIFT_SAMPLE = 30
 # Per slow cycle, how many departed tickets to re-fetch when looking for ones
 # that left intake by being MOVED to another project (see _learn_moved_out).
 MOVE_LOOKUPS_PER_CYCLE = 20
@@ -2000,6 +2006,43 @@ class ShadowWatcher:
         self.state["model"] = lr.m
         self.learner = lr
 
+    @staticmethod
+    def _tune_drift_warning(today: dict, prior: Optional[dict]) -> str:
+        """Flag a genuine swing in tuning outcome from one night to the
+        next — never routine small-sample noise (see MIN_DRIFT_SAMPLE).
+
+        Balanced accuracy and confident-band coverage are stable enough at
+        this desk's scale to compare directly; a per-class rate is only
+        compared when today's holdout bucket for that class is large enough
+        that a swing means something. Returns "" when there's nothing
+        worth a human's attention.
+        """
+        if not prior:
+            return ""
+        lines = []
+        for label, key, threshold in (
+                ("balanced accuracy",         "balanced", 0.05),
+                ("confident-band coverage",   "firmCov",  0.10)):
+            now_v  = today.get(key, 0.0)
+            then_v = prior.get(key, now_v)
+            delta  = now_v - then_v
+            if abs(delta) >= threshold:
+                verb = "dropped" if delta < 0 else "rose"
+                lines.append(f"{label} {verb} {abs(delta):.0%} "
+                             f"({then_v:.0%} -> {now_v:.0%})")
+        counts = today.get("perCounts", {})
+        prior_per = prior.get("per", {})
+        for dest, rate in today.get("per", {}).items():
+            n = counts.get(dest, [0])[0]
+            if n < MIN_DRIFT_SAMPLE or dest not in prior_per:
+                continue
+            delta = rate - prior_per[dest]
+            if abs(delta) >= 0.15:
+                verb = "dropped" if delta < 0 else "rose"
+                lines.append(f"{dest} accuracy {verb} {abs(delta):.0%} "
+                             f"({prior_per[dest]:.0%} -> {rate:.0%}, n={n})")
+        return "; ".join(lines)
+
     def maybe_daily_tune(self) -> None:
         """Once a day, replay the accumulated history under candidate configs,
         adopt the best, and re-fit the model — so the learner measurably sharpens
@@ -2032,6 +2075,12 @@ class ShadowWatcher:
             self.state["tunedConfig"] = best["cfg"]
             self._rebuild_model(recs)
             hist = self.state.setdefault("tuneHistory", [])
+            prior = hist[-1] if hist else None
+            drift = self._tune_drift_warning(best, prior)
+            self.state["tuneDrift"] = (
+                {"date": today, "detail": drift} if drift else None)
+            if drift:
+                _log_error(f"self-tune drift {today}: {drift}")
             hist.append({"date": today, "acc": round(best["acc"], 4),
                          "balanced": round(best["balanced"], 4),
                          "worst": round(best["worst"], 4),
@@ -2284,6 +2333,10 @@ class ShadowWatcher:
         th    = self.state.get("tuneHistory", [])
         if tuned or th:
             lines += ["", "## Self-tuning (runs daily on accumulated history)", ""]
+            drift = self.state.get("tuneDrift")
+            if drift and drift.get("date") == (th[-1]["date"] if th else None):
+                lines.append(f"- ⚠ **Drift since last night's tune "
+                             f"({drift['date']}):** {drift['detail']}")
             if tuned:
                 lines.append(f"- **Current auto-tuned config:** `{tuned}`")
             for t in th[-5:]:

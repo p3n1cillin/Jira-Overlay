@@ -177,6 +177,34 @@ check("text from other nodes is kept when one sibling has null content",
               {"type": "paragraph", "content": None},
               {"type": "text", "text": "still here"}]}))
 
+# --- Nightly tune drift must be flagged, but not on small-sample noise -----
+# Measured directly on this desk: a 12-ticket holdout bucket for the
+# smallest destination swings 30+ points on a single ticket flipping right
+# or wrong. Any drift check that alerted on that would be ignored within a
+# week. MIN_DRIFT_SAMPLE exists specifically to keep it quiet on exactly
+# that case while still catching a real swing.
+PRIOR_TUNE = {"date": "2026-08-01", "balanced": 0.90, "firmCov": 0.85,
+             "per": {"With BI": 0.80, "With DEV": 0.90}}
+
+noisy_today = dict(PRIOR_TUNE, date="2026-08-02", balanced=0.895,
+                   firmCov=0.86,
+                   per={"With BI": 0.30, "With DEV": 0.905},
+                   perCounts={"With BI": [12, 4], "With DEV": [300, 271]})
+check("a wild swing in a tiny holdout bucket is not flagged as drift",
+      tl.ShadowWatcher._tune_drift_warning(noisy_today, PRIOR_TUNE) == "",
+      tl.ShadowWatcher._tune_drift_warning(noisy_today, PRIOR_TUNE))
+
+real_drift = dict(PRIOR_TUNE, date="2026-08-02", balanced=0.70, firmCov=0.85,
+                  per={"With BI": 0.80, "With DEV": 0.50},
+                  perCounts={"With BI": [12, 9], "With DEV": [300, 150]})
+warning = tl.ShadowWatcher._tune_drift_warning(real_drift, PRIOR_TUNE)
+check("a real swing backed by a large enough bucket is flagged",
+      "balanced accuracy" in warning and "With DEV" in warning
+      and "With BI" not in warning, warning)
+
+check("the first-ever tune has nothing prior to drift from",
+      tl.ShadowWatcher._tune_drift_warning(real_drift, None) == "")
+
 # --- A suggestion should name the words that drove it ----------------------
 # A confident number alone gives a reviewer nothing to check it against.
 # predict_ex now also returns which words in THIS ticket most favoured the
