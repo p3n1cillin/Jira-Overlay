@@ -523,10 +523,17 @@ $doc = New-Object Windows.Data.Xml.Dom.XmlDocument
 $doc.LoadXml('<toast duration="short"><visual><binding template="ToastGeneric"><text hint-maxLines="1">{t}</text><text>{b}</text></binding></visual></toast>')
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show((New-Object Windows.UI.Notifications.ToastNotification($doc)))
 """
-    subprocess.Popen(
-        ["powershell", "-WindowStyle", "Hidden", "-NonInteractive", "-Command", ps],
-        creationflags=0x08000000,
-    )
+    try:
+        subprocess.Popen(
+            ["powershell", "-WindowStyle", "Hidden", "-NonInteractive",
+             "-Command", ps],
+            creationflags=0x08000000,
+        )
+    except OSError:
+        # powershell.exe can be missing or blocked on a locked-down machine.
+        # This runs inline inside _update_ui, so a failure here must not cost
+        # the rest of that repaint — same reasoning as play_alert() below.
+        pass
 
 
 def play_alert() -> None:

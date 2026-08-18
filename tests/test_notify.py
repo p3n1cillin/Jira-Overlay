@@ -8,6 +8,7 @@ be running arbitrary PowerShell.
 """
 
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,23 @@ from _harness import Checker, load_overlay          # noqa: E402
 
 ov = load_overlay()
 check = Checker("notifications and tray")
+
+# A locked-down or PowerShell-Core-only machine can have no "powershell.exe"
+# on PATH at all. send_toast runs inline inside _update_ui's repaint, which
+# only catches exceptions at the caller — a failure here used to be able to
+# skip the tray badge, SLA label and status line for that whole cycle,
+# worst of all on the exact cycles a new ticket actually arrived.
+real_popen = subprocess.Popen
+subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(
+    FileNotFoundError("powershell.exe not found"))
+try:
+    ov.send_toast("Jira — SD-1", "New ticket in alert queue")
+    check("a missing powershell.exe doesn't raise out of send_toast", True)
+except Exception as exc:                             # noqa: BLE001
+    check("a missing powershell.exe doesn't raise out of send_toast", False,
+          f"{type(exc).__name__}: {exc}")
+finally:
+    subprocess.Popen = real_popen
 
 AWKWARD = [
     ("an apostrophe",        "Bob's laptop won't boot"),
