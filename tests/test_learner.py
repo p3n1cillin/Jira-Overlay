@@ -147,6 +147,63 @@ w3.backfill()
 check("backfill avoids the same malformed query",
       not [q for q in w3.jira.queries if "CHANGED TO ()" in q])
 
+# --- An interrupted backfill must not discard what it already learned -----
+# backfill() is a one-time pass that can mean thousands of Jira calls on a
+# busy desk - one changelog fetch per issue. It used to write history and
+# seenTransitions only once, at the very end; a crash or forced restart
+# partway through discarded everything already learned even though
+# backfillDone correctly stays False and the next launch tries again.
+class _StoppingJira:
+    """Every changelog() call counts down; past the limit it also sets the
+    stop event, simulating the process being told to quit mid-backfill."""
+
+    def __init__(self, issues, changelog_by_key, stop_after):
+        self._issues = issues
+        self._changelog = changelog_by_key
+        self._stop_after = stop_after
+        self._calls = 0
+        self.stop = None
+        self._refusals = set()
+
+    def get(self, path, params=None):
+        return None
+
+    def search(self, jql, fields, cap=100):
+        return self._issues
+
+    def changelog(self, key):
+        self._calls += 1
+        if self._calls > self._stop_after and self.stop is not None:
+            self.stop.set()
+        return self._changelog.get(key, [])
+
+
+_N = 20
+_bf_issues = [{"key": f"BF-{i}", "fields": {"status": {"name": "Done"}}}
+             for i in range(_N)]
+_bf_changelog = {
+    f"BF-{i}": [{"id": f"bf{i}", "created": "2026-07-01T10:00:00.000+0000",
+                "author": {"displayName": "Agent"},
+                "items": [{"field": "status",
+                          "toString": "Passed to Networks"}]}]
+    for i in range(_N)}
+_bf_jira = _StoppingJira(_bf_issues, _bf_changelog, stop_after=8)
+w5 = watcher({"triageStatuses": ["Passed to Networks"], "resolvedStatuses": []},
+            jira=_bf_jira)
+_bf_jira.stop = w5.stop
+w5.state["backfillDone"] = False
+w5.backfill()
+
+with open(tl.HISTORY_FILE, encoding="utf-8") as f:
+    saved = [json.loads(line) for line in f if line.strip()]
+check("an interrupted backfill still writes what it already learned",
+      0 < len(saved) < _N, f"{len(saved)} of {_N}")
+check("  and remembers which transitions it already scored",
+      0 < len(w5.state.get("seenTransitions", [])) < _N,
+      str(len(w5.state.get("seenTransitions", []))))
+check("  without marking the backfill as finished",
+      not w5.state.get("backfillDone"))
+
 w4 = watcher({"resolvedStatuses": ["Done"], "triageStatuses": []},
              state={"workflowDiscovered": True})
 before = len(w4.jira.queries) + len(w4.jira.gets)

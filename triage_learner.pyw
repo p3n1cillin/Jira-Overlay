@@ -1351,6 +1351,21 @@ class ShadowWatcher:
 
     # -- backfill --------------------------------------------------------------
 
+    def _backfill_checkpoint(self, seen: dict) -> None:
+        """Save progress so an interrupted backfill doesn't discard it.
+
+        This is a one-time, potentially slow pass over a project's whole
+        history — one Jira call per issue just for its changelog, easily
+        thousands of calls on a busy desk. A crash, a forced restart or the
+        machine sleeping partway through used to lose everything learned so
+        far, since seenTransitions and the history file were only written
+        once, right at the end; backfillDone correctly stays False so it
+        retries, but from zero. Checkpointing here means a retry resumes
+        with what was already learned kept, rather than starting over.
+        """
+        self.state["seenTransitions"] = list(seen)
+        self._save_state()
+
     def backfill(self) -> None:
         if self.state.get("backfillDone"):
             return
@@ -1367,9 +1382,9 @@ class ShadowWatcher:
             self.state.setdefault("seenTransitions", []))
         learned = 0
         first_routing = "9999"
-        hist: list[dict] = []   # rebuild the self-tune history from scratch
         for issue in issues:
             if self.stop.is_set():
+                self._backfill_checkpoint(seen)
                 return
             det = self._issue_details(issue)
             routed, _ = self._transitions(det["key"])
@@ -1385,7 +1400,7 @@ class ShadowWatcher:
                                    reporter=det["reporter"],
                                    exemplar=tokenize(det["summary"]))
                 learned += 1
-                hist.append(self._history_record(det, tr["dest"], tr["when"]))
+                self._append_history(det, tr["dest"], tr["when"])
                 self._log({"event": "backfill", "key": det["key"],
                            "summary": det["summary"], "dest": tr["dest"],
                            "by": tr["by"], "when": tr["when"],
@@ -1407,6 +1422,7 @@ class ShadowWatcher:
                 f'ORDER BY updated DESC')
         for issue in self.jira.search(jql2, self._FIELDS, cap=BACKFILL_CAP):
             if self.stop.is_set():
+                self._backfill_checkpoint(seen)
                 return
             det = self._issue_details(issue)
             routed, resolutions = self._transitions(det["key"])
@@ -1422,8 +1438,7 @@ class ShadowWatcher:
                                    reporter=det["reporter"],
                                    exemplar=tokenize(det["summary"]))
                 learned += 1
-                hist.append(self._history_record(det, self.resolved_label,
-                                                 tr["when"]))
+                self._append_history(det, self.resolved_label, tr["when"])
                 self._log({"event": "backfill", "key": det["key"],
                            "summary": det["summary"],
                            "dest": self.resolved_label,
@@ -1440,6 +1455,7 @@ class ShadowWatcher:
             for issue in self.jira.search(jql3, self._FIELDS,
                                           cap=BACKFILL_CAP):
                 if self.stop.is_set():
+                    self._backfill_checkpoint(seen)
                     return
                 det = self._issue_details(issue)
                 moves, orig_summary = self._project_moves(det["key"])
@@ -1457,18 +1473,12 @@ class ShadowWatcher:
                                        reporter=det["reporter"],
                                        exemplar=tokenize(det["summary"]))
                     learned += 1
-                    hist.append(self._history_record(det, label, mv["when"]))
+                    self._append_history(det, label, mv["when"])
                     self._log({"event": "backfill", "key": mv["oldKey"],
                                "summary": det["summary"], "dest": label,
                                "by": mv["by"], "when": mv["when"],
                                "requestType": req_type,
                                "clones": [det["key"]]})
-
-        # write the fresh labelled history the nightly self-tune replays
-        hist.sort(key=lambda r: r["when"])
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            for rec in hist:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         self.state["seenTransitions"] = list(seen)
         self.state["backfillDone"]    = True
