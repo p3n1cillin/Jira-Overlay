@@ -131,6 +131,14 @@ check("move labels are generic", w.moved_label("BUGS") == "Moved to BUGS")
 check("discovery records that it ran, so it isn't repeated every startup",
       w.state.get("workflowDiscovered") is True)
 
+# A hand-edited resolvedLabel that happens to collide with a real status
+# name (or a move label colliding with one) must not show the same outcome
+# twice in report tables that index by all_dests.
+collider = watcher({"triageStatuses": ["Passed to Networks"],
+                    "resolvedLabel": "Passed to Networks"})
+check("a colliding resolved label doesn't duplicate the outcome list",
+      collider.all_dests == ["Passed to Networks"], collider.all_dests)
+
 
 # --- A desk where everything is resolved in place --------------------------
 

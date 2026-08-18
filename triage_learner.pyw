@@ -1233,9 +1233,17 @@ class ShadowWatcher:
 
     @property
     def all_dests(self) -> list[str]:
-        """Every outcome label the report should account for."""
-        return (list(self.dests) + [self.resolved_label]
-                + [self.moved_label(p) for p in self.move_targets])
+        """Every outcome label the report should account for.
+
+        Deduplicated: dests come from real Jira status names, resolved_label
+        and the per-project move labels are synthetic ones a hand-edited
+        config can accidentally make collide with a real status name. Report
+        tables index by this list, so a collision would otherwise show the
+        same outcome twice with the same figures rather than once.
+        """
+        return list(dict.fromkeys(
+            list(self.dests) + [self.resolved_label]
+            + [self.moved_label(p) for p in self.move_targets]))
 
     # -- state ---------------------------------------------------------------
 
@@ -2283,21 +2291,35 @@ class ShadowWatcher:
         n, c  = stats["predictions"], stats["correct"]
         acc   = f"{100 * c // n}% ({c}/{n})" if n else "no resolved predictions yet"
 
+        seen_counts = m.get("seen", {})
         lines = [
             "# Triage Shadow Learner — report",
             "",
             f"_Updated {datetime.now():%Y-%m-%d %H:%M:%S} · shadow mode — "
             "no tickets are ever actioned._",
             "",
+            "## Model provenance",
+            "",
+            f"- **Trained on:** {sum(seen_counts.values())} labelled decisions"
+            + (f" since {self.state['processStart']}"
+               if self.state.get("processStart") else ""),
+            f"- **Backfill:** "
+            + (f"complete ({self.state.get('backfillCount', 0)} decisions)"
+               if self.state.get("backfillDone")
+               else "not yet complete — figures below will fill in as it runs"),
+            f"- **Last self-tune:** {self.state.get('lastTuneDate') or 'never yet'}"
+            f" · tuning schema v{self.state.get('tuningSchemaVersion', 0)}",
+            f"- **Outcomes tracked:** {len(self.all_dests)} "
+            f"({', '.join(self.all_dests)})",
+            "",
             f"## Learned triage map for `{self.project}`",
             "",
             "| Outcome | What the team does | Observed examples |",
             "|---|---|---|",
         ]
-        seen = m.get("seen", {})
         for dest in self.all_dests:
             lines.append(f"| {dest} | {self.learner.plan_for(dest)} | "
-                         f"{seen.get(dest, 0)} |")
+                         f"{seen_counts.get(dest, 0)} |")
 
         live = self._live_metrics()
         lines += ["", f"## Prediction accuracy: {acc}"]
