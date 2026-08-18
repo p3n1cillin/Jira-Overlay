@@ -139,6 +139,35 @@ collider = watcher({"triageStatuses": ["Passed to Networks"],
 check("a colliding resolved label doesn't duplicate the outcome list",
       collider.all_dests == ["Passed to Networks"], collider.all_dests)
 
+# ensure_workflow_known's own changelog scan used h.get("items", []),
+# which only falls back when the key is MISSING - not when a history entry
+# carries an explicit "items": null, the same present-but-null shape Jira
+# sends everywhere else. _transitions already guards this correctly with
+# json_objects(); this inline scan had drifted out of step with it, and
+# would have refused to even start the learner on any startup where one
+# of the 250 sampled issues had a redacted/null changelog entry.
+class NullItemsJira(FakeJira):
+    def changelog(self, key):
+        real = CHANGELOG.get(key, [])
+        if key == "HD-0":
+            return [{"id": "cnull", "items": None}] + real
+        return real
+
+
+null_watcher = watcher(jira=NullItemsJira())
+try:
+    result = null_watcher.ensure_workflow_known()
+    ok = True
+except Exception as exc:                                  # noqa: BLE001
+    ok = False
+    err = f"{type(exc).__name__}: {exc}"
+check("a changelog entry with items: null doesn't stop discovery starting",
+      ok, "" if ok else err)
+if ok:
+    check("  and discovery still completes correctly from the other issues",
+          result is True and null_watcher.resolved == {"Closed"},
+          (result, null_watcher.resolved))
+
 
 # --- A desk where everything is resolved in place --------------------------
 
