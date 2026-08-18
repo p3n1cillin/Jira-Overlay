@@ -263,25 +263,25 @@ check("a real, universally-associated extension is detected as having one",
       ov._has_association(".txt") is True)
 
 
-def _procs_named(name: str) -> set:
-    import subprocess as sp
-    out = sp.check_output(["tasklist", "/fi", f"imagename eq {name}",
-                           "/fo", "csv"], text=True)
-    return {ln for ln in out.splitlines() if name.lower() in ln.lower()}
-
-
+# A real notepad.exe used to be launched here to prove the fallback works,
+# cleaned up with `taskkill /f /im notepad.exe` - which isn't scoped to the
+# one process this test started, so it force-closes anything ELSE named
+# notepad.exe too, including a real window with someone's own unsaved work
+# in it. Mock the Popen call instead: same proof (the right command gets
+# run), no window ever actually opens.
+import subprocess
 import tempfile
+_real_popen = subprocess.Popen
+_popen_calls = []
+subprocess.Popen = lambda args, **kw: _popen_calls.append(args)
 target = os.path.join(tempfile.mkdtemp(), "export.fake9182nope")
 open(target, "w", encoding="utf-8").write("test export content\n")
-before = _procs_named("notepad.exe")
-ov.open_in_default_or_notepad(target)
-import time
-time.sleep(1.5)
-after = _procs_named("notepad.exe")
+try:
+    ov.open_in_default_or_notepad(target)
+finally:
+    subprocess.Popen = _real_popen
 check("an unassociated extension falls back to Notepad, not silence",
-      len(after) > len(before), f"before={len(before)} after={len(after)}")
-import subprocess
-subprocess.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
+      _popen_calls == [["notepad.exe", target]], _popen_calls)
 
 root.destroy()
 

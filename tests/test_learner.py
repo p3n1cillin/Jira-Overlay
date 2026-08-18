@@ -369,26 +369,26 @@ check("a real, universally-associated extension is detected as having one",
       tl._has_association(".txt") is True)
 
 
-def _procs_named(name: str) -> set:
-    import subprocess
-    out = subprocess.check_output(
-        ["tasklist", "/fi", f"imagename eq {name}", "/fo", "csv"], text=True)
-    return {ln for ln in out.splitlines() if name.lower() in ln.lower()}
-
-
+# A real notepad.exe used to be launched here to prove the fallback works,
+# cleaned up with `taskkill /f /im notepad.exe` - which isn't scoped to the
+# one process this test started, so it force-closes anything ELSE named
+# notepad.exe too, including a real window with someone's own unsaved
+# work in it. Mock the Popen call instead: same proof (the right command
+# gets run), no window ever actually opens.
+import subprocess as _sp
 import tempfile as _tempfile
+_real_popen = _sp.Popen
+_popen_calls = []
+_sp.Popen = lambda args, **kw: _popen_calls.append(args)
 fake_ext = ".fake9182nope"
 target = os.path.join(_tempfile.mkdtemp(), f"report{fake_ext}")
 open(target, "w", encoding="utf-8").write("test report content\n")
-before = _procs_named("notepad.exe")
-tl.open_in_default_or_notepad(target)
-import time as _time
-_time.sleep(1.5)
-after = _procs_named("notepad.exe")
+try:
+    tl.open_in_default_or_notepad(target)
+finally:
+    _sp.Popen = _real_popen
 check("an unassociated extension falls back to Notepad, not silence",
-      len(after) > len(before), f"before={len(before)} after={len(after)}")
-import subprocess as _sp
-_sp.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
+      _popen_calls == [["notepad.exe", target]], _popen_calls)
 
 
 # --- Jira sends null, not just absent ---------------------------------------
