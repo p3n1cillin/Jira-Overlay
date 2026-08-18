@@ -2447,7 +2447,10 @@ class ShadowWatcher:
         for dest in self.all_dests:
             kws = ", ".join(self.learner.top_keywords(dest)) or "—"
             rts = m["reqTypes"].get(dest, {})
-            top_rt = ", ".join(f"{k} ({v})" for k, v in
+            # Counts have been through recency decay, so they're fractional
+            # (261.4948...) - real, but meaningless precision to show a
+            # reader who just wants "how often, roughly".
+            top_rt = ", ".join(f"{k} ({v:.0f})" for k, v in
                                sorted(rts.items(), key=lambda kv: -kv[1])[:4]) or "—"
             lines += [f"### {dest}",
                       f"- **Top keywords:** {kws}",
