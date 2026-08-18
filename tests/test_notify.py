@@ -126,6 +126,36 @@ check("suggestions older than the staleness window are dropped",
       ov.JiraOverlay._load_suggestions(_reader()) == {})
 
 
+# --- Learner health, shown in Settings so a problem is visible somewhere
+# people actually look, not just in a report file nobody opens ------------
+_status_path = os.path.join(_dir, "status.json")
+_watcher = object.__new__(ov.JiraOverlay)
+
+json.dump({"healthy": True, "refusals": [],
+          "provenance": {"trainedOnDecisions": 3278, "lastTuneDate": "2026-08-18"},
+          "accuracy": {"pct": 89.7}}, open(_status_path, "w"))
+loaded = ov.JiraOverlay._load_learner_status(_watcher, path=_status_path)
+check("a healthy status file loads as a usable dict",
+      isinstance(loaded, dict) and loaded["healthy"] is True, loaded)
+
+json.dump({"healthy": False, "refusals": [401]}, open(_status_path, "w"))
+loaded = ov.JiraOverlay._load_learner_status(_watcher, path=_status_path)
+check("an unhealthy status file still loads, with the refusal codes intact",
+      loaded["healthy"] is False and loaded["refusals"] == [401], loaded)
+
+check("a missing status file (no learner installed) is not an error",
+      ov.JiraOverlay._load_learner_status(
+          _watcher, path=os.path.join(_dir, "nope.json")) is None)
+
+open(_status_path, "w").write("{not json")
+check("a corrupt status file is not an error either",
+      ov.JiraOverlay._load_learner_status(_watcher, path=_status_path) is None)
+
+open(_status_path, "w").write("[1, 2, 3]")
+check("a status file that parses to something other than an object is rejected",
+      ov.JiraOverlay._load_learner_status(_watcher, path=_status_path) is None)
+
+
 # --- One empty reading must not re-notify the whole queue ------------------
 # JSM's cached issueCount decides whether a queue is fetched at all, so a
 # single stale zero for a queue that really has tickets emptied new_issues

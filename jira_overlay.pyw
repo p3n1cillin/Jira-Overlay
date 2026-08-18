@@ -2797,6 +2797,23 @@ class JiraOverlay:
             self.completed_today = 0
             self.sla_compliance  = None
 
+    def _load_learner_status(self, path: Optional[str] = None) -> Optional[dict]:
+        """Health/provenance written by the (optional) local triage learner.
+
+        Settings-panel-only, read fresh each time it's opened rather than
+        cached against the poll loop — this isn't on any hot path. None
+        means either the learner isn't installed on this machine, or it
+        hasn't produced a first report yet; both are normal, not errors.
+        """
+        path = path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "triage_status.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
+
     # ── Update UI ─────────────────────────────────────────────────────────────
 
     def _load_suggestions(self) -> dict:
@@ -3543,6 +3560,42 @@ class JiraOverlay:
                   command=self._reconfigure, bg=SEL, fg=FG,
                   font=_font(9), relief="flat", padx=8, pady=4,
                   cursor="hand2").pack(anchor="w", padx=16, pady=(0, 8))
+
+        # Triage learner health — a separate, optional process on this same
+        # machine. Its own report lives in a file nobody opens day to day;
+        # this is the thing people actually have open, so a problem there
+        # (a dead token, a broken tune) should be visible here too.
+        learner = self._load_learner_status()
+        if learner is not None:
+            section("Triage learner")
+            healthy = bool(learner.get("healthy", True))
+            prov    = learner.get("provenance") or {}
+            acc     = learner.get("accuracy") or {}
+            row = tk.Frame(body, bg=BG)
+            row.pack(fill="x", padx=16, pady=(0, 1))
+            tk.Label(row, text="●", font=_font(10),
+                     fg=_C["ok"] if healthy else _C["alert"],
+                     bg=BG).pack(side="left")
+            if healthy:
+                headline = "Healthy"
+            else:
+                codes = ", ".join(str(c) for c in (learner.get("refusals") or []))
+                headline = f"Jira is refusing requests ({codes or '?'})"
+            tk.Label(row, text=headline, font=_font(9, "bold"),
+                     fg=_C["fg_bright"] if healthy else _C["alert"],
+                     bg=BG).pack(side="left", padx=(5, 0))
+            details = []
+            trained = prov.get("trainedOnDecisions")
+            if trained:
+                details.append(f"{trained} decisions learned")
+            if prov.get("lastTuneDate"):
+                details.append(f"last tuned {prov['lastTuneDate']}")
+            if isinstance(acc.get("pct"), (int, float)):
+                details.append(f"{acc['pct']:.0f}% accurate")
+            if details:
+                tk.Label(body, text=" · ".join(details), font=_font(8),
+                        fg=_C["fg_dim"], bg=BG, justify="left"
+                        ).pack(anchor="w", padx=16, pady=(0, 8))
 
         # Save / Cancel
         was_sla_on    = bool(cfg.get("slaEnabled", True))
