@@ -162,7 +162,14 @@ app.queues = [{"name": n, "id": i, "issueCount": 1}
 app._all_queue_names = [q["name"] for q in app.queues]
 app.completed_today = 1
 app.sla_compliance = 100
+# "Live" was left in fg_dim while every sibling state on this same label
+# (snoozed, alert queue missing) colours its whole line to match its
+# meaning - a status dot sitting in the same grey as plain text reads as
+# stuck off, not "all good". Piggybacks on this fixture since it's already
+# built and already calls _update_ui(); this is the only place that does.
 app._update_ui()
+check("the Live status colours itself ok (green), not the neutral dim grey",
+      app.lbl_status.cget("fg") == ov._C["ok"], app.lbl_status.cget("fg"))
 app._do_show()
 app._toggle_settings()
 app.root.update()

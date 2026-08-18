@@ -62,22 +62,42 @@ def _bootstrap() -> None:
     if not missing:
         return
 
+    # Same palette and typeface as the rest of the app (_C / _FONT_STACK,
+    # both defined further down — this runs before either exists, so the
+    # values are repeated here rather than shared). This is the very first
+    # thing a brand-new install ever shows; it looked like a different,
+    # unrelated program bolted onto the front of this one.
     win = tk.Tk()
     win.title("Jira Overlay — First Run Setup")
-    win.configure(bg="#1a1a2e")
+    win.configure(bg="#11151d")
     win.resizable(False, False)
+    win.update_idletasks()
+    try:
+        # Same call _round_corners makes further down (also not yet
+        # defined here) — DWMWA_WINDOW_CORNER_PREFERENCE=33,
+        # DWMWCP_ROUNDSMALL=3. Every other window in this app gets
+        # Windows 11's native rounded corners; this one is the first
+        # thing anyone sees and was the one place still square.
+        hwnd = ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)
+        if hwnd:
+            pref = ctypes.c_int(3)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(hwnd), ctypes.c_uint(33),
+                ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass          # cosmetic only
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
     win.geometry(f"360x130+{sw // 2 - 180}+{sh // 2 - 65}")
 
     tk.Label(win, text="Installing required packages…",
-             font=("Segoe UI", 11, "bold"), fg="#e2e8f0", bg="#1a1a2e"
-             ).pack(pady=(22, 4))
-    lbl = tk.Label(win, text="", font=("Segoe UI", 9),
-                   fg="#a0aec0", bg="#1a1a2e")
+             font=("Segoe UI Variable Display", 11, "bold"),
+             fg="#f2f5fa", bg="#11151d").pack(pady=(22, 4))
+    lbl = tk.Label(win, text="", font=("Segoe UI Variable Text", 9),
+                   fg="#98a4b6", bg="#11151d")
     lbl.pack()
-    track = tk.Frame(win, bg="#2d3748", height=5)
+    track = tk.Frame(win, bg="#1a212b", height=5)
     track.pack(fill="x", padx=24, pady=(12, 0))
-    bar = tk.Frame(track, bg="#0052cc", height=5, width=0)
+    bar = tk.Frame(track, bg="#4d9dff", height=5, width=0)
     bar.place(x=0, y=0, height=5)
     win.update()
 
@@ -895,6 +915,7 @@ class SetupWindow:
         self.root.update_idletasks()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.root.geometry(f"430x320+{sw // 2 - 215}+{sh // 2 - 160}")
+        _round_corners(self.root)
 
         tk.Label(self.root, text="Jira Overlay Setup",
                  font=_font(14, "bold"),
@@ -1053,6 +1074,7 @@ class PickDeskWindow:
     def _build(self, desks: list[dict]) -> None:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.root.geometry(f"360x{90 + len(desks) * 44}+{sw // 2 - 180}+{sh // 2 - 100}")
+        _round_corners(self.root)
         tk.Label(self.root, text="Which service desk to monitor?",
                  font=_font(11, "bold"),
                  fg=_C["fg_bright"], bg=_C["bg_dark"]).pack(pady=(18, 10))
@@ -1062,7 +1084,7 @@ class PickDeskWindow:
                       command=lambda d=desk: self._pick(d),
                       bg=_C["input"], fg=_C["fg_bright"], font=_font(10),
                       relief="flat", padx=12, pady=8, cursor="hand2",
-                      activebackground=_C["fg_dim"], activeforeground="white"
+                      activebackground=_C["accent"], activeforeground="white"
                       ).pack(fill="x", padx=24, pady=4)
 
     def _pick(self, desk: dict) -> None:
@@ -1240,12 +1262,13 @@ class TeamReportWindow:
 
         cfg = app.config
         self.win = tk.Toplevel(app.root)
-        self.win.title("Team report")
+        self.win.title("Jira Overlay — Team Report")
         self.win.configure(bg=_C["bg"])
         self.win.minsize(460, 380)
         sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
         self.win.geometry(f"520x560+{sw // 2 - 260}+{max(20, sh // 2 - 300)}")
         self.win.protocol("WM_DELETE_WINDOW", self._close)
+        _round_corners(self.win)
 
         self.v_range = tk.StringVar(value=cfg.get("reportRange", "30 days"))
         self.v_basis = tk.StringVar(value=cfg.get("reportBasis", "resolved"))
@@ -1565,10 +1588,11 @@ class _PeoplePicker:
         self.app = app
         self.result: Optional[list[dict]] = None
         self.win = tk.Toplevel(parent)
-        self.win.title("People in the report")
+        self.win.title("Jira Overlay — Report People")
         self.win.configure(bg=_C["bg"])
         self.win.geometry("380x460")
         self.win.transient(parent)
+        _round_corners(self.win)
 
         BG = _C["bg"]
         tk.Label(self.win, text="Tick everyone the report should cover",
@@ -1714,7 +1738,7 @@ class NewTicketTooltip:
                       command=lambda: (on_mark_seen(), self.destroy()),
                       bg=_C["input"], fg=_C["ok"], font=_font(8),
                       relief="flat", pady=4, cursor="hand2",
-                      activebackground="#3d4f6e", activeforeground=_C["ok"]
+                      activebackground=_C["chip"], activeforeground=_C["ok"]
                       ).pack(fill="x", padx=8, pady=(0, 4))
 
     def _make_issue_row(self, url: str, key: str, summary: str,
@@ -2497,6 +2521,7 @@ class JiraOverlay:
         win.configure(bg=_C["bg_dark"])
         win.resizable(False, False)
         win.attributes("-topmost", True)
+        _round_corners(win)
 
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         tk.Label(win, text="Which queue should trigger alerts?",
@@ -2980,7 +3005,7 @@ class JiraOverlay:
             if is_new:
                 if count > 0:
                     # active alert queue — solid accent chip + live dot
-                    rw["lbl_count"].config(fg="#ffffff", bg=_C["accent"])
+                    rw["lbl_count"].config(fg="white", bg=_C["accent"])
                     rw["dot"].config(text="●", fg=_C["info"])
                 else:
                     rw["lbl_count"].config(fg=_C["fg_dim"], bg=_C["badge"])
@@ -3094,8 +3119,12 @@ class JiraOverlay:
             self.lbl_status.config(text=f"Alert queue not found: {missing}",
                                    fg=_C["warn"])
         else:
+            # Every other branch here colours its whole line to match its
+            # meaning (warn for snoozed/missing) — this one left the dot
+            # sitting in the same dim grey as everything else, which reads
+            # as a status indicator stuck off rather than "all good".
             self.lbl_status.config(text=f"● Live · {datetime.now():%H:%M:%S}",
-                                   fg=_C["fg_dim"])
+                                   fg=_C["ok"])
 
         # Leave geometry alone while settings are open or a transition is
         # still running — both manage the window rect themselves.
