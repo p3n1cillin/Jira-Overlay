@@ -114,6 +114,92 @@ except ImportError as exc:
 finally:
     restore()
 
+# --- startup registration must heal a moved install, not just remember ----
+# The registry only stores a name -> command line. Checking just the name's
+# presence means a folder move (this one lives under Temp) or a Python
+# upgrade leaves a stale command line forever "already configured" and
+# silently dead. A first-time install should still ask before touching
+# anything; once the user has said yes once, later drift should self-heal
+# without asking again.
+
+
+class _FakeKey:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeWinReg:
+    HKEY_CURRENT_USER = object()
+    KEY_READ = 1
+    KEY_SET_VALUE = 2
+    REG_SZ = 1
+
+    def __init__(self, initial=None):
+        self.values = dict(initial or {})
+
+    def OpenKey(self, hive, path, res, access):
+        return _FakeKey()
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return (self.values[name], 1)
+
+    def SetValueEx(self, key, name, res, typ, value):
+        self.values[name] = value
+
+
+spec = importlib.util.spec_from_file_location(
+    "su", os.path.join(PROJECT, "setup.py"))
+su = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(su)
+real_winreg = sys.modules.get("winreg")
+wanted = {name: f'"{su.pythonw()}" "{script}"'
+          for name, script in su.STARTUP_NAMES.items()}
+
+
+def run_configure(initial: dict, answer: bool):
+    fake = FakeWinReg(initial)
+    sys.modules["winreg"] = fake
+    asked = {"n": 0}
+    su.ask_yes_no = lambda *a, **k: (asked.__setitem__("n", asked["n"] + 1)
+                                     or answer)
+    try:
+        su.configure_startup()
+    finally:
+        if real_winreg is not None:
+            sys.modules["winreg"] = real_winreg
+        else:
+            sys.modules.pop("winreg", None)
+    return fake.values, asked["n"]
+
+
+values, asked = run_configure({}, True)
+check("a fresh machine asks before registering startup", asked == 1)
+check("  and registers both apps once the user agrees", values == wanted,
+      values)
+
+values, asked = run_configure({}, False)
+check("declining leaves nothing registered", values == {} and asked == 1)
+
+stale = {name: '"C:\\Old\\Python\\pythonw.exe" "C:\\Old\\Path\\x.pyw"'
+         for name in su.STARTUP_NAMES}
+values, asked = run_configure(stale, True)
+check("a moved install or upgraded Python is corrected without asking",
+      values == wanted and asked == 0, f"asked={asked} values={values}")
+
+values, asked = run_configure(dict(wanted), True)
+check("an already-correct registration is left alone and not re-asked",
+      values == wanted and asked == 0, f"asked={asked}")
+
+partial = {next(iter(su.STARTUP_NAMES)): next(iter(wanted.values()))}
+values, asked = run_configure(partial, True)
+check("a partially-registered install is completed without asking",
+      values == wanted and asked == 0, f"asked={asked} values={values}")
+
 # --- setup scripts must be readable by Windows PowerShell 5.1 --------------
 # 5.1 reads a script without a byte-order mark as ANSI, so a single non-ASCII
 # character can break parsing before the installer prints anything.

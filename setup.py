@@ -130,38 +130,54 @@ def install_dependencies() -> bool:
 
 
 def configure_startup() -> None:
+    """Register both apps to start with Windows.
+
+    Idempotent by VALUE, not just by name: this folder can be moved (it
+    lives under Temp) and Python can be upgraded to a new install path, and
+    either leaves a stale command line sitting in the registry pointing
+    nowhere real. A stale-but-present entry means the user already opted
+    in once, so a mismatch is corrected silently; only a first-time install
+    (nothing registered at all) asks.
+    """
     import winreg
+    wanted = {name: f'"{pythonw()}" "{script}"'
+              for name, script in STARTUP_NAMES.items()}
+    current: dict[str, str] = {}
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
                             winreg.KEY_READ) as key:
-            already = all(_has_value(key, name) for name in STARTUP_NAMES)
+            for name in STARTUP_NAMES:
+                value = _value(key, name)
+                if value is not None:
+                    current[name] = value
     except OSError:
-        already = False
+        pass
 
-    if already:
+    if all(current.get(name) == cmd for name, cmd in wanted.items()):
         say("    Already set to start with Windows.")
         return
-    if not ask_yes_no("    Start automatically when you log in?"):
+    if not current and not ask_yes_no(
+            "    Start automatically when you log in?"):
         say("    Skipped - you can turn this on later in Settings.")
         return
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
                             winreg.KEY_SET_VALUE) as key:
-            for name, script in STARTUP_NAMES.items():
-                winreg.SetValueEx(key, name, 0, winreg.REG_SZ,
-                                  f'"{pythonw()}" "{script}"')
-        say("    Enabled.")
+            for name, cmd in wanted.items():
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, cmd)
+        say("    Enabled." if not current else
+            "    Startup entry updated for this install's current location.")
     except OSError as exc:
         say(f"    Could not write the registry key: {exc}")
 
 
-def _has_value(key, name: str) -> bool:
+def _value(key, name: str) -> str | None:
     import winreg
     try:
-        winreg.QueryValueEx(key, name)
-        return True
+        value, _ = winreg.QueryValueEx(key, name)
+        return value
     except FileNotFoundError:
-        return False
+        return None
 
 
 def launch() -> None:
