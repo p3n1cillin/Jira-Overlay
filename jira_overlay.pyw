@@ -2376,7 +2376,7 @@ class JiraOverlay:
                 self._jira_url("/rest/servicedeskapi/servicedesk"),
                 timeout=10)
             r.raise_for_status()
-            desks = r.json().get("values", [])
+            desks = r.json().get("values") or []
         except Exception:
             return None
 
@@ -2689,7 +2689,7 @@ class JiraOverlay:
                     f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{q['id']}/issue"),
                 params={"start": 0, "limit": _ISSUE_LIMIT}, timeout=10)
             if ir.ok:
-                vals = ir.json().get("values", [])
+                vals = ir.json().get("values") or []
                 issues.extend(vals)
                 # Exact when the whole queue fits in one page; else trust cache
                 reconciled[q["name"]] = len(vals) if cached <= _ISSUE_LIMIT else cached
@@ -2751,7 +2751,7 @@ class JiraOverlay:
         if not r.ok:
             return None, r.status_code == 400
         try:
-            return len(r.json().get("issues", [])), False
+            return len(r.json().get("issues") or []), False
         except (ValueError, AttributeError):
             return None, False
 

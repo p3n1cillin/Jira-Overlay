@@ -237,6 +237,82 @@ if ok:
     check("  and yields an empty queue list rather than stale data",
           o.queues == [], o.queues)
 
+# The same "values": null shape, found by inspection in two more places
+# that read a Jira JSON response with a bare .get(key, []) rather than
+# `or []`: service-desk discovery, and the per-queue issue reconciliation
+# fetch inside _fetch_data.
+d = object.__new__(O)
+d._session = type("S", (), {"get": staticmethod(
+    lambda url, **kw: _QR({"values": None}))})()
+d._jira_url = lambda p="": "https://x" + p
+try:
+    result = O._discover_service_desk(d)
+    ok = True
+except Exception as exc:                                  # noqa: BLE001
+    ok = False
+    err = f"{type(exc).__name__}: {exc}"
+check('service-desk discovery survives a "values": null response',
+      ok and result is None, "" if ok else err)
+
+o2 = object.__new__(O)
+o2.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
+            "alertQueues": ["Q"], "alertQueuesAsked": True}
+o2._jira_url = lambda p="": "https://x" + p
+
+
+def _null_issue_page(url, **kw):
+    return _QR({"values": None} if "/queue/1/issue" in url
+               else {"values": [{"name": "Q", "id": 1, "issueCount": 5}]})
+
+
+o2._session = type("S", (), {"get": staticmethod(_null_issue_page)})()
+o2.queues = []
+o2._all_queue_names = []
+o2.new_issues = []
+o2._reconciled_counts = {}
+o2._alert_count = 0
+o2._last_full_fetch = 9e18
+o2._alert_queues_missing = []
+o2._post = lambda fn: None
+o2._fetch_completion_stats = lambda c: None
+try:
+    O._fetch_data(o2)
+    ok = True
+except Exception as exc:                                  # noqa: BLE001
+    ok = False
+    err = f"{type(exc).__name__}: {exc}"
+check('a per-queue issue page of "values": null doesn\'t crash reconciliation',
+      ok, "" if ok else err)
+
+# _count_issues (completed-today / SLA) already had a try/except around
+# this line, but only for ValueError/AttributeError - len(None) raises
+# TypeError, which slipped straight through it.
+class _QR404:
+    ok = False
+    status_code = 404
+
+    def json(self):
+        return {}
+
+
+def _count_post(url, **kw):
+    return _QR404() if "approximate-count" in url else _QR({"issues": None})
+
+
+count_holder = object.__new__(O)
+count_holder._session = type("S", (),
+                             {"post": staticmethod(_count_post)})()
+count_holder._jira_url = lambda p="": "https://x" + p
+count_holder._approx_count_ok = True
+try:
+    n, rejected = O._count_issues(count_holder, "project = SD")
+    ok = True
+except Exception as exc:                                  # noqa: BLE001
+    ok = False
+    err = f"{type(exc).__name__}: {exc}"
+check('_count_issues survives an "issues": null search response',
+      ok and n == 0, "" if ok else err)
+
 # And the scheduling itself must survive any repaint failure at all.
 import queue as _queue                                 # noqa: E402
 import tkinter as _tk                                  # noqa: E402
