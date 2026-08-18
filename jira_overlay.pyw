@@ -128,6 +128,11 @@ import pystray
 # Constants
 # ---------------------------------------------------------------------------
 
+# Bump on a meaningful change. There's no build pipeline here to stamp this
+# automatically — it's a single-file script someone may have just copied,
+# not necessarily a git checkout — so this is the plain, low-maintenance
+# answer to "what version is this" for a support conversation.
+APP_VERSION  = "2026.08.18"
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
 STARTUP_NAME = "JiraOverlay"
 LEARNER_STARTUP_NAME = "JiraTriageLearner"
@@ -3555,6 +3560,8 @@ class JiraOverlay:
         section("System")
         s_startup = tk.BooleanVar(value=startup_enabled())
         check(body, "Run on Windows startup", s_startup)
+        tk.Label(body, text=f"Jira Overlay {APP_VERSION}", font=_font(8),
+                 fg=_C["fg_dim"], bg=BG).pack(anchor="w", padx=16, pady=(4, 0))
         tk.Frame(body, bg=BG, height=4).pack()
         tk.Button(body, text="⚙  Reconfigure credentials…",
                   command=self._reconfigure, bg=SEL, fg=FG,
@@ -3592,6 +3599,8 @@ class JiraOverlay:
                 details.append(f"last tuned {prov['lastTuneDate']}")
             if isinstance(acc.get("pct"), (int, float)):
                 details.append(f"{acc['pct']:.0f}% accurate")
+            if learner.get("version"):
+                details.append(f"v{learner['version']}")
             if details:
                 tk.Label(body, text=" · ".join(details), font=_font(8),
                         fg=_C["fg_dim"], bg=BG, justify="left"
