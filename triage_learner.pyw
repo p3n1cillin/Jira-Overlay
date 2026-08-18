@@ -881,6 +881,29 @@ class Learner:
         best = max(counts, key=counts.get)          # type: ignore[arg-type]
         return best if counts[best] / total >= HINT_MIN_SHARE else None
 
+    def _why(self, counts: "Counter[str]", best: str, second: str) -> list[str]:
+        """The few words in this ticket that most favoured `best` over the
+        runner-up — so a suggestion is something a reviewer can check, not
+        just a number to trust. Same per-token smoothing predict_ex already
+        uses, just compared head-to-head against the second choice instead
+        of against every destination at once, which is cheap: two
+        destinations, not the whole ready set."""
+        S     = self.m.get("scale", 1.0)
+        vocab = len(self._vocab_table()) or 1
+        tok_best   = self.m["tokens"].get(best) or {}
+        tok_second = self.m["tokens"].get(second) or {}
+        den_best   = self.m["totals"].get(best, 0) * S + vocab
+        den_second = self.m["totals"].get(second, 0) * S + vocab
+        weighed = []
+        for t, k in counts.items():
+            rate_best   = (tok_best.get(t, 0) * S + 1) / den_best
+            rate_second = (tok_second.get(t, 0) * S + 1) / den_second
+            weight = k * math.log(rate_best / rate_second)
+            if weight > 0:
+                weighed.append((weight, t))
+        weighed.sort(key=lambda w: -w[0])
+        return [t.replace("·", " ") for _, t in weighed[:4]]
+
     def predict_ex(self, tokens: list[str], req_type: str, reporter: str = "",
                    exemplar: Optional[list[str]] = None) -> dict:
         """Full prediction: best destination, its confidence, the runner-up
@@ -895,7 +918,7 @@ class Learner:
                   if seen.get(d, m["priors"][d]) >= MIN_EXAMPLES]
         if len(ready) < 2:
             return {"dest": None, "conf": 0, "second": None, "secondConf": 0,
-                    "margin": 0, "review": True, "source": "cold",
+                    "margin": 0, "review": True, "source": "cold", "why": [],
                     "note": "still learning — not enough observed examples yet"}
 
         # Stored counts are pre-divided by the lazy-decay multiplier; fold it
@@ -1008,9 +1031,10 @@ class Learner:
         review = (conf < TUNING.get("reviewConf", 75)
                   or margin < TUNING.get("reviewMargin", 20)
                   or hint_conflict)
+        why = self._why(counts, best, second) if second else []
         return {"dest": best, "conf": conf, "second": second,
                 "secondConf": conf2, "margin": margin, "review": review,
-                "source": source, "note": note}
+                "source": source, "note": note, "why": why}
 
     def clone_project_for(self, dest: str) -> str:
         cp = self.m["cloneProjects"].get(dest, {})
@@ -1567,7 +1591,7 @@ class ShadowWatcher:
                               "plan": p["note"], "second": p["second"],
                               "secondConf": p["secondConf"],
                               "review": p["review"],
-                              "source": p["source"],
+                              "source": p["source"], "why": p.get("why", []),
                               "requestType": req_type,
                               "summary": det["summary"][:120],
                               "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
@@ -2043,13 +2067,19 @@ class ShadowWatcher:
 
     def _short_label(self, p: dict) -> str:
         """One-line suggestion. On a close call, show both candidates and
-        ask for a human check instead of a confidently-wrong single answer."""
+        ask for a human check instead of a confidently-wrong single answer.
+        A confident call names the words that drove it, so it's something
+        to check rather than just something to trust."""
         best = self._dest_phrase(p["dest"])
         if p.get("review") and p.get("second"):
             second = self._dest_phrase(p["second"])
             return (f"review — likely {best} ({p['conf']}%), "
                     f"or {second} ({p.get('secondConf', 0)}%)")
-        return f"{best} · {p['conf']}%"
+        label = f"{best} · {p['conf']}%"
+        why = p.get("why")
+        if why:
+            label += " — because: " + ", ".join(why)
+        return label
 
     def _write_suggestions(self, predicted: dict) -> None:
         """Publish current suggestions for the overlay to display.

@@ -177,6 +177,45 @@ check("text from other nodes is kept when one sibling has null content",
               {"type": "paragraph", "content": None},
               {"type": "text", "text": "still here"}]}))
 
+# --- A suggestion should name the words that drove it ----------------------
+# A confident number alone gives a reviewer nothing to check it against.
+# predict_ex now also returns which words in THIS ticket most favoured the
+# winning destination over the runner-up, and _short_label folds that into
+# the one line the overlay shows.
+why_learner = tl.Learner({})
+for _ in range(20):
+    why_learner.learn("With DEV", tl.tokenize("automation script deploy"),
+                      "", [], "Sam", exemplar=["automation"])
+    why_learner.learn("With DATA", tl.tokenize("report totals export"),
+                      "", [], "Sam", exemplar=["report"])
+
+p = why_learner.predict_ex(tl.tokenize("automation script needs deploying"),
+                           "", "Sam", exemplar=["automation"])
+check("a confident prediction explains itself with words from the ticket",
+      p["dest"] == "With DEV" and bool(p["why"]), p)
+check("  and the explanation is actually made of this ticket's own words",
+      all(w in "automation script needs deploying" for w in p["why"]),
+      p["why"])
+
+label_maker = object.__new__(tl.ShadowWatcher)
+label_maker.resolved_label = "Resolved"
+label_maker.project = "SD"
+label = tl.ShadowWatcher._short_label(label_maker, p)
+check("  which shows up in the one-line suggestion the overlay displays",
+      "because:" in label, label)
+
+# Cold start (fewer than two destinations with enough examples) returns
+# early without ever reaching the why/second-choice logic - predict_intake
+# reads p["why"] unconditionally, so a missing key here is a live KeyError
+# on a fresh install or a newly-discovered destination, not just a test gap.
+cold = tl.Learner({})
+p_cold = cold.predict_ex(tl.tokenize("anything at all"), "", "")
+check("a cold-start prediction still carries a why key",
+      p_cold["dest"] is None and p_cold["why"] == [], p_cold)
+check("  so _short_label doesn't need special-casing it",
+      isinstance(tl.ShadowWatcher._short_label(
+          label_maker, dict(p_cold, dest="Resolved")), str))
+
 # --- An interrupted backfill must not discard what it already learned -----
 # backfill() is a one-time pass that can mean thousands of Jira calls on a
 # busy desk - one changelog fetch per issue. It used to write history and
