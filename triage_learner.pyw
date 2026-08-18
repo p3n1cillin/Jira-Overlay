@@ -49,6 +49,7 @@ Stop:  right-click the purple ⊕ tray icon → Quit
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import math
@@ -318,6 +319,43 @@ def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
                 os.unlink(tmp)
         except OSError:
             pass
+
+
+# ── Credential protection (DPAPI) ────────────────────────────────────────
+# jira_config.json is owned by the overlay, which stores the API token as a
+# DPAPI blob under tokenProtected rather than plain text — see jira_overlay
+# .pyw for why. This side only ever needs to decrypt it; identical to the
+# overlay's own implementation so a blob either app's Windows login produced
+# decrypts the same way.
+class _DPAPI_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi_call(fn, data: bytes) -> bytes:
+    buf = ctypes.create_string_buffer(data, len(data))
+    inblob  = _DPAPI_BLOB(len(data),
+                          ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    outblob = _DPAPI_BLOB()
+    if not fn(ctypes.byref(inblob), None, None, None, None, 0,
+             ctypes.byref(outblob)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(outblob.pbData, outblob.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(outblob.pbData)
+
+
+def unprotect_secret(encoded: str) -> Optional[str]:
+    """None on any failure rather than raising — a blob from a different
+    Windows profile, or simply corrupted. The caller treats that as an
+    empty token, which fails sign-in visibly instead of silently."""
+    try:
+        decrypted = _dpapi_call(ctypes.windll.crypt32.CryptUnprotectData,
+                                base64.b64decode(encoded))
+        return decrypted.decode("utf-8")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1036,9 @@ class ShadowWatcher:
     def __init__(self) -> None:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             self.cfg = json.load(f)
+        if "tokenProtected" in self.cfg:
+            self.cfg["token"] = unprotect_secret(
+                self.cfg.pop("tokenProtected")) or ""
         self.project = self.cfg.get("projectKey", "")
         if not self.project:
             raise SystemExit(

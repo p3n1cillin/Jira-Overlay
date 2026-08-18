@@ -15,6 +15,7 @@ Configuration: jira_config.json  (created on first run, excluded from git)
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import ctypes.wintypes
 import functools
@@ -352,6 +353,56 @@ _STRING_SETTINGS = ("slaField", "completedTodayFilter", "trayBadgeQueue",
                     "snapCorner", "reportRange", "reportBasis")
 
 
+# ── Credential protection (DPAPI) ────────────────────────────────────────
+# The API token used to sit in jira_config.json as plain text — readable by
+# anything else running as this Windows user, or by copying the file off the
+# machine entirely. DPAPI encrypts it to a blob only this Windows login can
+# decrypt again; CryptProtectData/CryptUnprotectData ship in every Windows
+# install's own crypt32.dll, so this needs no key to manage and no new
+# dependency. domain/email stay plain text — neither grants access on its
+# own, and email doubles as a visible identity elsewhere in the app.
+class _DPAPI_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi_call(fn, data: bytes) -> bytes:
+    buf = ctypes.create_string_buffer(data, len(data))
+    inblob  = _DPAPI_BLOB(len(data),
+                          ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    outblob = _DPAPI_BLOB()
+    if not fn(ctypes.byref(inblob), None, None, None, None, 0,
+             ctypes.byref(outblob)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(outblob.pbData, outblob.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(outblob.pbData)
+
+
+def protect_secret(plaintext: str) -> str:
+    """Encrypt for storage, tied to this Windows login. Base64, JSON-safe."""
+    encrypted = _dpapi_call(ctypes.windll.crypt32.CryptProtectData,
+                            plaintext.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+def unprotect_secret(encoded: str) -> Optional[str]:
+    """Reverse of protect_secret. None on any failure — a blob encrypted
+    under a different Windows profile (a moved or restored config file),
+    or simply corrupted — rather than raising into a caller with nowhere
+    good to show a decryption error. The caller treats that the same as
+    "no token", which the existing sign-in failure handling already
+    reports clearly instead of silently.
+    """
+    try:
+        decrypted = _dpapi_call(ctypes.windll.crypt32.CryptUnprotectData,
+                                base64.b64decode(encoded))
+        return decrypted.decode("utf-8")
+    except Exception:
+        return None
+
+
 def normalise_config(cfg: dict) -> dict:
     """Make a config safe to use, whatever is actually in the file."""
     for key, (cast, default, low, high) in _NUMERIC_SETTINGS.items():
@@ -377,7 +428,21 @@ def load_config() -> Optional[dict]:
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             loaded = json.load(f)
-        return normalise_config(loaded) if isinstance(loaded, dict) else None
+        if not isinstance(loaded, dict):
+            return None
+        needs_migration = "token" in loaded and "tokenProtected" not in loaded
+        if "tokenProtected" in loaded:
+            # None on failure (a blob from a different Windows profile, or a
+            # corrupted value) becomes an empty token rather than a crash —
+            # sign-in then fails with the app's normal, visible bad-token
+            # handling instead of a silent wrong value.
+            loaded["token"] = unprotect_secret(loaded.pop("tokenProtected")) or ""
+        loaded = normalise_config(loaded)
+        if needs_migration and loaded.get("token"):
+            # Get the plain-text token off disk as soon as it's seen, not
+            # whenever the user next happens to change a setting.
+            save_config(loaded)
+        return loaded
     except FileNotFoundError:
         return None
     except (json.JSONDecodeError, OSError):
@@ -464,6 +529,24 @@ def save_config(cfg: dict) -> None:
     for key in _OVERLAY_KEYS - _IDENTITY_KEYS:
         merged.pop(key, None)
     merged.update(cfg)
+
+    # The token is never written as plain text. A caller that explicitly
+    # supplied one (including "" to clear it) sets tokenProtected fresh; a
+    # caller that didn't must not be treated as clearing it — that's the
+    # same "absent means preserved" identity-key contract as everything
+    # else here — so a not-yet-migrated plain-text token already on disk is
+    # encrypted in place instead of just being dropped.
+    if "token" in cfg:
+        token = cfg.get("token") or ""
+        merged.pop("token", None)
+        if token:
+            merged["tokenProtected"] = protect_secret(token)
+        else:
+            merged.pop("tokenProtected", None)
+    elif "token" in merged:
+        legacy = merged.pop("token")
+        if legacy:
+            merged["tokenProtected"] = protect_secret(legacy)
 
     # Keep the last good copy. This file holds an API token and a service
     # desk id that nobody can reconstruct from memory, and a bad write is

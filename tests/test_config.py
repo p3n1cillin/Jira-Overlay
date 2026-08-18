@@ -10,7 +10,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _harness import Checker, load_overlay          # noqa: E402
+from _harness import Checker, load_learner, load_overlay   # noqa: E402
 
 ov = load_overlay()
 check = Checker("config writing")
@@ -54,7 +54,10 @@ write(dict(FULL))
 ov.save_config({"projectKey": "SD", "completedTodayFilter": ""})
 after = read()
 check("a partial save keeps the domain", after.get("domain") == "acme.atlassian.net")
-check("a partial save keeps the token",  after.get("token") == "SECRET")
+check("a partial save keeps the token",
+      "token" not in after and
+      ov.unprotect_secret(after.get("tokenProtected", "")) == "SECRET",
+      after.get("tokenProtected"))
 check("a partial save keeps the desk id", after.get("serviceDeskId") == 11)
 
 # Replacing them deliberately still works.
@@ -62,7 +65,49 @@ write(dict(FULL))
 ov.save_config(dict(FULL, domain="new.atlassian.net", token="NEW"))
 after = read()
 check("credentials can still be replaced when supplied",
-      after["domain"] == "new.atlassian.net" and after["token"] == "NEW")
+      after["domain"] == "new.atlassian.net" and "token" not in after
+      and ov.unprotect_secret(after.get("tokenProtected", "")) == "NEW")
+
+# Explicitly clearing it (as opposed to just not mentioning it) must clear
+# it, not leave a stale encrypted value behind claiming to still be current.
+write(dict(FULL))
+ov.save_config(dict(FULL, token=""))
+after = read()
+check("explicitly clearing the token removes it, not just the plain-text copy",
+      "token" not in after and "tokenProtected" not in after, after)
+
+# --- load_config: decrypt on the way in, migrate a legacy file on sight ----
+write(dict(FULL))                                  # a legacy plain-text file
+loaded = ov.load_config()
+check("load_config decrypts a legacy plain-text token straight through",
+      loaded.get("token") == "SECRET")
+check("  and migrates it on disk immediately, not on the next unrelated save",
+      "token" not in read() and
+      ov.unprotect_secret(read().get("tokenProtected", "")) == "SECRET")
+
+# Loading it again must round-trip through the now-encrypted form too.
+loaded2 = ov.load_config()
+check("a config already migrated still decrypts correctly on the next load",
+      loaded2.get("token") == "SECRET" and "tokenProtected" not in loaded2)
+
+# A blob that can't be decrypted here - moved from another machine or user,
+# or simply corrupted - must fail closed to an empty token, not raise
+# load_config out to main() with the app unable to start at all.
+tampered = dict(FULL)
+del tampered["token"]
+tampered["tokenProtected"] = "not-a-real-dpapi-blob"
+write(tampered)
+loaded3 = ov.load_config()
+check("an undecryptable token yields an empty one, not a crash",
+      loaded3 is not None and loaded3.get("token") == "")
+
+# The learner reads the same file and must decrypt what the overlay wrote.
+write(dict(FULL))
+ov.save_config(dict(FULL))          # migrates SECRET to an encrypted blob
+tl = load_learner(isolate_files=False)
+tl_cfg = json.load(open(ov.CONFIG_FILE))
+check("the learner can decrypt a token the overlay encrypted",
+      tl.unprotect_secret(tl_cfg.get("tokenProtected", "")) == "SECRET")
 
 # The previous version is kept, because a bad write is only ever noticed
 # afterwards.
@@ -139,9 +184,15 @@ walk(app.settings_panel)
 app.root.update()
 
 after = read()
+# The token's on-disk shape changes on its first save after migration (plain
+# text -> encrypted) even though the value itself hasn't; that's the point
+# of it, not drift, so it's checked separately from everything else.
 drift = sorted(k for k in set(ROUND_TRIP) | set(after)
-               if ROUND_TRIP.get(k, "<absent>") != after.get(k, "<absent>"))
+               if k not in ("token", "tokenProtected")
+               and ROUND_TRIP.get(k, "<absent>") != after.get(k, "<absent>"))
 check("saving Settings unchanged rewrites nothing", not drift, str(drift))
+check("  and the token itself still round-trips to the same value",
+      ov.unprotect_secret(after.get("tokenProtected", "")) == ROUND_TRIP["token"])
 app.root.destroy()
 
 
