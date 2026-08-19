@@ -344,6 +344,10 @@ The suites never touch a real `jira_config.json`, a real Windows registry key, o
 
 ---
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE) — do whatever you like with it.
