@@ -1,0 +1,7 @@
+# Runtime dependencies for jira_overlay.pyw and triage_learner.pyw.
+# setup.py installs these itself on first run; this file exists so CI (and
+# anyone who'd rather use pip directly) has one place to read them from
+# instead of a second, hand-kept list.
+requests
+Pillow
+pystray

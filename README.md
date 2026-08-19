@@ -1,5 +1,7 @@
 # Jira Overlay
 
+[![Tests](https://github.com/p3nicillin/Jira-Overlay/actions/workflows/tests.yml/badge.svg)](https://github.com/p3nicillin/Jira-Overlay/actions/workflows/tests.yml)
+
 A lightweight Windows desktop companion for **Jira Service Management**. It sits quietly in the corner of your screen, pops up when new tickets arrive, and gets out of the way when there's nothing to act on.
 
 It comes in two parts, installed and started together:
@@ -43,7 +45,8 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 | Fully configurable | Every filter, threshold, SLA field name, and queue is configurable per-user |
 | Single instance | A second launch quietly exits instead of double-polling and double-notifying |
 | Team report | Ranks whoever you choose by tickets completed, over any date range, exportable to CSV |
-| Optional triage learner | A read-only companion that predicts where each new ticket is heading (see below) |
+| Optional triage learner | A read-only companion that predicts where each new ticket is heading, and explains why (see below) |
+| Encrypted credential storage | Your API token is protected at rest with Windows DPAPI, not saved as plain text (see [Security](#security)) |
 
 ---
 
@@ -97,7 +100,7 @@ After `setup.bat` finishes, the app starts and walks you through the rest:
 
 3. **Alert queue** — a list of all your queues appears. Click one to set your initial alert queue (the one that triggers popups and notifications). You can add more alert queues later in Settings.
 
-Everything is saved to `jira_config.json` next to the app. It holds your API token, so it is gitignored and never committed.
+Everything is saved to `jira_config.json` next to the app — your token encrypted, never in plain text (see [Configuration file](#configuration-file)) — and the whole file is gitignored, never committed.
 
 The triage learner needs nothing further — it works out your workflow from your own Jira the first time it runs.
 
@@ -171,7 +174,10 @@ Click the **gear** in the overlay header to open Settings inline. All changes ta
 | **Show SLA compliance** | Off by choice is fine — plenty of teams have SLAs and don't track them. Turned off, the overlay stops asking Jira about them altogether |
 | **SLA field name** | Which Jira field to measure against (default: `Time to resolution`). Only used when the above is on |
 | **Completed today filter** | Extra JQL appended to the completed-today query e.g. `assignee is not EMPTY` |
-| **Run on Windows startup** | Adds to `HKCU\...\Run` registry key |
+| **Run on Windows startup** | Adds to `HKCU\...\Run` registry key. Self-heals if the install is later moved or Python is upgraded, without re-asking |
+| **Reconfigure credentials** | Wipes the saved config and restarts setup — for a new domain, a rotated token, or a fresh start |
+
+If the triage learner is installed, Settings also shows a **Triage learner** section: a green/red status dot, decisions learned, last self-tune date, accuracy, and a warning if the nightly tune drifts — all read from the learner's own status file, so a problem there (a dead token, a broken tune) is visible without opening `TRIAGE_REPORT.md`.
 
 ---
 
@@ -187,7 +193,9 @@ Click the **gear** in the overlay header to open Settings inline. All changes ta
 }
 ```
 
-All other keys are populated automatically once the overlay has run. The file holds your API token, so it is gitignored — don't commit it.
+All other keys are populated automatically once the overlay has run. The file is gitignored — don't commit it.
+
+Your API token is never stored as plain text. The first time the overlay runs (or the moment it next loads an older config), it's encrypted with Windows DPAPI and rewritten as `tokenProtected` — a blob only your own Windows login can decrypt, tied to your account rather than a password you manage. If you copy `jira_config.json` to another machine or another Windows account, the token comes across unreadable; Settings → **Reconfigure credentials** gets you a fresh one in seconds.
 
 ---
 
@@ -228,7 +236,8 @@ Every discovered value is an override. Add any of these to `jira_config.json`:
 
 ### What it produces
 
-- **`TRIAGE_REPORT.md`** — accuracy, per-outcome breakdown, confusion pairs, and the keywords driving each outcome
+- **`TRIAGE_REPORT.md`** — provenance (what it's trained on, when it last tuned), accuracy, per-outcome breakdown, confusion pairs, and the keywords driving each outcome
+- **`triage_status.json`** — the same health/provenance/accuracy signal as flat JSON, for anything that wants to alert on it without parsing markdown
 - **`triage_suggestions.json`** — picked up by the overlay and shown next to incoming tickets
 - **`triage_history.jsonl`** — labelled decisions it re-tunes itself against nightly
 
@@ -236,9 +245,11 @@ All of that is built from your real ticket text, so **every learner data file is
 
 ### How it learns
 
-Naive-Bayes over unigrams + bigrams, with separate channels for reporter and request type, complement log-odds scoring (so vocabulary common to every outcome cancels out), and a nearest-neighbour "ticket memory" for recurring requests. Recency decay lets it follow changes in how your team routes. Every night it replays its own history under a coordinate-descent search over nine hyper-parameters and adopts the best, scored on a held-out tail so improvements are real rather than fitted.
+Naive-Bayes over unigrams + bigrams, with separate channels for reporter and request type, complement log-odds scoring (so vocabulary common to every outcome cancels out), and a nearest-neighbour "ticket memory" for recurring requests. Recency decay lets it follow changes in how your team routes. Every night it replays its own history under a coordinate-descent search over ten hyper-parameters — from two independent starting points, so a knob that only helps in combination with others can't get permanently stuck — and adopts the best, scored on a held-out tail so improvements are real rather than fitted.
 
-Confidence is calibrated: close calls are flagged **review** and show both candidates rather than a confidently wrong single answer.
+Confidence is calibrated: close calls are flagged **review** and show both candidates rather than a confidently wrong single answer. A confident suggestion explains itself — the words in that ticket that most favoured the winning outcome, and who raised it when their own history backs it up — so it's something to check, not just something to trust.
+
+If a night's tune swings sharply from the one before, that's flagged too — but only when the swing is backed by enough examples not to be one ticket's worth of noise on a small destination.
 
 `triage_eval.py` is an offline harness over the same model — `build` snapshots recent decisions, `tune` searches configs, `analyze` shows what it gets wrong.
 
@@ -277,7 +288,22 @@ Confidence is calibrated: close calls are flagged **review** and show both candi
 - HTTP 429 responses honour the server's `Retry-After`; 5xx and network errors keep the last data and show a subtle *Reconnecting…* status
 - The overlay uses `overrideredirect(True)` — no title bar, no taskbar entry — with Windows 11 rounded corners applied via DWM, the system icon font (Segoe Fluent Icons) for its controls, and Segoe UI Variable for text
 - Show and hide use a **single alpha-fade animator**, so two fades can never fight over the alpha channel. The settings panel instead **animates its geometry** — the window eases open and closed with a cubic ease-in-out, driven by the clock rather than a frame counter so the duration is honest on any machine
-- Config writes are **atomic** (temp file + rename), and rewrite only this app's own keys — the triage learner stores what it discovers in the same file, and a blind dump would delete it. A corrupt config is quarantined to `.bad` rather than crashing the app
+- Config writes are **atomic** (a uniquely-created temp file, then rename), and rewrite only this app's own keys — the triage learner stores what it discovers in the same file, and a blind dump would delete it. A corrupt config is quarantined to `.bad` rather than crashing the app
+
+---
+
+## Security
+
+This talks to your real Jira instance and holds a credential that grants access to it, so it's treated the same way any code with that reach should be — not as a personal script.
+
+- **Credentials at rest.** The API token is never written to disk as plain text — see [Configuration file](#configuration-file). Nothing else in the config is a secret worth encrypting: the domain is effectively public, and the email is your own.
+- **No query injection.** Every value that reaches a Jira query is either escaped as a quoted literal or checked against a strict allowlist before being trusted as a bare identifier (a project key, a status name) — the same discipline SQL needs against unescaped input, applied to JQL. Config is meant to be hand-editable, so this is checked at the point a value is loaded, not assumed safe because it usually is.
+- **No PATH-based binary hijacking.** The two places this app shells out to a well-known Windows binary (Notepad as a fallback viewer, PowerShell to fire a toast) resolve the fully-qualified `System32` path first, rather than trusting whatever answers to that name earliest on `PATH`.
+- **No write-through on atomic saves.** Every "write safely" helper in this project creates its temp file with `O_CREAT|O_EXCL` (Python's `tempfile.mkstemp`), so it fails outright if anything already exists at that path instead of writing through it — closing the class of attack where a pre-planted file at a predictable name gets silently overwritten-into rather than replaced.
+- **Read-only by construction.** The triage learner's Jira client exposes `GET` and search only. There is no code path from it to a mutating Jira call.
+- **Nothing phones home.** Every network call in this project goes to your own configured Jira domain, or to Microsoft's own APIs for a Windows toast notification. Nothing else.
+
+Found a problem with any of this? Please open an issue rather than a public PR with exploit details.
 
 ---
 
@@ -303,15 +329,18 @@ No test framework needed, and the whole suite runs in a few seconds. Each suite 
 
 | Suite | Covers |
 |---|---|
-| `test_config.py` | Config writing — two processes share this file, and it holds the API token |
+| `test_config.py` | Config writing — two processes share this file, token encryption, and the settings panel surviving a malformed learner-status file |
 | `test_overlay.py` | SLA on/off, the alert-queue picker, startup registration, the event pump |
 | `test_report.py` | Team report periods, the JQL it builds, ranking |
-| `test_learner.py` | Self-configuration against a **fictional service desk** with nothing in common with any real one |
+| `test_notify.py` | Toast escaping (a ticket summary is untrusted text feeding a PowerShell script), the tray badge, suggestions file handling |
+| `test_learner.py` | Self-configuration against a **fictional service desk** with nothing in common with any real one, JQL-injection guards, and the tuner's search mechanics |
 | `test_wiring.py` | Clicks every control in the overlay and Settings — catches bindings that point at nothing |
-| `test_resilience.py` | Window placement across monitors, and network retry/backoff |
-| `test_setup.py` | First run on a machine with no dependencies, and a failed install |
+| `test_resilience.py` | Window placement across monitors, network retry/backoff, and malformed Jira responses |
+| `test_setup.py` | First run on a machine with no dependencies, a failed install, and startup registration self-healing after a moved install |
 
-The suites never touch a real `jira_config.json` — they point at a temporary one. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
+Runs on every push via GitHub Actions, against both the oldest Python this project supports and the current one — see the badge at the top.
+
+The suites never touch a real `jira_config.json`, a real Windows registry key, or a real Notepad window — they use isolated temp files and mocked subprocess calls throughout. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
 
 ---
 
