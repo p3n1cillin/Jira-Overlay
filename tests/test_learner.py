@@ -409,6 +409,79 @@ check("  and remembers which transitions it already scored",
 check("  without marking the backfill as finished",
       not w5.state.get("backfillDone"))
 
+# --- One unusable issue must not cost the whole pass ------------------------
+# Unlike the stop above, this is a genuine failure reaching changelog() - a
+# malformed response, a transient error _send's own retries didn't absorb -
+# raised from inside the per-issue loop with no per-issue guard around it.
+# That aborted the entire pass before any of the checkpointing above could
+# run, discarding every other issue in the same batch and, for
+# resolve_and_learn specifically, re-fetching and re-failing on the same
+# issue every cycle since seenTransitions only saves once, at the end.
+class _PoisonJira:
+    """changelog() raises for one specific key, as if that one issue's data
+    were malformed in a way nothing upstream caught."""
+
+    def __init__(self, issues, changelog_by_key, poison_key):
+        self._issues = issues
+        self._changelog = changelog_by_key
+        self._poison_key = poison_key
+        self.stop = None
+        self._refusals = set()
+
+    def get(self, path, params=None):
+        return None
+
+    def search(self, jql, fields, cap=100):
+        return self._issues
+
+    def changelog(self, key):
+        if key == self._poison_key:
+            raise ValueError("simulated malformed changelog")
+        return self._changelog.get(key, [])
+
+
+_pz_issues = [{"key": f"PZ-{i}", "fields": {"status": {"name": "Done"}}}
+             for i in range(10)]
+_pz_changelog = {
+    f"PZ-{i}": [{"id": f"pz{i}", "created": "2026-07-01T10:00:00.000+0000",
+                "author": {"displayName": "Agent"},
+                "items": [{"field": "status",
+                          "toString": "Passed to Networks"}]}]
+    for i in range(10)}
+
+w6 = watcher({"triageStatuses": ["Passed to Networks"], "resolvedStatuses": []},
+            jira=_PoisonJira(_pz_issues, _pz_changelog, poison_key="PZ-4"))
+w6.state["backfillDone"] = False
+backfill_ok = True
+try:
+    w6.backfill()
+except Exception as exc:                                  # noqa: BLE001
+    backfill_ok = False
+    backfill_exc = repr(exc)
+check("one unusable issue among many doesn't abort the whole backfill",
+      backfill_ok, "" if backfill_ok else backfill_exc)
+if backfill_ok:
+    check("  and every other issue is still learned",
+          len(w6.state.get("seenTransitions", [])) == 9,
+          str(len(w6.state.get("seenTransitions", []))))
+    check("  with the backfill still marked complete",
+          w6.state.get("backfillDone") is True)
+
+w7 = watcher({"triageStatuses": ["Passed to Networks"], "resolvedStatuses": []},
+            jira=_PoisonJira(_pz_issues, _pz_changelog, poison_key="PZ-7"))
+resolve_ok = True
+try:
+    w7.resolve_and_learn()
+except Exception as exc:                                  # noqa: BLE001
+    resolve_ok = False
+    resolve_exc = repr(exc)
+check("one unusable issue doesn't abort a live resolve_and_learn cycle",
+      resolve_ok, "" if resolve_ok else resolve_exc)
+if resolve_ok:
+    check("  and the other issues in the same cycle are still learned",
+          len(w7.state.get("seenTransitions", [])) == 9,
+          str(len(w7.state.get("seenTransitions", []))))
+
 w4 = watcher({"resolvedStatuses": ["Done"], "triageStatuses": []},
              state={"workflowDiscovered": True})
 before = len(w4.jira.queries) + len(w4.jira.gets)
