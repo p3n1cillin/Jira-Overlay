@@ -1755,59 +1755,73 @@ class ShadowWatcher:
         # statuses; "status CHANGED TO ()" is not valid JQL, so skip the pass
         # rather than issuing a query that fails every cycle.
         dest_list = ", ".join(jql_quote(d) for d in self.dests)
+        skipped = 0
         for issue in (self.jira.search(
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
                 f'AFTER {since}', self._FIELDS, cap=50) if self.dests else []):
-            det = self._issue_details(issue)
-            routed, _ = self._transitions(det["key"])
-            for tr in routed:
-                if tr["id"] in seen:
-                    continue
-                seen[tr["id"]] = None
-                req_type = det.get("requestType", "")
-                toks     = self._features_for(det, req_type)
-                projs    = [c["key"].split("-")[0] for c in det["clones"]]
-                correct  = self._resolve_prediction(
-                    det, tr["dest"], tr, req_type, predicted, stats,
-                    clones=[c["key"] for c in det["clones"]])
-                self.learner.learn(tr["dest"], toks, req_type, projs,
-                                   reporter=det["reporter"],
-                                   exemplar=tokenize(det["summary"]),
-                                   weight=int(TUNING["mistakeWeight"])
-                                   if correct is False else 1)
-                self._append_history(det, tr["dest"], tr["when"])
+            # One bad issue must not stall learning for every ticket in this
+            # cycle, or worse — since seenTransitions only saves once, at the
+            # end, an uncaught exception here re-fetches and re-fails on the
+            # same issue every poll until it ages out of the JQL window.
+            try:
+                det = self._issue_details(issue)
+                routed, _ = self._transitions(det["key"])
+                for tr in routed:
+                    if tr["id"] in seen:
+                        continue
+                    seen[tr["id"]] = None
+                    req_type = det.get("requestType", "")
+                    toks     = self._features_for(det, req_type)
+                    projs    = [c["key"].split("-")[0] for c in det["clones"]]
+                    correct  = self._resolve_prediction(
+                        det, tr["dest"], tr, req_type, predicted, stats,
+                        clones=[c["key"] for c in det["clones"]])
+                    self.learner.learn(tr["dest"], toks, req_type, projs,
+                                       reporter=det["reporter"],
+                                       exemplar=tokenize(det["summary"]),
+                                       weight=int(TUNING["mistakeWeight"])
+                                       if correct is False else 1)
+                    self._append_history(det, tr["dest"], tr["when"])
+            except Exception:
+                skipped += 1
 
         # 3. Tickets resolved inside the intake project, never handed off
         resolved_list = ", ".join(jql_quote(s) for s in sorted(self.resolved))
         for issue in self.jira.search(
                 f'project = {self.project} AND status CHANGED TO '
                 f'({resolved_list}) AFTER {since}', self._FIELDS, cap=50):
-            det = self._issue_details(issue)
-            routed, resolutions = self._transitions(det["key"])
-            if routed:      # handed off — covered by the pass above
-                continue
-            for tr in resolutions:
-                if tr["id"] in seen:
+            try:
+                det = self._issue_details(issue)
+                routed, resolutions = self._transitions(det["key"])
+                if routed:      # handed off — covered by the pass above
                     continue
-                seen[tr["id"]] = None
-                req_type = det.get("requestType", "")
-                toks     = self._features_for(det, req_type)
-                correct  = self._resolve_prediction(det, self.resolved_label,
-                                                    tr, req_type, predicted,
-                                                    stats, clones=[])
-                self.learner.learn(self.resolved_label, toks, req_type, [],
-                                   reporter=det["reporter"],
-                                   exemplar=tokenize(det["summary"]),
-                                   weight=int(TUNING["mistakeWeight"])
-                                   if correct is False else 1)
-                self._append_history(det, self.resolved_label, tr["when"])
+                for tr in resolutions:
+                    if tr["id"] in seen:
+                        continue
+                    seen[tr["id"]] = None
+                    req_type = det.get("requestType", "")
+                    toks     = self._features_for(det, req_type)
+                    correct  = self._resolve_prediction(det, self.resolved_label,
+                                                        tr, req_type, predicted,
+                                                        stats, clones=[])
+                    self.learner.learn(self.resolved_label, toks, req_type, [],
+                                       reporter=det["reporter"],
+                                       exemplar=tokenize(det["summary"]),
+                                       weight=int(TUNING["mistakeWeight"])
+                                       if correct is False else 1)
+                    self._append_history(det, self.resolved_label, tr["when"])
+            except Exception:
+                skipped += 1
 
         # 4. Tickets moved out to another project. Rather than scanning
         #    configured target projects, look up the ones we predicted on that
         #    have since vanished from intake: Jira keeps the old key as an
         #    alias, so it resolves to wherever the ticket went. This needs no
         #    configuration and finds move targets we've never seen before.
-        self._learn_moved_out(predicted, seen, stats)
+        skipped += self._learn_moved_out(predicted, seen, stats)
+        if skipped:
+            _log_error(f"resolve/learn skipped {skipped} unusable issue(s) "
+                       "this cycle")
 
         # housekeeping
         self.state["seenTransitions"] = list(seen)[-SEEN_CAP:]
@@ -1820,13 +1834,15 @@ class ShadowWatcher:
         self.write_report()
 
     def _learn_moved_out(self, predicted: dict, seen: dict,
-                         stats: dict) -> None:
+                         stats: dict) -> int:
         """Catch tickets that left the intake project by being MOVED.
 
         A move changes the issue key, so such a ticket simply stops appearing
         in intake searches — no status transition marks it. We therefore
         re-fetch keys we predicted on but haven't yet scored; Jira resolves an
         old key to the moved issue, revealing the destination project.
+
+        Returns the number of keys skipped as unusable.
         """
         # Tickets still sitting in intake haven't gone anywhere yet, so there
         # is nothing to look up for them.
@@ -1836,37 +1852,42 @@ class ShadowWatcher:
                     and k not in still_in_intake]
         # Oldest first, and bounded so a backlog can't stall the cycle.
         unscored.sort(key=lambda k: predicted[k].get("at", ""))
+        skipped = 0
         for old_key in unscored[:MOVE_LOOKUPS_PER_CYCLE]:
             if self.stop.is_set():
-                return
-            moved = self._find_moved_issue(old_key)
-            if moved is None:
-                continue
-            det = self._issue_details(moved)
-            new_project = moved.get("key", "").split("-")[0]
-            moves, orig_summary = self._project_moves(moved.get("key", ""))
-            move_id = moves[0]["id"] if moves else f"{old_key}:moved"
-            if move_id in seen:
-                continue
-            seen[move_id] = None
-            self._remember_move_target(new_project)
-            label = self.moved_label(new_project)
-            if orig_summary:
-                det["summary"] = f"{orig_summary} — {det['summary']}"
-            req_type = det.get("requestType", "")
-            toks = self._features_for(det, req_type)
-            when = (moves[0]["when"] if moves
-                    else f"{datetime.now():%Y-%m-%d %H:%M}")
-            by = moves[0]["by"] if moves else ""
-            correct = self._resolve_prediction(
-                dict(det, key=old_key), label, {"by": by, "when": when},
-                req_type, predicted, stats, clones=[moved.get("key", "")])
-            self.learner.learn(label, toks, req_type, [],
-                               reporter=det["reporter"],
-                               exemplar=tokenize(det["summary"]),
-                               weight=int(TUNING["mistakeWeight"])
-                               if correct is False else 1)
-            self._append_history(det, label, when)
+                return skipped
+            try:
+                moved = self._find_moved_issue(old_key)
+                if moved is None:
+                    continue
+                det = self._issue_details(moved)
+                new_project = moved.get("key", "").split("-")[0]
+                moves, orig_summary = self._project_moves(moved.get("key", ""))
+                move_id = moves[0]["id"] if moves else f"{old_key}:moved"
+                if move_id in seen:
+                    continue
+                seen[move_id] = None
+                self._remember_move_target(new_project)
+                label = self.moved_label(new_project)
+                if orig_summary:
+                    det["summary"] = f"{orig_summary} — {det['summary']}"
+                req_type = det.get("requestType", "")
+                toks = self._features_for(det, req_type)
+                when = (moves[0]["when"] if moves
+                        else f"{datetime.now():%Y-%m-%d %H:%M}")
+                by = moves[0]["by"] if moves else ""
+                correct = self._resolve_prediction(
+                    dict(det, key=old_key), label, {"by": by, "when": when},
+                    req_type, predicted, stats, clones=[moved.get("key", "")])
+                self.learner.learn(label, toks, req_type, [],
+                                   reporter=det["reporter"],
+                                   exemplar=tokenize(det["summary"]),
+                                   weight=int(TUNING["mistakeWeight"])
+                                   if correct is False else 1)
+                self._append_history(det, label, when)
+            except Exception:
+                skipped += 1
+        return skipped
 
     # -- daily self-improvement ------------------------------------------------
 
