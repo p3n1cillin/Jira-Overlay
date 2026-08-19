@@ -156,7 +156,7 @@ check("Quit aborts a backoff instead of waiting it out", elapsed < 2.0,
 # _update_ui — and because _fetch_finished repaints BEFORE scheduling the
 # next poll, the scheduling was skipped and the overlay went quiet for good
 # with nothing on screen to say so.
-O = ov.JiraOverlay
+Overlay = ov.JiraOverlay
 
 
 class _QR:
@@ -177,7 +177,7 @@ def _counts_for(raw_count):
     """Run a real fetch with `raw_count` as Jira's issueCount."""
     queues = [{"name": "Q", "id": 1, "issueCount": raw_count}] \
         if raw_count is not ... else [{"name": "Q", "id": 1}]
-    o = object.__new__(O)
+    o = object.__new__(Overlay)
     o.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
                 "alertQueues": ["Q"], "alertQueuesAsked": True}
     o._jira_url = lambda p="": "https://x" + p
@@ -196,7 +196,7 @@ def _counts_for(raw_count):
     o._alert_queues_missing = []
     o._post = lambda fn: None
     o._fetch_completion_stats = lambda c: None
-    O._fetch_data(o)
+    Overlay._fetch_data(o)
     return o.queues[0].get("issueCount") if o.queues else None
 
 
@@ -210,7 +210,7 @@ for label, raw in (("null", None), ("a string", "12"), ("a float", 3.7),
 # A queue LIST of "values": null (as opposed to one queue's issueCount being
 # null, covered above) fed straight into a `for` loop two lines below where
 # it's read.
-o = object.__new__(O)
+o = object.__new__(Overlay)
 o.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
            "alertQueues": ["Q"], "alertQueuesAsked": True}
 o._jira_url = lambda p="": "https://x" + p
@@ -226,7 +226,7 @@ o._alert_queues_missing = []
 o._post = lambda fn: None
 o._fetch_completion_stats = lambda c: None
 try:
-    O._fetch_data(o)
+    Overlay._fetch_data(o)
     ok = True
 except Exception as exc:                                  # noqa: BLE001
     ok = False
@@ -241,12 +241,12 @@ if ok:
 # that read a Jira JSON response with a bare .get(key, []) rather than
 # `or []`: service-desk discovery, and the per-queue issue reconciliation
 # fetch inside _fetch_data.
-d = object.__new__(O)
+d = object.__new__(Overlay)
 d._session = type("S", (), {"get": staticmethod(
     lambda url, **kw: _QR({"values": None}))})()
 d._jira_url = lambda p="": "https://x" + p
 try:
-    result = O._discover_service_desk(d)
+    result = Overlay._discover_service_desk(d)
     ok = True
 except Exception as exc:                                  # noqa: BLE001
     ok = False
@@ -254,7 +254,7 @@ except Exception as exc:                                  # noqa: BLE001
 check('service-desk discovery survives a "values": null response',
       ok and result is None, "" if ok else err)
 
-o2 = object.__new__(O)
+o2 = object.__new__(Overlay)
 o2.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
             "alertQueues": ["Q"], "alertQueuesAsked": True}
 o2._jira_url = lambda p="": "https://x" + p
@@ -276,7 +276,7 @@ o2._alert_queues_missing = []
 o2._post = lambda fn: None
 o2._fetch_completion_stats = lambda c: None
 try:
-    O._fetch_data(o2)
+    Overlay._fetch_data(o2)
     ok = True
 except Exception as exc:                                  # noqa: BLE001
     ok = False
@@ -299,13 +299,13 @@ def _count_post(url, **kw):
     return _QR404() if "approximate-count" in url else _QR({"issues": None})
 
 
-count_holder = object.__new__(O)
+count_holder = object.__new__(Overlay)
 count_holder._session = type("S", (),
                              {"post": staticmethod(_count_post)})()
 count_holder._jira_url = lambda p="": "https://x" + p
 count_holder._approx_count_ok = True
 try:
-    n, rejected = O._count_issues(count_holder, "project = SD")
+    n, rejected = Overlay._count_issues(count_holder, "project = SD")
     ok = True
 except Exception as exc:                                  # noqa: BLE001
     ok = False
@@ -319,7 +319,7 @@ import tkinter as _tk                                  # noqa: E402
 
 _root = _tk.Tk()
 _root.withdraw()
-sched = object.__new__(O)
+sched = object.__new__(Overlay)
 sched.root = _root
 sched._events = _queue.Queue()
 sched._PUMP_MS = 20
@@ -334,8 +334,8 @@ sched._update_ui = lambda: (_ for _ in ()).throw(RuntimeError("repaint blew up")
 # Keep the deliberate failure out of the real app's log, where it
 # reads like a live fault to anyone checking on the running overlay.
 sched._log_error = lambda detail: None
-O._post(sched, sched._fetch_finished)
-O._pump(sched)
+Overlay._post(sched, sched._fetch_finished)
+Overlay._pump(sched)
 _root.update()
 check("a repaint that raises still leaves the next poll scheduled",
       sched._refresh_job is not None, repr(sched._refresh_job))

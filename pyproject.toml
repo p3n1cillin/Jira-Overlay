@@ -1,0 +1,28 @@
+[tool.ruff]
+target-version = "py39"   # matches setup.py's MIN_PYTHON
+
+[tool.ruff.lint]
+# Default selection (pycodestyle E/W + pyflakes F) is enough for a project
+# this size — it already catches everything that matters (undefined names,
+# unused imports, unreachable code) without reaching for a stricter preset
+# that would start fighting this codebase's own established style instead
+# of catching real bugs.
+ignore = [
+    # jira_overlay.pyw installs its own third-party dependencies (requests,
+    # Pillow, pystray) at the top of the file, *before* importing them —
+    # the whole point is that the import can't run any earlier than that.
+    "E402",   # module level import not at top of file
+    # A handful of one-line `try: x() except TclError: pass` guards around
+    # widgets that can be mid-teardown when an event handler fires — the
+    # one-liner is more readable here than a four-line block would be for
+    # something this narrow.
+    "E701",   # multiple statements on one line (colon)
+    # Compact paired-counter updates (`row[0] += 1; row[1] += hit`), used
+    # deliberately throughout the learner's metrics code — splitting these
+    # across lines wouldn't make them any clearer.
+    "E702",   # multiple statements on one line (semicolon)
+    # Tkinter event callbacks are routinely one-line lambdas bound directly
+    # to a widget (`.bind("<MouseWheel>", lambda e: ...)`) — idiomatic Tk,
+    # not a readability problem `def` would fix.
+    "E731",   # lambda assignment
+]

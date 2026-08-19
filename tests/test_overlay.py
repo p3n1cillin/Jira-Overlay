@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import Checker, load_overlay          # noqa: E402
 
 ov = load_overlay()
-O = ov.JiraOverlay
+Overlay = ov.JiraOverlay
 check = Checker("overlay behaviour")
 
 
@@ -21,7 +21,7 @@ check = Checker("overlay behaviour")
 
 def stats(cfg_extra, counts):
     """Run one completion-stats pass; returns (sla, queries issued, config)."""
-    o = object.__new__(O)
+    o = object.__new__(Overlay)
     o._jira_url = lambda p="": "https://x" + p
     o.config = {"projectKey": "SD", "completedTodayFilter": ""}
     o.config.update(cfg_extra)
@@ -35,7 +35,7 @@ def stats(cfg_extra, counts):
         return next(it)
 
     o._count_issues = fake
-    O._fetch_completion_stats(o, o.config)
+    Overlay._fetch_completion_stats(o, o.config)
     return o.sla_compliance, seen, o.config
 
 
@@ -80,7 +80,7 @@ class Resp:
 
 
 def fetch_cycle(cfg):
-    o = object.__new__(O)
+    o = object.__new__(Overlay)
     o.config = cfg
     o._jira_url = lambda p="": "https://x" + p
     o._session = type("S", (), {"get": lambda *a, **k: Resp()})()
@@ -94,7 +94,7 @@ def fetch_cycle(cfg):
     posted = []
     o._post = lambda fn: posted.append(fn)
     o._fetch_completion_stats = lambda c: None
-    O._fetch_data(o)
+    Overlay._fetch_data(o)
     shown = any(getattr(f, "__name__", "") == "_show_alert_queue_picker"
                 for f in posted)
     return shown, len(o.queues)
@@ -135,7 +135,7 @@ class BusyResp:
 
 
 def alerting(cfg):
-    o = object.__new__(O)
+    o = object.__new__(Overlay)
     o.config = cfg
     o._jira_url = lambda p="": "https://x" + p
     o._session = type("S", (), {"get": lambda *a, **k: BusyResp()})()
@@ -148,7 +148,7 @@ def alerting(cfg):
     o._alert_queues_missing = []
     o._post = lambda fn: None
     o._fetch_completion_stats = lambda c: None
-    O._fetch_data(o)
+    Overlay._fetch_data(o)
     return o._alert_count, o._alert_queues_missing, len(o.queues)
 
 
@@ -204,14 +204,14 @@ winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\JiraOverlayTest")
 
 root = tk.Tk()
 root.withdraw()
-o = object.__new__(O)
+o = object.__new__(Overlay)
 o._events = queue.Queue()
 o.root = root
 o._PUMP_MS = 40
 ran = []
-O._post(o, lambda: (_ for _ in ()).throw(tk.TclError("transient")))
-O._post(o, lambda: ran.append("kept going"))
-O._pump(o)
+Overlay._post(o, lambda: (_ for _ in ()).throw(tk.TclError("transient")))
+Overlay._post(o, lambda: ran.append("kept going"))
+Overlay._pump(o)
 check("one transient TclError doesn't stop the pump for good",
       ran == ["kept going"])
 
@@ -233,7 +233,7 @@ class Spy:
         return real_cancel(jid)
 
 
-o2 = object.__new__(O)
+o2 = object.__new__(Overlay)
 o2.root = Spy()
 o2._events = queue.Queue()
 o2._settings_changed = False
@@ -245,7 +245,7 @@ o2._last_full_fetch = 0.0
 o2._update_ui = lambda: None
 o2._fetch = lambda: None
 for _ in range(3):
-    O._fetch_finished(o2)
+    Overlay._fetch_finished(o2)
 live = [j for j in scheduled if j not in cancelled]
 check("finishing a fetch replaces the poll timer instead of duplicating it",
       len(live) == 1, f"{len(live)} timers live")

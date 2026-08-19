@@ -178,7 +178,7 @@ check("a status file that parses to something other than an object is rejected",
 # with no fetch failure involved. The seen-set was then replaced outright,
 # and every ticket re-notified on the next poll. Keys now survive one absent
 # poll before being forgotten.
-O = ov.JiraOverlay
+Overlay = ov.JiraOverlay
 TICKETS = [{"key": f"SD-{i}", "fields": {"summary": f"t{i}"}} for i in range(1, 6)]
 
 
@@ -203,7 +203,7 @@ def _cycle(o, cached_count):
         return _R({"values": TICKETS if "/queue/1/issue" in url else queues})
 
     o._session = type("S", (), {"get": staticmethod(fake_get)})()
-    O._fetch_data(o)
+    Overlay._fetch_data(o)
     # the dedup step _update_ui performs, isolated from Tk
     cur = {k for k in (i.get("issueKey") or i.get("key", "")
                        for i in o.new_issues) if k}
@@ -214,7 +214,7 @@ def _cycle(o, cached_count):
     return fresh
 
 
-watcher = object.__new__(O)
+watcher = object.__new__(Overlay)
 watcher.config = {"projectKey": "SD", "serviceDeskId": 1, "serviceDeskName": "D",
                   "alertQueues": ["Newly Opened"], "alertQueuesAsked": True}
 watcher._jira_url = lambda p="": "https://x" + p

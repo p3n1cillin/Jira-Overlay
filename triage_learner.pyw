@@ -2424,7 +2424,7 @@ class ShadowWatcher:
             f"- **Trained on:** {sum(seen_counts.values())} labelled decisions"
             + (f" since {self.state['processStart']}"
                if self.state.get("processStart") else ""),
-            f"- **Backfill:** "
+            "- **Backfill:** "
             + (f"complete ({self.state.get('backfillCount', 0)} decisions)"
                if self.state.get("backfillDone")
                else "not yet complete — figures below will fill in as it runs"),
