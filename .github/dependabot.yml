@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # requests / Pillow / pystray — the only third-party code either app runs.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep actions/checkout, actions/setup-python etc. current too — an
+  # out-of-date action is as much a supply-chain surface as an out-of-date
+  # library.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -303,7 +303,7 @@ This talks to your real Jira instance and holds a credential that grants access 
 - **Read-only by construction.** The triage learner's Jira client exposes `GET` and search only. There is no code path from it to a mutating Jira call.
 - **Nothing phones home.** Every network call in this project goes to your own configured Jira domain, or to Microsoft's own APIs for a Windows toast notification. Nothing else.
 
-Found a problem with any of this? Please open an issue rather than a public PR with exploit details.
+Found a problem with any of this? See [SECURITY.md](SECURITY.md) for how to report it privately — please don't open a public issue with exploit details.
 
 ---
 
@@ -346,4 +346,4 @@ The suites never touch a real `jira_config.json`, a real Windows registry key, o
 
 ## License
 
-MIT — do whatever you like with it.
+[MIT](LICENSE) — do whatever you like with it.
