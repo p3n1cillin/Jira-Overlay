@@ -1564,31 +1564,39 @@ class ShadowWatcher:
         seen: dict[str, None] = dict.fromkeys(
             self.state.setdefault("seenTransitions", []))
         learned = 0
+        skipped = 0
         first_routing = "9999"
         for issue in issues:
             if self.stop.is_set():
                 self._backfill_checkpoint(seen)
                 return
-            det = self._issue_details(issue)
-            routed, _ = self._transitions(det["key"])
-            for tr in routed:
-                if tr["id"] in seen or tr["when"] < cutoff:
-                    continue
-                first_routing = min(first_routing, tr["when"])
-                seen[tr["id"]] = None
-                req_type = det.get("requestType", "")
-                toks     = self._features_for(det, req_type)
-                projs    = [c["key"].split("-")[0] for c in det["clones"]]
-                self.learner.learn(tr["dest"], toks, req_type, projs,
-                                   reporter=det["reporter"],
-                                   exemplar=tokenize(det["summary"]))
-                learned += 1
-                self._append_history(det, tr["dest"], tr["when"])
-                self._log({"event": "backfill", "key": det["key"],
-                           "summary": det["summary"], "dest": tr["dest"],
-                           "by": tr["by"], "when": tr["when"],
-                           "requestType": req_type,
-                           "clones": [c["key"] for c in det["clones"]]})
+            try:
+                det = self._issue_details(issue)
+                routed, _ = self._transitions(det["key"])
+                for tr in routed:
+                    if tr["id"] in seen or tr["when"] < cutoff:
+                        continue
+                    first_routing = min(first_routing, tr["when"])
+                    seen[tr["id"]] = None
+                    req_type = det.get("requestType", "")
+                    toks     = self._features_for(det, req_type)
+                    projs    = [c["key"].split("-")[0] for c in det["clones"]]
+                    self.learner.learn(tr["dest"], toks, req_type, projs,
+                                       reporter=det["reporter"],
+                                       exemplar=tokenize(det["summary"]))
+                    learned += 1
+                    self._append_history(det, tr["dest"], tr["when"])
+                    self._log({"event": "backfill", "key": det["key"],
+                               "summary": det["summary"], "dest": tr["dest"],
+                               "by": tr["by"], "when": tr["when"],
+                               "requestType": req_type,
+                               "clones": [c["key"] for c in det["clones"]]})
+            except Exception:
+                # One unusable issue must not abort a pass that can run to
+                # thousands of calls — and losing the whole run would also
+                # skip every _backfill_checkpoint below it, discarding
+                # progress the checkpoint exists specifically to keep.
+                skipped += 1
 
         # Handoffs may only have started recently — anchor the training window
         # to the first one observed, so resolutions from before the process
@@ -1606,26 +1614,29 @@ class ShadowWatcher:
             if self.stop.is_set():
                 self._backfill_checkpoint(seen)
                 return
-            det = self._issue_details(issue)
-            routed, resolutions = self._transitions(det["key"])
-            if routed:      # handed off at some point — learned above
-                continue
-            for tr in resolutions:
-                if tr["id"] in seen or tr["when"] < cutoff:
+            try:
+                det = self._issue_details(issue)
+                routed, resolutions = self._transitions(det["key"])
+                if routed:      # handed off at some point — learned above
                     continue
-                seen[tr["id"]] = None
-                req_type = det.get("requestType", "")
-                toks     = self._features_for(det, req_type)
-                self.learner.learn(self.resolved_label, toks, req_type, [],
-                                   reporter=det["reporter"],
-                                   exemplar=tokenize(det["summary"]))
-                learned += 1
-                self._append_history(det, self.resolved_label, tr["when"])
-                self._log({"event": "backfill", "key": det["key"],
-                           "summary": det["summary"],
-                           "dest": self.resolved_label,
-                           "by": tr["by"], "when": tr["when"],
-                           "requestType": req_type, "clones": []})
+                for tr in resolutions:
+                    if tr["id"] in seen or tr["when"] < cutoff:
+                        continue
+                    seen[tr["id"]] = None
+                    req_type = det.get("requestType", "")
+                    toks     = self._features_for(det, req_type)
+                    self.learner.learn(self.resolved_label, toks, req_type, [],
+                                       reporter=det["reporter"],
+                                       exemplar=tokenize(det["summary"]))
+                    learned += 1
+                    self._append_history(det, self.resolved_label, tr["when"])
+                    self._log({"event": "backfill", "key": det["key"],
+                               "summary": det["summary"],
+                               "dest": self.resolved_label,
+                               "by": tr["by"], "when": tr["when"],
+                               "requestType": req_type, "clones": []})
+            except Exception:
+                skipped += 1
 
         # Phase 3: tickets moved out into another project entirely. Each
         # known move-target project is scanned for issues whose changelog
@@ -1639,29 +1650,35 @@ class ShadowWatcher:
                 if self.stop.is_set():
                     self._backfill_checkpoint(seen)
                     return
-                det = self._issue_details(issue)
-                moves, orig_summary = self._project_moves(det["key"])
-                if not moves:
-                    continue
-                if orig_summary:  # learn the intake wording, not the rename
-                    det["summary"] = f"{orig_summary} — {det['summary']}"
-                req_type = det.get("requestType", "")
-                toks = self._features_for(det, req_type)
-                for mv in moves:
-                    if mv["id"] in seen or mv["when"] < cutoff:
+                try:
+                    det = self._issue_details(issue)
+                    moves, orig_summary = self._project_moves(det["key"])
+                    if not moves:
                         continue
-                    seen[mv["id"]] = None
-                    self.learner.learn(label, toks, req_type, [],
-                                       reporter=det["reporter"],
-                                       exemplar=tokenize(det["summary"]))
-                    learned += 1
-                    self._append_history(det, label, mv["when"])
-                    self._log({"event": "backfill", "key": mv["oldKey"],
-                               "summary": det["summary"], "dest": label,
-                               "by": mv["by"], "when": mv["when"],
-                               "requestType": req_type,
-                               "clones": [det["key"]]})
+                    if orig_summary:  # learn the intake wording, not the rename
+                        det["summary"] = f"{orig_summary} — {det['summary']}"
+                    req_type = det.get("requestType", "")
+                    toks = self._features_for(det, req_type)
+                    for mv in moves:
+                        if mv["id"] in seen or mv["when"] < cutoff:
+                            continue
+                        seen[mv["id"]] = None
+                        self.learner.learn(label, toks, req_type, [],
+                                           reporter=det["reporter"],
+                                           exemplar=tokenize(det["summary"]))
+                        learned += 1
+                        self._append_history(det, label, mv["when"])
+                        self._log({"event": "backfill", "key": mv["oldKey"],
+                                   "summary": det["summary"], "dest": label,
+                                   "by": mv["by"], "when": mv["when"],
+                                   "requestType": req_type,
+                                   "clones": [det["key"]]})
+                except Exception:
+                    skipped += 1
 
+        if skipped:
+            _log_error(f"backfill skipped {skipped} unusable issue(s) — "
+                       f"{learned} decision(s) learned from the rest")
         self.state["seenTransitions"] = list(seen)
         self.state["backfillDone"]    = True
         self.state["backfillCount"]   = learned
