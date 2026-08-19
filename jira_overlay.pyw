@@ -949,8 +949,11 @@ class SetupWindow:
             self._vars[label] = (var, hint)
 
         token_url = "https://id.atlassian.com/manage-profile/security/api-tokens"
+        # No leading icon: the underline + accent colour already say "link"
+        # on their own, and a fixed-colour emoji glyph here couldn't follow
+        # the hover colour change the text itself gets below.
         link = tk.Label(self.root,
-                        text="🔑  Generate an API token at id.atlassian.com",
+                        text="Generate an API token at id.atlassian.com",
                         font=_font(8, "underline"),
                         fg=_C["accent"], bg=_C["bg_dark"], cursor="hand2")
         link.grid(row=4, column=0, columnspan=2, pady=(0, 8))
@@ -1759,7 +1762,12 @@ class NewTicketTooltip:
         widgets = [row, top, lbl_key, lbl_txt]
         if sugg and sugg.get("label"):
             review = sugg.get("review")
-            icon   = "⚠" if review else "💡"
+            # The trailing U+FE0E on the warning triangle forces its plain
+            # text glyph instead of a colour emoji, which would carry its
+            # own fixed colours and ignore `colour` below entirely. A
+            # lightbulb has no such text variant at all, so the confident
+            # case reuses the same dot already used for status elsewhere.
+            icon   = "⚠︎" if review else "●"
             colour = _C["warn"] if review else _C["ok"]
             lbl_sugg = tk.Label(row, text=f"        {icon} {sugg['label']}",
                                 font=_font(8), fg=colour,
@@ -3535,10 +3543,20 @@ class JiraOverlay:
             tk.Frame(body, bg=_C["divider"], height=1).pack(fill="x", padx=16, pady=(3, 2))
 
         def check(parent: tk.Widget, text: str, var: tk.BooleanVar) -> None:
-            tk.Checkbutton(parent, text=text, variable=var,
-                           fg=FG, bg=BG, selectcolor=SEL,
-                           activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=_font(9)).pack(anchor="w", padx=16, pady=1)
+            # activebackground matching the resting bg made Tk's own hover
+            # state a no-op - every row looked identically inert whether the
+            # mouse was over it or not, unlike every button elsewhere in the
+            # app, which all darken or lighten on hover. Bound explicitly,
+            # like every other hover-responsive widget here, rather than
+            # trusting Tk's native-themed active state to honour the color.
+            cb = tk.Checkbutton(parent, text=text, variable=var,
+                                fg=FG, bg=BG, selectcolor=SEL,
+                                activeforeground=_C["fg_bright"],
+                                activebackground=_C["chip"],
+                                font=_font(9))
+            cb.pack(anchor="w", padx=16, pady=1)
+            cb.bind("<Enter>", lambda _e, w=cb: w.config(bg=_C["chip"]))
+            cb.bind("<Leave>", lambda _e, w=cb: w.config(bg=BG))
 
         # Stats refresh interval
         section("Stats refresh interval")
@@ -3549,10 +3567,14 @@ class JiraOverlay:
         rf.pack(fill="x", padx=16, pady=(0, 4))
         s_refresh = tk.IntVar(value=cfg.get("refreshSeconds", 60))
         for secs, lbl in [(30, "30 s"), (60, "1 min"), (120, "2 min"), (300, "5 min")]:
-            tk.Radiobutton(rf, text=lbl, variable=s_refresh, value=secs,
-                           fg=FG, bg=BG, selectcolor=SEL,
-                           activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=_font(9)).pack(side="left", padx=(0, 8))
+            rb = tk.Radiobutton(rf, text=lbl, variable=s_refresh, value=secs,
+                                fg=FG, bg=BG, selectcolor=SEL,
+                                activeforeground=_C["fg_bright"],
+                                activebackground=_C["chip"],
+                                font=_font(9))
+            rb.pack(side="left", padx=(0, 8))
+            rb.bind("<Enter>", lambda _e, w=rb: w.config(bg=_C["chip"]))
+            rb.bind("<Leave>", lambda _e, w=rb: w.config(bg=BG))
 
         # Alerts
         section("Alerts")
@@ -3614,10 +3636,14 @@ class JiraOverlay:
         section("Tray badge shows")
         s_tray_badge = tk.StringVar(value=cfg.get("trayBadgeQueue", ""))
         for name in queue_names:
-            tk.Radiobutton(body, text=name, variable=s_tray_badge, value=name,
-                           fg=FG, bg=BG, selectcolor=SEL,
-                           activeforeground=_C["fg_bright"], activebackground=BG,
-                           font=_font(9)).pack(anchor="w", padx=16)
+            rb = tk.Radiobutton(body, text=name, variable=s_tray_badge, value=name,
+                                fg=FG, bg=BG, selectcolor=SEL,
+                                activeforeground=_C["fg_bright"],
+                                activebackground=_C["chip"],
+                                font=_font(9))
+            rb.pack(anchor="w", padx=16)
+            rb.bind("<Enter>", lambda _e, w=rb: w.config(bg=_C["chip"]))
+            rb.bind("<Leave>", lambda _e, w=rb: w.config(bg=BG))
 
         # Alert queues
         section("Alert queues (trigger overlay + notifications)")
@@ -3666,10 +3692,17 @@ class JiraOverlay:
         tk.Label(body, text=f"Jira Overlay {APP_VERSION}", font=_font(8),
                  fg=_C["fg_dim"], bg=BG).pack(anchor="w", padx=16, pady=(4, 0))
         tk.Frame(body, bg=BG, height=4).pack()
-        tk.Button(body, text="🔑  Reconfigure credentials…",
-                  command=self._reconfigure, bg=SEL, fg=FG,
-                  font=_font(9), relief="flat", padx=8, pady=4,
-                  cursor="hand2").pack(anchor="w", padx=16, pady=(0, 8))
+        # No leading icon: the key emoji here couldn't take the app's text
+        # colour (it's a fixed-colour glyph, not a font-drawn one), so it
+        # just sat there in its own Windows-emoji colours - the one glyph
+        # anywhere in the app that didn't match anything around it.
+        reconf_btn = tk.Button(body, text="Reconfigure credentials…",
+                               command=self._reconfigure, bg=SEL, fg=FG,
+                               font=_font(9), relief="flat", padx=8, pady=4,
+                               cursor="hand2")
+        reconf_btn.pack(anchor="w", padx=16, pady=(0, 8))
+        reconf_btn.bind("<Enter>", lambda _e: reconf_btn.config(bg=_C["chip"]))
+        reconf_btn.bind("<Leave>", lambda _e: reconf_btn.config(bg=SEL))
 
         # Triage learner health — a separate, optional process on this same
         # machine. Its own report lives in a file nobody opens day to day;
@@ -3719,8 +3752,10 @@ class JiraOverlay:
                         ).pack(anchor="w", padx=16, pady=(0, 2))
             drift = learner.get("drift")
             if isinstance(drift, dict) and drift.get("detail"):
+                # U+FE0E: plain triangle, not a colour emoji that would
+                # ignore fg=_C["warn"] below.
                 tk.Label(body,
-                        text=f"⚠ Drift since {drift.get('date', 'last tune')}: "
+                        text=f"⚠︎ Drift since {drift.get('date', 'last tune')}: "
                              f"{drift['detail']}",
                         font=_font(8), fg=_C["warn"], bg=BG,
                         justify="left", wraplength=280
