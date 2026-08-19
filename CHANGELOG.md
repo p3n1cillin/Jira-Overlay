@@ -18,10 +18,8 @@ Settings, for what a running install is actually on.
   so a problem there is visible without opening a report file.
 - A version identifier for both apps (`APP_VERSION`), shown in Settings
   and the report.
-- CI: the full test suite and a lint check now run on every push, on
-  Windows, against both the oldest supported Python and the current one.
-- `LICENSE`, `SECURITY.md`, `pyproject.toml` (ruff config), Dependabot,
-  and a real `requirements.txt`.
+- `LICENSE`, `SECURITY.md`, `pyproject.toml` (ruff config), and a real
+  `requirements.txt`.
 
 ### Changed
 - The API token is no longer stored as plain text — encrypted at rest

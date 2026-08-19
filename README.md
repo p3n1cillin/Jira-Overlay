@@ -1,7 +1,5 @@
 # Jira Overlay
 
-[![Tests](https://github.com/p3nicillin/Jira-Overlay/actions/workflows/tests.yml/badge.svg)](https://github.com/p3nicillin/Jira-Overlay/actions/workflows/tests.yml)
-
 A lightweight Windows desktop companion for **Jira Service Management**. It sits quietly in the corner of your screen, pops up when new tickets arrive, and gets out of the way when there's nothing to act on.
 
 It comes in two parts, installed and started together:
@@ -338,7 +336,7 @@ No test framework needed, and the whole suite runs in a few seconds. Each suite 
 | `test_resilience.py` | Window placement across monitors, network retry/backoff, and malformed Jira responses |
 | `test_setup.py` | First run on a machine with no dependencies, a failed install, and startup registration self-healing after a moved install |
 
-Runs on every push via GitHub Actions, against both the oldest Python this project supports and the current one — see the badge at the top.
+Run locally with `python tests/run_all.py` — matrixed across the oldest Python this project supports and the current one is a manual check, not a CI gate; there's no CI here.
 
 The suites never touch a real `jira_config.json`, a real Windows registry key, or a real Notepad window — they use isolated temp files and mocked subprocess calls throughout. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
 
