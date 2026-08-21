@@ -1702,6 +1702,7 @@ class ShadowWatcher:
         no per-ticket calls, no model mutation."""
         predicted: dict = self.state.setdefault("predicted", {})
         changed = False
+        skipped = 0
         intake_keys: set[str] = set()
         for issue in self.jira.search(
                 f'project = {self.project} AND resolution = Unresolved '
@@ -1711,27 +1712,38 @@ class ShadowWatcher:
                 intake_keys.add(key)
             if not key or key in predicted:
                 continue
-            det  = self._issue_details(issue)
-            req_type = det.get("requestType", "")
-            toks = self._features_for(det, req_type)
-            p = self.learner.predict_ex(
-                toks, req_type, det["reporter"],
-                exemplar=tokenize(det["summary"]))
-            predicted[key] = {"dest": p["dest"], "conf": p["conf"],
-                              "plan": p["note"], "second": p["second"],
-                              "secondConf": p["secondConf"],
-                              "review": p["review"],
-                              "source": p["source"], "why": p.get("why", []),
-                              "requestType": req_type,
-                              "summary": det["summary"][:120],
-                              "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
-            changed = True
-            self._log({"event": "would_have_done", "key": key,
-                       "summary": det["summary"],
-                       "prediction": p["dest"], "confidence": p["conf"],
-                       "second": p["second"], "review": p["review"],
-                       "source": p["source"], "requestType": req_type,
-                       "plan": p["note"]})
+            # This queue can hold customer-submitted requests, so one
+            # malformed ticket is a real possibility, not just a hand-edit -
+            # and with no per-issue guard, it silently blocked a suggestion
+            # for every ticket behind it in the list, every ~12s, for as
+            # long as it sat in intake.
+            try:
+                det  = self._issue_details(issue)
+                req_type = det.get("requestType", "")
+                toks = self._features_for(det, req_type)
+                p = self.learner.predict_ex(
+                    toks, req_type, det["reporter"],
+                    exemplar=tokenize(det["summary"]))
+                predicted[key] = {"dest": p["dest"], "conf": p["conf"],
+                                  "plan": p["note"], "second": p["second"],
+                                  "secondConf": p["secondConf"],
+                                  "review": p["review"],
+                                  "source": p["source"], "why": p.get("why", []),
+                                  "requestType": req_type,
+                                  "summary": det["summary"][:120],
+                                  "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
+                changed = True
+                self._log({"event": "would_have_done", "key": key,
+                           "summary": det["summary"],
+                           "prediction": p["dest"], "confidence": p["conf"],
+                           "second": p["second"], "review": p["review"],
+                           "source": p["source"], "requestType": req_type,
+                           "plan": p["note"]})
+            except Exception:
+                skipped += 1
+        if skipped:
+            _log_error(f"predict_intake skipped {skipped} unusable "
+                       "issue(s) this cycle")
         # Tickets still queued at intake — _learn_moved_out skips these,
         # since a ticket that hasn't left can't have been moved.
         self._intake_keys = intake_keys

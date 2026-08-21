@@ -482,6 +482,47 @@ if resolve_ok:
           len(w7.state.get("seenTransitions", [])) == 9,
           str(len(w7.state.get("seenTransitions", []))))
 
+# predict_intake is the FAST loop (~12s) and, unlike backfill/resolve_and_
+# learn, its queue can hold customer-submitted requests directly - a real
+# source of malformed data, not just a hand-edited config. Fault-injected
+# via _issue_details itself, since _issue_details' own hardening makes it
+# genuinely hard to construct a "naturally" malformed issue that still
+# reaches an exception - this represents any failure reaching the per-
+# issue body, whatever its source.
+_pi_issues = [{"key": f"PI-{i}", "fields": {"status": {"name": "New"},
+                                            "summary": f"ticket {i}"}}
+             for i in range(10)]
+
+
+class _IntakeJira(FakeJira):
+    def search(self, jql, fields, cap=100):
+        return _pi_issues
+
+
+w8 = watcher(jira=_IntakeJira())
+_real_issue_details = w8._issue_details
+
+
+def _poison_issue_details(issue):
+    if issue.get("key") == "PI-4":
+        raise ValueError("simulated malformed issue")
+    return _real_issue_details(issue)
+
+
+w8._issue_details = _poison_issue_details
+predict_ok = True
+try:
+    w8.predict_intake()
+except Exception as exc:                                  # noqa: BLE001
+    predict_ok = False
+    predict_exc = repr(exc)
+check("one unusable ticket doesn't abort a live predict_intake cycle",
+      predict_ok, "" if predict_ok else predict_exc)
+if predict_ok:
+    check("  and the other tickets in the same cycle still get a suggestion",
+          len(w8.state.get("predicted", {})) == 9,
+          str(len(w8.state.get("predicted", {}))))
+
 w4 = watcher({"resolvedStatuses": ["Done"], "triageStatuses": []},
              state={"workflowDiscovered": True})
 before = len(w4.jira.queries) + len(w4.jira.gets)
