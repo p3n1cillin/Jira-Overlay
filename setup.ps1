@@ -113,6 +113,19 @@ function Install-Python {
         Write-Bad "Download failed: $($_.Exception.Message)"
         return $false
     }
+    # winget verifies what it installs; this fallback path fetches a bare
+    # .exe over HTTPS and would otherwise run it unchecked - a compromised
+    # CDN edge or a corrupted download both look identical to a good one
+    # without this. Require a valid Authenticode signature before letting
+    # it anywhere near Start-Process.
+    $sig = Get-AuthenticodeSignature -FilePath $dst
+    if ($sig.Status -ne 'Valid') {
+        Write-Bad "Downloaded installer failed signature verification ($($sig.Status))."
+        Write-Bad 'Not running it. Install Python manually from https://python.org.'
+        Remove-Item $dst -ErrorAction SilentlyContinue
+        return $false
+    }
+
     Write-Info 'Running the installer (this takes a minute)...'
     $p = Start-Process -FilePath $dst -Wait -PassThru -ArgumentList @(
         '/quiet', 'InstallAllUsers=0', 'PrependPath=1',
