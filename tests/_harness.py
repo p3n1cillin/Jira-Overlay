@@ -9,8 +9,10 @@ isolation here is not a nicety.
 
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 
@@ -27,17 +29,29 @@ def load(script: str, name: str):
     return mod
 
 
+def _isolated_dir() -> str:
+    """A fresh temp dir, removed when this test process exits.
+
+    Nothing previously cleaned these up - each suite run left one behind
+    in %TEMP%, and this file alone gets loaded many times over a single
+    development session.
+    """
+    tmp = tempfile.mkdtemp()
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    return tmp
+
+
 def load_overlay(isolate_config: bool = True):
     ov = load("jira_overlay.pyw", "ov")
     if isolate_config:
-        ov.CONFIG_FILE = os.path.join(tempfile.mkdtemp(), "jira_config.json")
+        ov.CONFIG_FILE = os.path.join(_isolated_dir(), "jira_config.json")
     return ov
 
 
 def load_learner(isolate_files: bool = True):
     tl = load("triage_learner.pyw", "tl")
     if isolate_files:
-        tmp = tempfile.mkdtemp()
+        tmp = _isolated_dir()
         for attr in ("CONFIG_FILE", "STATE_FILE", "LOG_FILE", "HISTORY_FILE",
                      "REPORT_FILE", "ERROR_LOG", "SUGGEST_FILE", "STATUS_FILE"):
             if hasattr(tl, attr):
