@@ -76,7 +76,11 @@ def build() -> None:
                                   for c in det["clones"]]}
 
     # 1. handoffs to another team
-    dest_list = ", ".join(f'"{d}"' for d in w.dests)
+    # A status name is a live-discovered value (or a hand-edited config
+    # entry), same as everywhere else this query shape is built in
+    # triage_learner.pyw - jql_quote keeps a literal quote in one from
+    # breaking out of the CHANGED TO (...) clause.
+    dest_list = ", ".join(tl.jql_quote(d) for d in w.dests)
     jql = (f'project = {w.project} AND status CHANGED TO ({dest_list}) '
            f'AFTER -{tl.BACKFILL_DAYS}d ORDER BY updated DESC')
     # "status CHANGED TO ()" is not valid JQL; a project where everything is
@@ -95,7 +99,7 @@ def build() -> None:
 
     # 2. resolved inside the intake project, never handed off
     n0 = len(records)
-    resolved_list = ", ".join(f'"{s}"' for s in sorted(w.resolved))
+    resolved_list = ", ".join(tl.jql_quote(s) for s in sorted(w.resolved))
     jql = (f'project = {w.project} AND status CHANGED TO ({resolved_list}) '
            f'AFTER -{tl.BACKFILL_DAYS}d ORDER BY updated DESC')
     for issue in w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP):
