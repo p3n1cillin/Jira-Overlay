@@ -97,7 +97,7 @@ except ImportError as _exc:
 
 # Bump on a meaningful change — see jira_overlay.pyw for why this is a
 # plain constant rather than something derived from git or a build step.
-APP_VERSION  = "2026.08.19"
+APP_VERSION  = "2026.08.21"
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE  = os.path.join(_DIR, "jira_config.json")
 STATE_FILE   = os.path.join(_DIR, "triage_state.json")

@@ -4,6 +4,31 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`) — see `APP_VERSION` in either app, and
 Settings, for what a running install is actually on.
 
+## [2026.08.21]
+
+### Fixed
+- Three more places where one bad ticket among many could silently stall
+  progress for everything after it, in `predict_intake` (the fast, ~12s
+  loop), `resolve_and_learn`, and `ensure_workflow_known`'s one-time
+  startup scan — the same class of bug fixed for `backfill()` in
+  2026.08.19, now closed everywhere a per-issue loop had no guard around
+  it. `predict_intake` in particular sees customer-submitted requests
+  directly, not just hand-edited config.
+- JQL injection in `triage_eval.py`'s own query building — a copy of the
+  same query shape used in `triage_learner.pyw`, minus the escaping.
+- The offline evaluator's fallback Python installer now runs only after
+  its Authenticode signature checks out; `setup.bat` now launches
+  PowerShell by fully-qualified path instead of trusting `PATH`, closing
+  the last easy instance of the PATH-hijacking class fixed elsewhere in
+  2026.08.19 (`launch.bat`'s `pythonw` call is the one place this can't
+  be done safely — Python's own install location varies too much to pin).
+- A Settings-panel hover state that was configured but invisible:
+  every checkbox and radio button set its "active" colour to the same
+  colour as its resting state.
+- Two icons (a key, a lightbulb) that couldn't take the colour their own
+  label was built around, being fixed-colour emoji rather than glyphs
+  drawn in the app's own font.
+
 ## [2026.08.19]
 
 ### Added

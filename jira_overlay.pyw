@@ -153,7 +153,7 @@ import pystray
 # automatically — it's a single-file script someone may have just copied,
 # not necessarily a git checkout — so this is the plain, low-maintenance
 # answer to "what version is this" for a support conversation.
-APP_VERSION  = "2026.08.19"
+APP_VERSION  = "2026.08.21"
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
 STARTUP_NAME = "JiraOverlay"
 LEARNER_STARTUP_NAME = "JiraTriageLearner"
