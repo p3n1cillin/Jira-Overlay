@@ -1268,19 +1268,26 @@ class ShadowWatcher:
         for issue in issues:
             if self.stop.is_set():
                 return False
-            key = issue.get("key", "")
-            # json_objects, not h.get("items", []): a history entry can
-            # carry an explicit "items": null rather than omitting the key
-            # (the same present-but-null shape Jira sends everywhere else),
-            # and .get(key, default) only falls back when the key is
-            # missing. _transitions already guards this same data the same
-            # way; this inline scan had drifted out of step with it.
-            moved_to = [item.get("toString", "")
-                        for h in self.jira.changelog(key)
-                        for item in json_objects(h.get("items"))
-                        if item.get("field") == "status"]
-            if moved_to:
-                transitions[key] = moved_to
+            # One unusable issue here must not cost the ability to start at
+            # all - unlike a bad issue reaching the live cycles below, which
+            # only costs that one cycle, this runs once at startup with
+            # nothing to fall back on if it raises out uncaught.
+            try:
+                key = issue.get("key", "")
+                # json_objects, not h.get("items", []): a history entry can
+                # carry an explicit "items": null rather than omitting the
+                # key (the same present-but-null shape Jira sends everywhere
+                # else), and .get(key, default) only falls back when the key
+                # is missing. _transitions already guards this same data the
+                # same way; this inline scan had drifted out of step with it.
+                moved_to = [item.get("toString", "")
+                            for h in self.jira.changelog(key)
+                            for item in json_objects(h.get("items"))
+                            if item.get("field") == "status"]
+                if moved_to:
+                    transitions[key] = moved_to
+            except Exception:
+                continue
         resolved, handoffs = self.discovery.outcome_statuses(
             issues, transitions, done)
 
