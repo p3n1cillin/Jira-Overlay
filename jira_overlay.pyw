@@ -1926,6 +1926,13 @@ class JiraOverlay:
         self._did_drag = False
 
         self.root = tk.Tk()
+        # Tk's default handler for an exception raised inside any callback
+        # (a button command, a bound event, an after() job) prints to
+        # stderr - which pythonw has none of, so it's simply discarded.
+        # Every other error path in this app already logs instead of
+        # going silent for exactly this reason; the Tk callback dispatch
+        # itself was the one place still falling through that gap.
+        self.root.report_callback_exception = self._on_tk_callback_error
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0)
@@ -2421,6 +2428,13 @@ class JiraOverlay:
                 f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{detail}\n\n")
         except OSError:
             pass
+
+    def _on_tk_callback_error(self, exc, val, tb) -> None:
+        """Tk's report_callback_exception hook - see the comment where it's
+        assigned in __init__. Logs and moves on; re-raising here would just
+        hand the exception back to Tk's own dispatcher."""
+        self._log_error("Tk callback failed:\n"
+                        + "".join(traceback.format_exception(exc, val, tb)))
 
     def _open_report(self) -> None:
         """Open the team report, or focus it if it is already up."""

@@ -201,6 +201,23 @@ check("saving Settings unchanged rewrites nothing", not drift, str(drift))
 check("  and the token itself still round-trips to the same value",
       ov.unprotect_secret(after.get("tokenProtected", "")) == ROUND_TRIP["token"])
 
+# --- A Tk callback that raises must be logged, not silently discarded ------
+# Tk's own default handler prints to stderr, which pythonw has none of - an
+# exception raised inside any button command or bound event used to vanish
+# completely, with nothing on screen and nothing in the log to say a
+# feature had just failed. report_callback_exception is the hook Tk itself
+# calls in that situation, so invoking it directly here exercises exactly
+# what a real failing callback would trigger.
+logged = []
+app._log_error = lambda detail: logged.append(detail)
+try:
+    raise ValueError("simulated callback failure")
+except ValueError:
+    app.root.report_callback_exception(*sys.exc_info())
+check("a Tk callback exception is logged instead of vanishing",
+      len(logged) == 1 and "simulated callback failure" in logged[0],
+      logged)
+
 # --- Learner health/drift renders in Settings without crashing -------------
 # Built from a file a different, optional process writes, so nothing about
 # its shape can be trusted - this actually builds the panel rather than
