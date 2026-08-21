@@ -1301,13 +1301,17 @@ class TeamReportWindow:
         rng = self._range_row = tk.Frame(outer, bg=BG)
         rng.pack(fill="x")
         for label, _days in REPORT_RANGES:
-            tk.Radiobutton(rng, text=label, value=label, variable=self.v_range,
-                           command=self._range_changed,
-                           font=_font(9), fg=_C["fg"], bg=BG,
-                           selectcolor=_C["input"], activebackground=BG,
-                           activeforeground=_C["fg_bright"],
-                           highlightthickness=0, bd=0).pack(side="left",
-                                                            padx=(0, 8))
+            # activebackground matching bg made hover a no-op here too -
+            # same fix as the Settings checkboxes/radios.
+            rb = tk.Radiobutton(rng, text=label, value=label, variable=self.v_range,
+                               command=self._range_changed,
+                               font=_font(9), fg=_C["fg"], bg=BG,
+                               selectcolor=_C["input"], activebackground=_C["chip"],
+                               activeforeground=_C["fg_bright"],
+                               highlightthickness=0, bd=0)
+            rb.pack(side="left", padx=(0, 8))
+            rb.bind("<Enter>", lambda _e, w=rb: w.config(bg=_C["chip"]))
+            rb.bind("<Leave>", lambda _e, w=rb: w.config(bg=BG))
 
         self.custom = tk.Frame(outer, bg=BG)
         for text, var in (("From", self.v_from), ("To", self.v_to)):
@@ -1327,13 +1331,15 @@ class TeamReportWindow:
         tk.Label(basis, text="Count by", font=_font(8), fg=_C["fg_dim"],
                  bg=BG).pack(side="left", padx=(0, 8))
         for label, value in REPORT_BASES:
-            tk.Radiobutton(basis, text=label, value=value,
-                           variable=self.v_basis, command=self.refresh,
-                           font=_font(9), fg=_C["fg"], bg=BG,
-                           selectcolor=_C["input"], activebackground=BG,
-                           activeforeground=_C["fg_bright"],
-                           highlightthickness=0, bd=0).pack(side="left",
-                                                            padx=(0, 8))
+            rb = tk.Radiobutton(basis, text=label, value=value,
+                               variable=self.v_basis, command=self.refresh,
+                               font=_font(9), fg=_C["fg"], bg=BG,
+                               selectcolor=_C["input"], activebackground=_C["chip"],
+                               activeforeground=_C["fg_bright"],
+                               highlightthickness=0, bd=0)
+            rb.pack(side="left", padx=(0, 8))
+            rb.bind("<Enter>", lambda _e, w=rb: w.config(bg=_C["chip"]))
+            rb.bind("<Leave>", lambda _e, w=rb: w.config(bg=BG))
 
         tk.Frame(outer, bg=_C["divider"], height=1).pack(fill="x", pady=12)
 
@@ -1623,12 +1629,14 @@ class _PeoplePicker:
 
         for person in people:
             var = tk.BooleanVar(value=already_chosen(person))
-            tk.Checkbutton(body, text=person["name"], variable=var,
-                           font=_font(9), fg=_C["fg"], bg=BG,
-                           selectcolor=_C["input"], activebackground=BG,
-                           activeforeground=_C["fg_bright"],
-                           highlightthickness=0, bd=0, anchor="w"
-                           ).pack(fill="x", pady=1)
+            cb = tk.Checkbutton(body, text=person["name"], variable=var,
+                                font=_font(9), fg=_C["fg"], bg=BG,
+                                selectcolor=_C["input"], activebackground=_C["chip"],
+                                activeforeground=_C["fg_bright"],
+                                highlightthickness=0, bd=0, anchor="w")
+            cb.pack(fill="x", pady=1)
+            cb.bind("<Enter>", lambda _e, w=cb: w.config(bg=_C["chip"]))
+            cb.bind("<Leave>", lambda _e, w=cb: w.config(bg=BG))
             self.vars.append((var, person))
         scroll = lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units")
         _bind_wheel(wrap, scroll)
