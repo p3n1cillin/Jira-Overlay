@@ -4,6 +4,30 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`) — see `APP_VERSION` in either app, and
 Settings, for what a running install is actually on.
 
+## [2026.08.24]
+
+### Added
+- Route-level recall, precision, confident precision, and macro-F1 reporting.
+- A specialist handoff classifier that is deployed only when chronological
+  validation proves it improves on the incumbent model.
+- Automatic human-review guards for dormant routes and routes whose recent
+  confident precision is below 95%.
+
+### Changed
+- Nightly tuning now validates across three recent windows, uses a separate
+  champion/challenger gate, and keeps the newest window untouched for the
+  final report.
+- Tuning ranks candidates by macro F1 and precision as well as recall, so a
+  rare route cannot improve its headline score by creating false positives.
+- Safety policy changes are applied immediately to suggestions already shown
+  in the overlay without rewriting their original scoring record.
+
+### Fixed
+- Status, suggestion, and report writes now tolerate transient Windows file
+  locks without leaving partial JSON.
+- Legacy IPS outcome wording is normalised in confusion reporting.
+- Schema migration can save state safely before the learner is constructed.
+
 ## [2026.08.21]
 
 ### Fixed

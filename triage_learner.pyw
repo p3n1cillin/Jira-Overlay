@@ -97,7 +97,7 @@ except ImportError as _exc:
 
 # Bump on a meaningful change — see jira_overlay.pyw for why this is a
 # plain constant rather than something derived from git or a build step.
-APP_VERSION  = "2026.08.21"
+APP_VERSION  = "2026.08.24"
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE  = os.path.join(_DIR, "jira_config.json")
 STATE_FILE   = os.path.join(_DIR, "triage_state.json")
@@ -119,7 +119,7 @@ BACKFILL_DAYS  = 90          # seed the model from this much history
 BACKFILL_CAP   = 1000        # max historical issues per outcome to learn from
 OVERLAP_SECS   = 600         # re-scan overlap so nothing is missed
 MIN_EXAMPLES   = 8           # per-destination examples needed before predicting
-TUNING_SCHEMA_VERSION = 4    # + reporterWeight in the search space
+TUNING_SCHEMA_VERSION = 5    # precision-aware tuning + escalation specialist
 # Cap on remembered transition IDs. Kept as an *ordered* collection so the
 # trim drops the oldest — truncating a set (the old behaviour) kept an
 # arbitrary subset, letting already-learned transitions be re-learned.
@@ -138,6 +138,14 @@ MIN_DRIFT_SAMPLE = 30
 # Per slow cycle, how many departed tickets to re-fetch when looking for ones
 # that left intake by being MOVED to another project (see _learn_moved_out).
 MOVE_LOOKUPS_PER_CYCLE = 20
+
+# A route is allowed to call itself confident only when recent chronological
+# validation supports that claim. Sparse/dormant outcomes remain visible as
+# suggestions but are automatically marked for human review.
+ROUTE_ACTIVITY_DAYS = 21
+MIN_ROUTE_RECENT_ACTUAL = 3
+MIN_ROUTE_FIRM_PREDICTIONS = 10
+MIN_ROUTE_FIRM_PRECISION = 0.95
 
 # Structured Jira fields carry cleaner signals than free text. Field IDs differ
 # between Jira sites, so these are resolved by NAME at startup (see
@@ -169,6 +177,8 @@ TUNING = {
     "reqSmooth": 10,      # smoothing for the request-type channel
     "repSmooth": 20,      # smoothing for the reporter channel
     "reporterWeight": 1.0,  # how much who-raised-it counts vs the wording
+    "escalationSpecialist": 0,   # enabled only when validation beats incumbent
+    "escalationPriorWeight": 0.25, # reduce high-volume-team bias in that rerank
     "logOdds": 1,         # score tokens against the OTHER destinations, so
                           # vocabulary shared by all classes cancels out
     "priorWeight": 1.0,   # 1 = trust class frequencies, 0 = all classes equal
@@ -194,6 +204,8 @@ BALANCED_TUNED_CONFIG = {
     "priorWeight": 0.5,
     "requestTypeHintWeight": 3.0,
     "reporterWeight": 1.0,
+    "escalationSpecialist": 0,
+    "escalationPriorWeight": 0.25,
 }
 
 # ── Outcome labels ─────────────────────────────────────────────────────────
@@ -326,7 +338,8 @@ def open_in_default_or_notepad(path: str) -> None:
         _log_error(f"could not open {path} with notepad.exe either: {exc}")
 
 
-def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
+def _atomic_json_write(path: str, data, attempts: int = 6,
+                       fallback_in_place: bool = False) -> None:
     """Write JSON atomically, tolerating short-lived Windows reader locks.
 
     mkstemp, not open(f"{path}.{pid}.{tid}.tmp", "w"): a PID and thread id
@@ -336,12 +349,13 @@ def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
     entirely rather than failing. mkstemp's O_CREAT|O_EXCL fails outright
     if anything is already at the name instead of writing through it.
     """
+    payload = json.dumps(data, ensure_ascii=False, indent=1)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                prefix=os.path.basename(path) + ".",
                                suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.write(payload)
         delay = 0.05
         for attempt in range(attempts):
             try:
@@ -349,7 +363,17 @@ def _atomic_json_write(path: str, data, attempts: int = 6) -> None:
                 return
             except PermissionError:
                 if attempt == attempts - 1:
-                    raise
+                    if not fallback_in_place:
+                        raise
+                    # Some Windows readers allow the existing file to be
+                    # opened for writing but deny the delete/rename access
+                    # os.replace needs. Suggestions are ephemeral and the
+                    # overlay already treats a half-read JSON document as
+                    # "try again next refresh", so an in-place final attempt
+                    # is safer than leaving advice stale indefinitely.
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(payload)
+                    return
                 time.sleep(delay)
                 delay = min(delay * 2, 0.8)
     finally:
@@ -757,11 +781,17 @@ class Learner:
     # Buckets that carry decayed per-destination token tables.
     _DECAYED_TABLES = ("tokens", "reqTypes", "reporters")
 
-    def __init__(self, state: dict, plans: Optional[dict] = None) -> None:
+    def __init__(self, state: dict, plans: Optional[dict] = None,
+                 escalation_dests: Optional[list[str]] = None,
+                 route_safety: Optional[dict] = None) -> None:
         # dest -> plain-English plan, owned by the watcher (which knows this
         # site's workflow) and shared by reference so newly discovered
         # outcomes describe themselves without rebuilding the model.
         self._plans = plans if plans is not None else {}
+        self._escalation_dests = list(escalation_dests or [])
+        # Shared by reference with the watcher, which refreshes it after each
+        # nightly validation without needing to rebuild the live learner.
+        self._route_safety = route_safety if route_safety is not None else {}
         # setdefault only fills a key that is MISSING, so a key present with
         # a null — or holding the wrong type after a version change or a
         # damaged write — went straight through and crashed on first use.
@@ -990,6 +1020,56 @@ class Learner:
                     reasons.append(f"usually raised by {reporter}")
         return reasons
 
+    def _subset_scores(self, counts: "Counter[str]", req_type: str,
+                       reporter: str, candidates: list[str],
+                       prior_weight: float) -> dict[str, float]:
+        """Score a closed set of outcomes against each other.
+
+        Complement log odds depends on what counts as "the other classes".
+        Reusing the global score and merely changing its prior left DATA's
+        comparison against TAC/PPS baked into every team score, so the old
+        specialist could not alter a single historical decision. Recomputing
+        within BI/DATA/DEV makes the second stage genuinely conditional.
+        """
+        m = self.m
+        S = m.get("scale", 1.0)
+        total_examples = sum(m["priors"][d] for d in candidates)
+        tables = [m["tokens"].get(d) or {} for d in candidates]
+        vocab = len({t for table in tables for t in table}) or 1
+        tot_all = sum(m["totals"].get(d, 0) for d in candidates) * S
+        all_cnt = {t: sum(table.get(t, 0) for table in tables) * S
+                   for t in counts}
+        req_smooth = TUNING["reqSmooth"]
+        rep_smooth = TUNING["repSmooth"]
+        rep_w = TUNING.get("reporterWeight", 1.0)
+        hint = self.request_type_hint(req_type)
+        scores = {}
+        for d, table in zip(candidates, tables):
+            score = prior_weight * math.log(m["priors"][d] / total_examples)
+            total = m["totals"].get(d, 0) * S
+            den_in = total + vocab
+            den_out = (tot_all - total) + vocab
+            for token, repetitions in counts.items():
+                inside = table.get(token, 0) * S
+                p_in = (inside + 1) / den_in
+                p_out = (all_cnt[token] - inside + 1) / den_out
+                score += repetitions * math.log(p_in / p_out)
+            if req_type:
+                request_counts = m["reqTypes"].get(d, {})
+                request_total = sum(request_counts.values()) * S
+                score += math.log((request_counts.get(req_type, 0) * S + 1)
+                                  / (request_total + req_smooth))
+                if hint == d:
+                    score += TUNING.get("requestTypeHintWeight", 3.0)
+            if reporter:
+                reporter_counts = m.get("reporters", {}).get(d, {})
+                reporter_total = sum(reporter_counts.values()) * S
+                score += rep_w * math.log(
+                    (reporter_counts.get(reporter, 0) * S + 1)
+                    / (reporter_total + rep_smooth))
+            scores[d] = score
+        return scores
+
     def predict_ex(self, tokens: list[str], req_type: str, reporter: str = "",
                    exemplar: Optional[list[str]] = None) -> dict:
         """Full prediction: best destination, its confidence, the runner-up
@@ -1077,17 +1157,42 @@ class Learner:
         # length, which reads as false 100% certainty. Scaling by token
         # count keeps confidence honest.
         ranked = sorted(scores, key=scores.get, reverse=True)  # type: ignore[arg-type]
-        best, second = ranked[0], ranked[1]
-        mx    = scores[best]
+        global_best = ranked[0]
+        mx    = scores[global_best]
         temp  = max(1.0, len(tokens) / TUNING["confTemp"])
         exps  = {d: math.exp((s - mx) / temp) for d, s in scores.items()}
         tot_e = sum(exps.values())
-        conf  = int(round(100 * exps[best] / tot_e))
-        conf2 = int(round(100 * exps[second] / tot_e))
+        probs = {d: e / tot_e for d, e in exps.items()}
         source = "model"
+
+        # Once the general model has decided this is a team handoff, compare
+        # only the actual handoff teams. This conditional second stage keeps
+        # the strong TAC/moved-ticket boundary intact while preventing the
+        # high-volume DATA class from overwhelming low-volume BI/DEV merely
+        # through its prior. The overall probability mass assigned to
+        # "handoff" is preserved; only its split between teams is reranked.
+        escalation = [d for d in self._escalation_dests if d in scores]
+        if TUNING.get("escalationSpecialist", 1) and \
+                global_best in escalation and len(escalation) >= 2:
+            handoff_mass = sum(probs[d] for d in escalation)
+            esc_prior_w = TUNING.get("escalationPriorWeight", 0.25)
+            esc_scores = self._subset_scores(
+                counts, req_type, reporter, escalation, esc_prior_w)
+            esc_mx = max(esc_scores.values())
+            esc_exps = {d: math.exp((s - esc_mx) / temp)
+                        for d, s in esc_scores.items()}
+            esc_total_e = sum(esc_exps.values())
+            for d in escalation:
+                probs[d] = handoff_mass * esc_exps[d] / esc_total_e
+            source = "escalation"
+
+        ranked = sorted(probs, key=probs.get, reverse=True)  # type: ignore[arg-type]
+        best, second = ranked[0], ranked[1]
+        conf  = int(round(100 * probs[best]))
+        conf2 = int(round(100 * probs[second]))
         note   = self.plan_for(best)
         hint_dest = hint_for_type
-        hint_conf = (int(round(100 * exps.get(hint_dest, 0) / tot_e))
+        hint_conf = (int(round(100 * probs.get(hint_dest, 0)))
                      if hint_dest else 0)
 
         # Ticket memory: if the title closely matches a previous ticket,
@@ -1117,6 +1222,11 @@ class Learner:
         review = (conf < TUNING.get("reviewConf", 75)
                   or margin < TUNING.get("reviewMargin", 20)
                   or hint_conflict)
+        safety = self._route_safety.get(best, {})
+        if safety.get("forceReview"):
+            review = True
+            reason = safety.get("reason") or "route confidence needs more evidence"
+            note += f"; review because {reason}"
         why = self._why(counts, best, second, reporter) if second else []
         return {"dest": best, "conf": conf, "second": second,
                 "secondConf": conf2, "margin": margin, "review": review,
@@ -1215,7 +1325,12 @@ class ShadowWatcher:
         for target in self.move_targets:
             self.plans[self.moved_label(target)] = (
                 f"move the ticket to the {target} project")
-        self.learner = Learner(self.state, plans=self.plans)
+        if not isinstance(self.state.get("routeSafety"), dict):
+            self.state["routeSafety"] = {}
+        self.route_safety = self.state["routeSafety"]
+        self.learner = Learner(self.state, plans=self.plans,
+                               escalation_dests=self.dests,
+                               route_safety=self.route_safety)
         self._saved_mutations = 0
         self._last_state_save = 0.0
         self.stop    = threading.Event()
@@ -1338,6 +1453,15 @@ class ShadowWatcher:
         explicit = self.moved_label_overrides.get(project_key)
         return explicit or self.moved_label_fmt.format(project=project_key)
 
+    def canonical_dest(self, dest: str) -> str:
+        """Map labels written by older versions to today's outcome names."""
+        for project_key in self.move_targets:
+            legacy = f"Proclaim bug (moved to {project_key})"
+            current = self.moved_label(project_key)
+            if dest == legacy and current != legacy:
+                return current
+        return dest
+
     @property
     def all_dests(self) -> list[str]:
         """Every outcome label the report should account for.
@@ -1379,14 +1503,15 @@ class ShadowWatcher:
         """
         # Read through getattr: this runs from shutdown and error paths too,
         # and a save is the last thing that should introduce a failure.
+        learner = getattr(self, "learner", None)
         if not force:
-            mutations = getattr(self.learner, "_mutations", 0)
+            mutations = getattr(learner, "_mutations", 0)
             unchanged = mutations == getattr(self, "_saved_mutations", None)
             since = time.time() - getattr(self, "_last_state_save", 0.0)
             if unchanged and since < self._IDLE_SAVE_SECS:
                 return
         _atomic_json_write(STATE_FILE, self.state)
-        self._saved_mutations = getattr(self.learner, "_mutations", 0)
+        self._saved_mutations = getattr(learner, "_mutations", 0)
         self._last_state_save = time.time()
 
     def _log(self, record: dict) -> None:
@@ -1946,13 +2071,15 @@ class ShadowWatcher:
         saved = dict(TUNING)
         TUNING.update(cfg)
         try:
-            lr = Learner({})
+            lr = Learner({}, escalation_dests=self.dests)
             warm = min(150, len(recs) // 5)
             start = warm if score_start is None else score_start
             end = len(recs) if score_end is None else score_end
             n = ok = firm = firm_ok = 0
             per: dict[str, list[int]] = {}
             firm_per: dict[str, list[int]] = {}
+            predicted_per: dict[str, list[int]] = {}
+            firm_predicted_per: dict[str, list[int]] = {}
             source_per: dict[str, list[int]] = {}
             for i, r in enumerate(recs):
                 det = {"summary": r["summary"], "desc": r["desc"],
@@ -1968,18 +2095,34 @@ class ShadowWatcher:
                     n += 1; ok += hit
                     row = per.setdefault(r["dest"], [0, 0])
                     row[0] += 1; row[1] += hit
+                    prow = predicted_per.setdefault(p["dest"], [0, 0])
+                    prow[0] += 1; prow[1] += hit
                     srow = source_per.setdefault(p.get("source", "model"), [0, 0])
                     srow[0] += 1; srow[1] += hit
                     if not p["review"]:
                         firm += 1; firm_ok += hit
                         frow = firm_per.setdefault(r["dest"], [0, 0])
                         frow[0] += 1; frow[1] += hit
+                        fprow = firm_predicted_per.setdefault(
+                            p["dest"], [0, 0])
+                        fprow[0] += 1; fprow[1] += hit
                 w = int(cfg.get("mistakeWeight", 1)) if (
                     p["dest"] is not None and p["dest"] != r["dest"]) else 1
                 lr.learn(r["dest"], toks, req_type, r["cloneProjects"],
                          r["reporter"], weight=w, exemplar=title)
             per_acc = {k: v[1] / v[0] for k, v in per.items() if v[0]}
             firm_per_acc = {k: v[1] / v[0] for k, v in firm_per.items() if v[0]}
+            precision = {k: v[1] / v[0]
+                         for k, v in predicted_per.items() if v[0]}
+            firm_precision = {k: v[1] / v[0]
+                              for k, v in firm_predicted_per.items() if v[0]}
+            labels = set(per) | set(predicted_per)
+            f1 = {}
+            for label in labels:
+                recall = per_acc.get(label, 0.0)
+                prec = precision.get(label, 0.0)
+                f1[label] = (2 * prec * recall / (prec + recall)
+                             if prec + recall else 0.0)
             source_acc = {k: {"n": v[0], "acc": v[1] / v[0]}
                           for k, v in source_per.items() if v[0]}
             return {"acc": ok / n if n else 0.0,
@@ -1990,11 +2133,28 @@ class ShadowWatcher:
                     "worst": min(per_acc.values(), default=0.0),
                     "per": per_acc,
                     "perCounts": per,
+                    "precision": precision,
+                    "precisionCounts": predicted_per,
+                    "macroPrecision": (sum(precision.get(k, 0.0)
+                                            for k in labels) / len(labels))
+                    if labels else 0.0,
+                    "worstPrecision": min((precision.get(k, 0.0)
+                                           for k in labels), default=0.0),
+                    "f1": f1,
+                    "macroF1": (sum(f1.values()) / len(f1)) if f1 else 0.0,
+                    "worstF1": min(f1.values(), default=0.0),
                     "firmBalanced": (sum(firm_per_acc.values()) / len(firm_per_acc))
                     if firm_per_acc else 0.0,
                     "firmWorst": min(firm_per_acc.values(), default=0.0),
                     "firmPer": firm_per_acc,
                     "firmPerCounts": firm_per,
+                    "firmPrecision": firm_precision,
+                    "firmPrecisionCounts": firm_predicted_per,
+                    "firmMacroPrecision": (sum(firm_precision.values())
+                                            / len(firm_precision))
+                    if firm_precision else 0.0,
+                    "firmWorstPrecision": min(firm_precision.values(),
+                                               default=0.0),
                     "sources": source_acc}
         finally:
             TUNING.clear(); TUNING.update(saved)
@@ -2017,6 +2177,8 @@ class ShadowWatcher:
         # it is offered to the tuner at a default of 1.0 (today's behaviour)
         # rather than hard-coded, and adopted only if the evidence grows.
         "reporterWeight":        [0.0, 1.0, 2.0, 3.0, 5.0],
+        "escalationSpecialist":  [0, 1],
+        "escalationPriorWeight": [0.0, 0.25, 0.5, 0.75, 1.0],
         "reviewConf":            [65, 70, 75, 80, 85],
         "reviewMargin":          [10, 15, 20, 25],
     }
@@ -2026,10 +2188,22 @@ class ShadowWatcher:
 
     @staticmethod
     def _tune_score(m: dict) -> tuple:
-        """Rank candidates: balanced accuracy first so a config cannot win by
-        sacrificing the low-volume BI/DEV classes for the high-volume ones."""
-        return (round(m["balanced"], 3),
+        """Rank candidates by macro F1, then recall and precision.
+
+        Balanced recall alone can look excellent while a rare route sprays
+        false positives into common classes. Macro F1 makes both sides count;
+        confident-band precision then decides between otherwise similar
+        candidates.
+        """
+        # Metric fallbacks keep saved/offline replay fixtures from older
+        # schemas comparable while new replays always provide the richer set.
+        return (round(m.get("macroF1", m["balanced"]), 3),
+                round(m["balanced"], 3),
+                round(m.get("macroPrecision", m["balanced"]), 3),
+                round(m.get("worstF1", m["worst"]), 3),
                 round(m["worst"], 3),
+                round(m.get("firmMacroPrecision", m["firmBalanced"]), 3),
+                round(m.get("firmWorstPrecision", m["firmWorst"]), 3),
                 round(m["firmBalanced"], 3),
                 round(m["firmWorst"], 3),
                 round(m["firmAcc"], 3),
@@ -2037,8 +2211,14 @@ class ShadowWatcher:
                 round(m["acc"], 3))
 
     def _self_tune(self, recs: list[dict]) -> Optional[dict]:
-        """Tune on older decisions, then report on an untouched recent tail."""
-        validation_n = max(100, min(400, len(recs) // 5))
+        """Tune, gate against the incumbent, then report on an untouched tail."""
+        incumbent = {k: TUNING[k] for k in self._TUNE_KEEP}
+        # Validate across roughly three recent 400-ticket windows. A single
+        # 400-ticket tail repeatedly contained no PPS/IPS outcomes, making a
+        # 91% headline say nothing at all about those routes. The wider
+        # chronological span remains untouched during config selection but
+        # is much more likely to include every active outcome.
+        validation_n = max(100, min(1200, len(recs) // 3))
         split = len(recs) - validation_n
         tuning_recs = recs[:split]
 
@@ -2115,18 +2295,51 @@ class ShadowWatcher:
             return None
         best_score, best_m, cur = max(runs, key=lambda r: r[0])
 
+        challenger = {k: cur[k] for k in self._TUNE_KEEP}
+
+        # Use the first two recent windows as a champion/challenger gate and
+        # leave the final ~400 decisions untouched. Previously, a candidate
+        # could win on the tuning history, score materially worse on the
+        # holdout, and still be deployed; the holdout was reporting the
+        # regression rather than preventing it.
+        final_n = min(400, max(100, validation_n // 3))
+        final_start = len(recs) - final_n
+        gate_end = max(split, final_start)
+        challenger_gate = self._replay_history(
+            recs, challenger, score_start=split, score_end=gate_end)
+        incumbent_gate = self._replay_history(
+            recs, incumbent, score_start=split, score_end=gate_end)
+        rejected = self._tune_score(challenger_gate) <= \
+            self._tune_score(incumbent_gate)
+        chosen = incumbent if rejected else challenger
+
         best = {"score": best_score,
-                "cfg": {k: cur[k] for k in self._TUNE_KEEP},
+                "cfg": chosen,
                 "train": best_m, "trainN": best_m["n"], "split": split,
-                "evals": spent}
+                "evals": spent,
+                "validationWindows": max(1, math.ceil(validation_n / 400)),
+                "challengerRejected": rejected,
+                "challengerCfg": challenger if rejected else None,
+                "gate": incumbent_gate if rejected else challenger_gate,
+                "gateN": (incumbent_gate if rejected else challenger_gate)["n"]}
         if best is not None:
-            holdout = self._replay_history(recs, best["cfg"], score_start=split)
-            best["holdout"] = holdout
-            best["holdoutN"] = holdout["n"]
+            validation = self._replay_history(
+                recs, best["cfg"], score_start=split)
+            final = self._replay_history(
+                recs, best["cfg"], score_start=final_start)
+            best["holdout"] = validation
+            best["holdoutN"] = validation["n"]
+            best["finalHoldout"] = final
+            best["finalHoldoutN"] = final["n"]
             for key in ("acc", "balanced", "worst", "firmAcc", "firmBalanced",
                         "firmWorst", "firmCov", "n", "per", "firmPer",
-                        "perCounts", "firmPerCounts", "sources"):
-                best[key] = holdout[key]
+                        "perCounts", "firmPerCounts", "precision",
+                        "precisionCounts", "macroPrecision", "worstPrecision",
+                        "f1", "macroF1", "worstF1", "firmPrecision",
+                        "firmPrecisionCounts", "firmMacroPrecision",
+                        "firmWorstPrecision", "sources"):
+                if key in validation:
+                    best[key] = validation[key]
         return best
 
     def _rebuild_model(self, recs: list[dict]) -> None:
@@ -2135,7 +2348,9 @@ class ShadowWatcher:
         # Pass the plans through: without them the nightly re-fit silently
         # replaced the learner with one that had no outcome descriptions, so
         # the report and suggestions lost their wording until the next restart.
-        lr = Learner({}, plans=self.plans)
+        lr = Learner({}, plans=self.plans,
+                     escalation_dests=getattr(self, "dests", []),
+                     route_safety=getattr(self, "route_safety", {}))
         skipped = 0
         for r in recs:
             # One unusable record must not cost the entire re-fit. These are
@@ -2169,6 +2384,53 @@ class ShadowWatcher:
         self.state["model"] = lr.m
         self.learner = lr
 
+    def _derive_route_safety(self, recs: list[dict], validation: dict) -> dict:
+        """Decide which outcomes have earned a confident live label.
+
+        This deliberately uses precision by *predicted* route. A class can
+        have perfect recall yet still be unsafe if most tickets it claims are
+        false positives — exactly what the old Proclaim headline concealed.
+        """
+        dated = []
+        for r in recs:
+            try:
+                when = datetime.fromisoformat(str(r.get("when", ""))[:16])
+            except ValueError:
+                continue
+            dated.append((when, r.get("dest")))
+        latest = max((when for when, _ in dated), default=datetime.now())
+        cutoff = latest - timedelta(days=ROUTE_ACTIVITY_DAYS)
+        recent = Counter(dest for when, dest in dated
+                         if when >= cutoff and dest)
+        firm_counts = validation.get("firmPrecisionCounts", {})
+        policy = {}
+        for dest in self.all_dests:
+            reasons = []
+            actual_n = recent.get(dest, 0)
+            pred_n, right = firm_counts.get(dest, [0, 0])
+            precision = right / pred_n if pred_n else None
+            if actual_n < MIN_ROUTE_RECENT_ACTUAL:
+                reasons.append(
+                    f"{dest} is dormant ({actual_n} actual decisions in the "
+                    f"last {ROUTE_ACTIVITY_DAYS} days)")
+            if pred_n < MIN_ROUTE_FIRM_PREDICTIONS:
+                reasons.append(
+                    f"only {pred_n} confident validation predictions exist")
+            elif precision is not None and precision < MIN_ROUTE_FIRM_PRECISION:
+                reasons.append(
+                    f"recent confident precision is {precision:.0%} "
+                    f"({right}/{pred_n})")
+            policy[dest] = {
+                "forceReview": bool(reasons),
+                "reason": "; ".join(reasons),
+                "recentActual": actual_n,
+                "firmPredictions": pred_n,
+                "firmCorrect": right,
+                "firmPrecision": round(precision, 4)
+                if precision is not None else None,
+            }
+        return policy
+
     @staticmethod
     def _tune_drift_warning(today: dict, prior: Optional[dict]) -> str:
         """Flag a genuine swing in tuning outcome from one night to the
@@ -2185,6 +2447,8 @@ class ShadowWatcher:
         lines = []
         for label, key, threshold in (
                 ("balanced accuracy",         "balanced", 0.05),
+                ("macro F1",                  "macroF1", 0.05),
+                ("macro precision",           "macroPrecision", 0.05),
                 ("confident-band coverage",   "firmCov",  0.10)):
             now_v  = today.get(key, 0.0)
             then_v = prior.get(key, now_v)
@@ -2246,6 +2510,10 @@ class ShadowWatcher:
             if best:
                 TUNING.update(best["cfg"])
                 self.state["tunedConfig"] = best["cfg"]
+                safety = self._derive_route_safety(recs, best)
+                self.route_safety.clear()
+                self.route_safety.update(safety)
+                self.state["routeSafety"] = self.route_safety
                 self._rebuild_model(recs)
                 hist = self.state.setdefault("tuneHistory", [])
                 prior = hist[-1] if hist else None
@@ -2263,17 +2531,37 @@ class ShadowWatcher:
                              "firmCov": round(best["firmCov"], 4),
                              "n": best["n"], "trainN": best["trainN"],
                              "holdoutN": best["holdoutN"],
+                             "gateN": best["gateN"],
+                             "finalHoldoutN": best["finalHoldoutN"],
+                             "validationWindows": best["validationWindows"],
+                             "challengerRejected": best["challengerRejected"],
+                             "finalAcc": round(
+                                 best["finalHoldout"]["acc"], 4),
+                             "finalFirmAcc": round(
+                                 best["finalHoldout"]["firmAcc"], 4),
+                             "finalBalanced": round(
+                                 best["finalHoldout"]["balanced"], 4),
+                             "macroF1": round(best["macroF1"], 4),
+                             "macroPrecision": round(
+                                 best["macroPrecision"], 4),
                              "per": {k: round(v, 4)
                                      for k, v in best["per"].items()},
+                             "precision": {k: round(v, 4)
+                                           for k, v in best["precision"].items()},
                              "firmPer": {k: round(v, 4)
                                          for k, v in best["firmPer"].items()},
+                             "firmPrecision": {k: round(v, 4) for k, v in
+                                               best["firmPrecision"].items()},
                              "cfg": best["cfg"]})
                 self.state["tuneHistory"] = hist[-60:]
                 _log_error(
                     f"daily self-tune {today}: holdoutFirm={best['firmAcc']:.1%} "
                     f"balanced={best['balanced']:.1%} "
+                    f"macroF1={best['macroF1']:.1%} "
                     f"worst={best['worst']:.1%} "
                     f"holdoutAcc={best['acc']:.1%} n={best['holdoutN']} "
+                    f"finalAcc={best['finalHoldout']['acc']:.1%} "
+                    f"challengerRejected={best['challengerRejected']} "
                     f"cfg={best['cfg']}")
         except Exception:                                    # noqa: BLE001
             _log_error(f"daily self-tune {today} failed:\n"
@@ -2313,10 +2601,20 @@ class ShadowWatcher:
         out = {}
         for key, p in predicted.items():
             if p.get("dest") and p.get("at", "") >= cutoff:
-                out[key] = {"label": self._short_label(p),
-                            "review": bool(p.get("review")),
+                # A daily tune can tighten a route's safety policy after this
+                # prediction was first made. Apply that policy while publishing
+                # too, so tickets already visible in the overlay become review
+                # suggestions immediately. Keep the stored prediction intact:
+                # its original flag is part of the honest scoring record.
+                shown = p
+                safety = getattr(self, "route_safety", {}).get(p["dest"], {})
+                if safety.get("forceReview") and not p.get("review"):
+                    shown = dict(p)
+                    shown["review"] = True
+                out[key] = {"label": self._short_label(shown),
+                            "review": bool(shown.get("review")),
                             "plan": p.get("plan", ""), "at": p["at"]}
-        _atomic_json_write(SUGGEST_FILE, out)
+        _atomic_json_write(SUGGEST_FILE, out, fallback_in_place=True)
 
     def _resolve_prediction(self, det: dict, dest: str, tr: dict,
                             req_type: str, predicted: dict, stats: dict,
@@ -2362,7 +2660,9 @@ class ShadowWatcher:
     def _reset_metrics(self) -> None:
         self._metrics = {"routed": 0, "predicted": 0, "correct": 0,
                          "confident": [0, 0], "review": [0, 0],
-                         "byActual": {}, "confidentByActual": {},
+                         "byActual": {}, "byPredicted": {},
+                         "confidentByActual": {},
+                         "confidentByPredicted": {},
                          "bySource": {}, "withRequestType": 0}
         self._metrics_offset = 0
         self._metrics_pending: dict[str, dict] = {}
@@ -2424,9 +2724,12 @@ class ShadowWatcher:
             result["predicted"] += 1
             hit = int(bool(rec.get("predictionCorrect")))
             result["correct"] += hit
-            actual = rec.get("dest", "unknown")
+            actual = self.canonical_dest(rec.get("dest", "unknown"))
+            predicted = self.canonical_dest(rec.get("predicted", "unknown"))
             row = result["byActual"].setdefault(actual, [0, 0])
             row[0] += 1; row[1] += hit
+            prow = result["byPredicted"].setdefault(predicted, [0, 0])
+            prow[0] += 1; prow[1] += hit
             context = rec if rec.get("review") is not None \
                 else pending.get(key, {})
             band = "review" if context.get("review") else "confident"
@@ -2434,6 +2737,9 @@ class ShadowWatcher:
             if band == "confident":
                 crow = result["confidentByActual"].setdefault(actual, [0, 0])
                 crow[0] += 1; crow[1] += hit
+                cprow = result["confidentByPredicted"].setdefault(
+                    predicted, [0, 0])
+                cprow[0] += 1; cprow[1] += hit
             source = context.get("source")
             if source:
                 srow = result["bySource"].setdefault(source, [0, 0])
@@ -2520,15 +2826,31 @@ class ShadowWatcher:
             lines.append("- **Novel vs recurring:** " + "; ".join(source_bits))
         lines.append("- **Structured signals:** Request Type, affected service, "
                      "and organisation are enabled for new observations")
-        if live["confidentByActual"]:
-            lines += ["", "### Confident accuracy by actual route", "",
-                      "| Actual route | Correct confident calls | Accuracy |",
-                      "|---|---:|---:|"]
+        if live["byActual"] or live["byPredicted"]:
+            lines += ["", "### Live accuracy by route", "",
+                      "| Route | Recall when actually chosen | Precision when suggested | Confident precision |",
+                      "|---|---:|---:|---:|"]
             for dest in self.all_dests:
-                if dest in live["confidentByActual"]:
-                    total, right = live["confidentByActual"][dest]
-                    lines.append(f"| {dest} | {right}/{total} | "
-                                 f"{100 * right // total}% |")
+                actual_n, actual_ok = live["byActual"].get(dest, [0, 0])
+                pred_n, pred_ok = live["byPredicted"].get(dest, [0, 0])
+                firm_n, firm_ok = live["confidentByPredicted"].get(
+                    dest, [0, 0])
+                recall = (f"{actual_ok}/{actual_n} ({100 * actual_ok // actual_n}%)"
+                          if actual_n else "—")
+                precision = (f"{pred_ok}/{pred_n} ({100 * pred_ok // pred_n}%)"
+                             if pred_n else "—")
+                firm_precision = (f"{firm_ok}/{firm_n} ({100 * firm_ok // firm_n}%)"
+                                  if firm_n else "—")
+                lines.append(f"| {dest} | {recall} | {precision} | "
+                             f"{firm_precision} |")
+
+        route_safety = getattr(self, "route_safety", {})
+        guarded = [(dest, policy) for dest, policy in route_safety.items()
+                   if policy.get("forceReview")]
+        if guarded:
+            lines += ["", "### Routes currently forced to human review", ""]
+            for dest, policy in guarded:
+                lines.append(f"- **{dest}:** {policy.get('reason', 'needs more evidence')}")
 
         # Daily accuracy trend — shows it sharpening over time
         daily = self.state.get("dailyStats", {})
@@ -2561,10 +2883,20 @@ class ShadowWatcher:
                 if t.get("balanced") and t.get("worst"):
                     parts.append(f"balanced {t['balanced']*100:.0f}% "
                                  f"(weakest {t['worst']*100:.0f}%)")
+                if t.get("macroF1") is not None:
+                    parts.append(f"macro F1 {t['macroF1']*100:.0f}%")
                 if t.get("holdoutN"):
+                    windows = t.get("validationWindows", 1)
                     parts.append(f"overall {t['acc']*100:.0f}% "
-                                 f"({t['holdoutN']} unseen recent decisions; "
+                                 f"({t['holdoutN']} unseen decisions across "
+                                 f"{windows} recent window{'s' if windows != 1 else ''}; "
                                  f"selected on {t['trainN']})")
+                if t.get("finalHoldoutN"):
+                    parts.append(f"latest untouched window "
+                                 f"{t.get('finalAcc', 0)*100:.0f}% "
+                                 f"({t['finalHoldoutN']} decisions)")
+                if t.get("challengerRejected"):
+                    parts.append("challenger rejected; incumbent retained")
                 else:
                     parts.append(f"overall {t['acc']*100:.0f}% "
                                  f"(replayed {t['n']})")
@@ -2574,7 +2906,8 @@ class ShadowWatcher:
         if confusion:
             per: dict[str, list[int]] = {}
             for pair, count in confusion.items():
-                p_dest, actual = pair.split(" → ")
+                p_dest, actual = (self.canonical_dest(x)
+                                  for x in pair.split(" → "))
                 row = per.setdefault(actual, [0, 0])
                 row[0] += count
                 if p_dest == actual:
@@ -2585,9 +2918,15 @@ class ShadowWatcher:
                     total, right = per[dest]
                     lines.append(f"- {dest}: {100 * right // total}% "
                                  f"({right}/{total})")
-            wrong = sorted(((pair, n) for pair, n in confusion.items()
-                            if pair.split(" → ")[0] != pair.split(" → ")[1]),
-                           key=lambda kv: -kv[1])
+            normalised_wrong: dict[str, int] = {}
+            for pair, count in confusion.items():
+                p_dest, actual = (self.canonical_dest(x)
+                                  for x in pair.split(" → "))
+                if p_dest != actual:
+                    normal = f"{p_dest} → {actual}"
+                    normalised_wrong[normal] = (
+                        normalised_wrong.get(normal, 0) + count)
+            wrong = sorted(normalised_wrong.items(), key=lambda kv: -kv[1])
             if wrong:
                 lines += ["", "## Mistakes learned from (said → team chose)",
                           ""]
@@ -2632,8 +2971,9 @@ class ShadowWatcher:
                             else "❌" if rec.get("predictionCorrect") is False
                             else "•")
                     pred_txt = f" — I said **{p}** {mark}" if p else ""
+                    actual = self.canonical_dest(rec.get("dest", "unknown"))
                     lines.append(
-                        f"- `{rec['key']}` **{rec['dest']}** by {rec.get('by', '?')}"
+                        f"- `{rec['key']}` **{actual}** by {rec.get('by', '?')}"
                         f" (clones: {', '.join(rec.get('clones', [])) or 'none'})"
                         f"{pred_txt}  \n  {rec.get('summary', '')[:90]}")
                     shown += 1
@@ -2668,10 +3008,11 @@ class ShadowWatcher:
             "accuracy": {"predictions": pred_n, "correct": pred_c,
                         "pct": round(100 * pred_c / pred_n, 1)
                         if pred_n else None},
+            "routeSafety": route_safety,
             "drift": self.state.get("tuneDrift"),
         }
         try:
-            _atomic_json_write(STATUS_FILE, status)
+            _atomic_json_write(STATUS_FILE, status, fallback_in_place=True)
         except OSError as exc:
             _log_error(f"could not write {STATUS_FILE}: {exc}")
 

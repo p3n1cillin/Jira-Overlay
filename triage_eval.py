@@ -43,7 +43,9 @@ def handoff_dests(records: list[dict], w=None) -> set[str]:
     the triage process started. Taken from the watcher's discovered config."""
     if w is not None:
         return set(w.dests)
-    return {r["dest"] for r in records}
+    inferred = {r["dest"] for r in records if r.get("cloneProjects")}
+    return inferred or {r["dest"] for r in records
+                        if str(r.get("dest", "")).startswith("With ")}
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +173,16 @@ def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
     saved = dict(tl.TUNING)
     tl.TUNING.update(tuning)
     try:
-        learner = tl.Learner({})
-        scored: list[tuple[bool, int, str]] = []   # (correct, conf, actual)
-        firm: list[tuple[bool, str]] = []          # non-review calls
+        teams = list(handoff_dests(records))
+        learner = tl.Learner({}, escalation_dests=teams)
+        scored: list[tuple[bool, int, str, str]] = []
+        firm: list[tuple[bool, str, str]] = []
         review_n = 0               # how many were flagged for human review
         confusion: dict[str, int] = {}
         start = warmup if score_start is None else score_start
         end = len(records) if score_end is None else score_end
         for i, r in enumerate(records):
-            req_type = r.get("reqType", "")
+            req_type = r.get("requestType", r.get("reqType", ""))
             det = {"summary": r["summary"], "desc": r["desc"],
                    "labels": r["labels"], "components": r["components"],
                    "structured": r.get("structured", []),
@@ -190,11 +193,11 @@ def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
             dest, conf = p["dest"], p["conf"]
             correct = dest == r["dest"] if dest is not None else None
             if dest is not None and start <= i < end:
-                scored.append((bool(correct), conf, r["dest"]))
+                scored.append((bool(correct), conf, r["dest"], dest))
                 if p["review"]:
                     review_n += 1
                 else:
-                    firm.append((bool(correct), r["dest"]))
+                    firm.append((bool(correct), r["dest"], dest))
                 if not correct:
                     pair = f"{r['dest']} predicted-as {dest}"
                     confusion[pair] = confusion.get(pair, 0) + 1
@@ -210,25 +213,52 @@ def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
         tl.TUNING.update(saved)
 
     n = len(scored)
-    acc = sum(c for c, _, _ in scored) / n if n else 0.0
-    hi = [(c, conf) for c, conf, _ in scored if conf >= 90]
+    acc = sum(c for c, _, _, _ in scored) / n if n else 0.0
+    hi = [(c, conf) for c, conf, _, _ in scored if conf >= 90]
     cov90 = len(hi) / n if n else 0.0
     acc90 = (sum(c for c, _ in hi) / len(hi)) if hi else 0.0
     per: dict[str, list[int]] = {}
-    for c, _, actual in scored:
+    predicted_per: dict[str, list[int]] = {}
+    for c, _, actual, predicted in scored:
         row = per.setdefault(actual, [0, 0])
         row[0] += 1
         row[1] += int(c)
+        prow = predicted_per.setdefault(predicted, [0, 0])
+        prow[0] += 1
+        prow[1] += int(c)
     firm_per: dict[str, list[int]] = {}
-    for c, actual in firm:
+    firm_predicted_per: dict[str, list[int]] = {}
+    for c, actual, predicted in firm:
         row = firm_per.setdefault(actual, [0, 0])
         row[0] += 1
         row[1] += int(c)
+        prow = firm_predicted_per.setdefault(predicted, [0, 0])
+        prow[0] += 1
+        prow[1] += int(c)
     per_acc = {k: v[1] / v[0] for k, v in per.items()}
     firm_per_acc = {k: v[1] / v[0] for k, v in firm_per.items()}
-    firm_acc = (sum(c for c, _ in firm) / len(firm)) if firm else 0.0
+    precision = {k: v[1] / v[0] for k, v in predicted_per.items()}
+    firm_precision = {k: v[1] / v[0]
+                      for k, v in firm_predicted_per.items()}
+    labels = set(per) | set(predicted_per)
+    f1 = {}
+    for label in labels:
+        recall, prec = per_acc.get(label, 0.0), precision.get(label, 0.0)
+        f1[label] = (2 * prec * recall / (prec + recall)
+                     if prec + recall else 0.0)
+    firm_acc = (sum(c for c, _, _ in firm) / len(firm)) if firm else 0.0
     return {"n": n, "acc": acc, "cov90": cov90, "acc90": acc90,
             "per": per_acc,
+            "perCounts": per,
+            "precision": precision,
+            "precisionCounts": predicted_per,
+            "macroPrecision": (sum(precision.get(k, 0.0) for k in labels)
+                               / len(labels)) if labels else 0.0,
+            "worstPrecision": min((precision.get(k, 0.0) for k in labels),
+                                  default=0.0),
+            "f1": f1,
+            "macroF1": sum(f1.values()) / len(f1) if f1 else 0.0,
+            "worstF1": min(f1.values(), default=0.0),
             "balanced": (sum(per_acc.values()) / len(per_acc))
             if per_acc else 0.0,
             "worst": min(per_acc.values(), default=0.0),
@@ -237,6 +267,14 @@ def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
             "firmBalanced": (sum(firm_per_acc.values()) / len(firm_per_acc))
             if firm_per_acc else 0.0,
             "firmWorst": min(firm_per_acc.values(), default=0.0),
+            "firmPer": firm_per_acc,
+            "firmPerCounts": firm_per,
+            "firmPrecision": firm_precision,
+            "firmPrecisionCounts": firm_predicted_per,
+            "firmMacroPrecision": (sum(firm_precision.values())
+                                   / len(firm_precision))
+            if firm_precision else 0.0,
+            "firmWorstPrecision": min(firm_precision.values(), default=0.0),
             "reviewCov": (review_n / n) if n else 0.0}
 
 
@@ -244,7 +282,9 @@ DEFAULT_CFG = {"logOdds": 1, "summaryWeight": 6, "mistakeWeight": 3,
                "confTemp": 4.0, "reqSmooth": 10, "repSmooth": 20,
                "priorWeight": 0.5, "knnThresh": 0.7, "decayFactor": 0.997,
                "reviewConf": 75, "reviewMargin": 20,
-               "requestTypeHintWeight": 3.0, "reporterWeight": 1.0}
+               "requestTypeHintWeight": 3.0, "reporterWeight": 1.0,
+               "escalationSpecialist": 1,
+               "escalationPriorWeight": 0.25}
 
 
 def review_bands() -> None:
@@ -320,7 +360,7 @@ def tune() -> None:
               "run 'build' once the team has triaged more tickets")
         return
     warmup = min(WARMUP, len(records) // 5)
-    validation_n = max(100, min(400, len(records) // 5))
+    validation_n = max(100, min(1200, len(records) // 3))
     split = len(records) - validation_n
     tuning_records = records[:split]
     tuning_warmup = min(WARMUP, len(tuning_records) // 5)
