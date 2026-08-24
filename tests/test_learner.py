@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import Checker, load_learner          # noqa: E402
@@ -890,6 +891,67 @@ tl.ShadowWatcher._self_tune(hungry, [{} for _ in range(10)])
 check("an insatiable first descent doesn't starve the second of its budget",
       baseline_seen["n"] >= 1, repr(baseline_seen))
 
+# --- Champion/challenger gate: a config that only looks good on the exact
+# window it was searched against must not be deployed on that basis alone --
+# The search picks whichever config scores best on tuning_recs; the gate is
+# what's supposed to catch that config overfitting to that specific window
+# rather than genuinely being better. Real risk here is an off-by-one or a
+# swapped comparison that would silently deploy the search's pick regardless
+# of what the gate says - wrong, but nothing a normal test run would notice,
+# since it wouldn't crash and wouldn't touch Jira either way.
+incumbent_cfg = dict(tl.TUNING)
+
+
+def _fake_gate_replay(self, recs, cfg, score_start=None, score_end=None):
+    on_gate_or_holdout = score_start is not None
+    is_challenger = _matches(cfg, tl.BALANCED_TUNED_CONFIG)
+    is_incumbent = _matches(cfg, incumbent_cfg)
+    if not on_gate_or_holdout:
+        # Coordinate descent: the eventual challenger looks best everywhere
+        # it's tried during the search itself.
+        return _m(0.95) if is_challenger else _m(0.10)
+    # Gate/holdout: the challenger's apparent edge doesn't hold up on data
+    # it wasn't searched against - exactly the overfit case the gate exists
+    # to catch.
+    if is_challenger:
+        return _m(0.20)
+    if is_incumbent:
+        return _m(0.90)
+    return _m(0.50)
+
+
+rejector = object.__new__(tl.ShadowWatcher)
+rejector.state = {}
+rejector.plans = {}
+rejector.learner = tl.Learner({})
+rejector._replay_history = _fake_gate_replay.__get__(rejector)
+gated = tl.ShadowWatcher._self_tune(rejector, [{} for _ in range(3000)])
+check("a challenger that only wins on the window it was searched against "
+      "is rejected by the gate",
+      gated is not None and gated["challengerRejected"] is True,
+      gated)
+check("  and the incumbent config is what actually gets kept",
+      gated is not None and _matches(gated["cfg"], incumbent_cfg),
+      gated["cfg"] if gated else None)
+
+
+def _fake_gate_replay_genuine(self, recs, cfg, score_start=None, score_end=None):
+    # Same shape, but this time the challenger is genuinely better
+    # everywhere, gate window included.
+    return _m(0.95) if _matches(cfg, tl.BALANCED_TUNED_CONFIG) else _m(0.10)
+
+
+accepter = object.__new__(tl.ShadowWatcher)
+accepter.state = {}
+accepter.plans = {}
+accepter.learner = tl.Learner({})
+accepter._replay_history = _fake_gate_replay_genuine.__get__(accepter)
+accepted = tl.ShadowWatcher._self_tune(accepter, [{} for _ in range(3000)])
+check("a challenger that is genuinely better on the gate too is deployed",
+      accepted is not None and accepted["challengerRejected"] is False
+      and _matches(accepted["cfg"], tl.BALANCED_TUNED_CONFIG),
+      accepted["cfg"] if accepted else None)
+
 # --- A truncated log line must not blank the whole report ------------------
 # _log() is a plain append, not atomic, so a kill mid-write (a forced
 # restart, a crash, Windows updating) can leave a half-written last line.
@@ -1066,5 +1128,63 @@ finally:
             _os.unlink(p)
         except OSError:
             pass
+
+# --- Route safety: dormant/low-precision/underevidenced routes must be
+# forced to review even when the model itself is confident ------------------
+# _derive_route_safety is the mechanism that stands between a plausible-
+# looking suggestion and a route with no real evidence behind it - the
+# thing the whole shadow-only design exists to protect against getting
+# wrong, so it gets exercised directly rather than just trusted because
+# the rest of the suite still passes.
+rs = watcher({"triageStatuses": ["With DEV", "With BI", "With DATA"]})
+now = datetime.now()
+recent = lambda days_ago: f"{now - timedelta(days=days_ago):%Y-%m-%d %H:%M}"
+
+route_recs = (
+    # With DEV: active recently, precision comfortably clears the bar
+    [{"when": recent(1), "dest": "With DEV"} for _ in range(5)]
+    # With BI: precision is fine, but nothing routed there recently
+    + [{"when": recent(200), "dest": "With BI"} for _ in range(5)]
+    # With DATA: active recently, but its confident calls are unreliable
+    + [{"when": recent(1), "dest": "With DATA"} for _ in range(5)]
+)
+route_validation = {"firmPrecisionCounts": {
+    "With DEV":  [20, 20],   # 100% of 20 - well clear of the 95% bar
+    "With BI":   [20, 20],   # would also clear it, if it weren't dormant
+    "With DATA": [20, 10],   # 50% - half of what it claims is wrong
+}}
+policy = rs._derive_route_safety(route_recs, route_validation)
+
+check("an active route with strong confident precision is not forced to review",
+      policy["With DEV"]["forceReview"] is False, policy["With DEV"])
+check("a dormant route is forced to review even with perfect past precision",
+      policy["With BI"]["forceReview"] is True
+      and "dormant" in policy["With BI"]["reason"], policy["With BI"])
+check("a route with weak confident precision is forced to review despite "
+      "recent activity",
+      policy["With DATA"]["forceReview"] is True
+      and "precision" in policy["With DATA"]["reason"], policy["With DATA"])
+
+# A route with no confident predictions at all in validation (e.g. a
+# brand-new outcome) must not be trusted by default - "no evidence of being
+# wrong" is not the same as "evidence of being right".
+check("a route with no confident validation history is forced to review",
+      policy.get("Resolved in HD", {}).get("forceReview") is True,
+      policy.get("Resolved in HD"))
+
+# --- A tightened safety policy must apply to suggestions already on screen -
+# The prediction that was already shown kept its own honest review flag,
+# but write_suggestions must still publish it as needing review if the
+# nightly tune has since decided that route can't be trusted.
+rs.route_safety = {"With DATA": policy["With DATA"]}
+already_shown = {"K-1": {"dest": "With DATA", "conf": 91, "second": None,
+                        "secondConf": 0, "review": False, "source": "model",
+                        "note": "move to With DATA", "at": recent(0)[:16]}}
+rs._write_suggestions(already_shown)
+published = json.load(open(tl.SUGGEST_FILE, encoding="utf-8"))
+check("a suggestion is republished as review once its route is flagged unsafe",
+      published["K-1"]["review"] is True, published)
+check("  without mutating the original stored prediction's own review flag",
+      already_shown["K-1"]["review"] is False, already_shown["K-1"])
 
 sys.exit(check.done())
