@@ -72,8 +72,12 @@ class Resp:
     ok = True
     status_code = 200
 
+    def __init__(self, payload=None):
+        self._payload = payload
+
     def json(self):
-        return {"values": QUEUES}
+        return self._payload if self._payload is not None \
+            else {"values": QUEUES}
 
     def raise_for_status(self):
         pass
@@ -83,7 +87,16 @@ def fetch_cycle(cfg):
     o = object.__new__(Overlay)
     o.config = cfg
     o._jira_url = lambda p="": "https://x" + p
-    o._session = type("S", (), {"get": lambda *a, **k: Resp()})()
+    # Alert-queue issue pages come back full (50), so the paginated fetch
+    # runs to its page cap and the badge count falls back to the cached
+    # includeCount — exactly how a real busy queue behaves.
+    class S:
+        def get(self, url, params=None, timeout=None):
+            if "/issue" in url:
+                return Resp({"values": [{"issueKey": f"SD-{i}"}
+                                        for i in range(50)]})
+            return Resp()
+    o._session = S()
     o.queues = []
     o._all_queue_names = []
     o.new_issues = []
@@ -94,6 +107,7 @@ def fetch_cycle(cfg):
     posted = []
     o._post = lambda fn: posted.append(fn)
     o._fetch_completion_stats = lambda c: None
+    o._worker_session = lambda slot: o._session
     Overlay._fetch_data(o)
     shown = any(getattr(f, "__name__", "") == "_show_alert_queue_picker"
                 for f in posted)
@@ -127,8 +141,12 @@ class BusyResp:
     ok = True
     status_code = 200
 
+    def __init__(self, payload=None):
+        self._payload = payload
+
     def json(self):
-        return {"values": BUSY}
+        return self._payload if self._payload is not None \
+            else {"values": BUSY}
 
     def raise_for_status(self):
         pass
@@ -138,7 +156,15 @@ def alerting(cfg):
     o = object.__new__(Overlay)
     o.config = cfg
     o._jira_url = lambda p="": "https://x" + p
-    o._session = type("S", (), {"get": lambda *a, **k: BusyResp()})()
+    # Full 50-issue pages, as above: the queue is never fully enumerated
+    # within the page cap, so the reconciled count trusts includeCount.
+    class S:
+        def get(self, url, params=None, timeout=None):
+            if "/issue" in url:
+                return BusyResp({"values": [{"issueKey": f"SD-{i}"}
+                                            for i in range(50)]})
+            return BusyResp()
+    o._session = S()
     o.queues = []
     o._all_queue_names = []
     o.new_issues = []
@@ -148,6 +174,7 @@ def alerting(cfg):
     o._alert_queues_missing = []
     o._post = lambda fn: None
     o._fetch_completion_stats = lambda c: None
+    o._worker_session = lambda slot: o._session
     Overlay._fetch_data(o)
     return o._alert_count, o._alert_queues_missing, len(o.queues)
 

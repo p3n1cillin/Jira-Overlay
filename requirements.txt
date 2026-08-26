@@ -1,7 +1,10 @@
 # Runtime dependencies for jira_overlay.pyw and triage_learner.pyw.
+# tzdata: the IANA timezone database — Windows has no system copy, and the
+# learner's zoneinfo-based JQL windows need it to resolve named zones.
 # setup.py installs these itself on first run; this file exists so CI (and
 # anyone who'd rather use pip directly) has one place to read them from
 # instead of a second, hand-kept list.
 requests
 Pillow
 pystray
+tzdata

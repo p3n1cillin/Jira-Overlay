@@ -196,6 +196,7 @@ def _counts_for(raw_count):
     o._alert_queues_missing = []
     o._post = lambda fn: None
     o._fetch_completion_stats = lambda c: None
+    o._worker_session = lambda slot: o._session
     Overlay._fetch_data(o)
     return o.queues[0].get("issueCount") if o.queues else None
 
@@ -225,6 +226,7 @@ o._last_full_fetch = 9e18
 o._alert_queues_missing = []
 o._post = lambda fn: None
 o._fetch_completion_stats = lambda c: None
+o._worker_session = lambda slot: o._session
 try:
     Overlay._fetch_data(o)
     ok = True
@@ -275,6 +277,7 @@ o2._last_full_fetch = 9e18
 o2._alert_queues_missing = []
 o2._post = lambda fn: None
 o2._fetch_completion_stats = lambda c: None
+o2._worker_session = lambda slot: o2._session
 try:
     Overlay._fetch_data(o2)
     ok = True

@@ -16,6 +16,15 @@ import shutil
 import sys
 import tempfile
 
+# Check details quote real notification text, which carries emoji and
+# typographic dashes. On a legacy cp1252 console a bare print of those
+# raises UnicodeEncodeError and kills the suite mid-run, so pin stdout to
+# UTF-8 (replacing anything a terminal genuinely can't show).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 

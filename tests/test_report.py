@@ -79,7 +79,7 @@ check("nonsense dates report rather than crash", w._period() is None)
 seen = []
 class App:
     config = {"projectKey": "SD", "serviceDeskName": "Desk"}
-    def _count_issues(self, jql): seen.append(jql); return (7, False)
+    def _count_issues(self, jql, session=None): seen.append(jql); return (7, False)
     def _post(self, fn): fn()
 w.app = App(); w._closed = False; w._seq = 1
 w.v_basis = tk.StringVar(value="resolved")
@@ -87,7 +87,7 @@ w.people = [{"name": "Sam Carter", "accountId": "acc-1"},
             {"name": "Ada", "accountId": ""}]
 w._done = lambda seq, results, total, *_coverage: seen.append(
     ("RESULT", results, total))
-w._work(1, date(2026, 1, 1), date(2026, 1, 31))
+w._work(1, date(2026, 1, 1), date(2026, 1, 31), "resolved")
 q = seen[0]
 check("counts only completed work", "statusCategory = Done" in q)
 check("scopes to the project", "project = SD" in q)
@@ -101,7 +101,7 @@ check("totals across everyone", res[2] == 14, str(res[2]))
 
 # --- basis switch ----------------------------------------------------------
 seen.clear(); w.v_basis.set("updated"); w._seq = 2
-w._work(2, date(2026, 1, 1), date(2026, 1, 2))
+w._work(2, date(2026, 1, 1), date(2026, 1, 2), "updated")
 check("'Last updated' basis changes the field", 'updated >= "2026-01-01"' in seen[0])
 
 # --- reportBasis names a JQL field, not a value - jql_quote() can't help --
@@ -111,7 +111,8 @@ check("'Last updated' basis changes the field", 'updated >= "2026-01-01"' in see
 # still be rejected rather than trusted, the same way an unvalidated column
 # name reaching SQL would need to be.
 seen.clear(); w.v_basis.set('resolved" OR project = "SECRET'); w._seq = 3
-w._work(3, date(2026, 1, 1), date(2026, 1, 2))
+w._work(3, date(2026, 1, 1), date(2026, 1, 2),
+        'resolved" OR project = "SECRET')
 check("a basis outside {resolved, updated} falls back to a safe default",
       all("SECRET" not in q for q in seen if isinstance(q, str)), seen)
 w.v_basis.set("resolved")
@@ -136,14 +137,14 @@ check("an injection attempt stays a single literal",
 seen.clear()
 w.people = [{"name": "O" + QUOTE + "Brien", "accountId": ""}]
 w._seq += 1
-w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
+w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2), "resolved")
 check("the report escapes the name it queries with",
       SLASH + QUOTE + "Brien" in seen[0], seen[0][-44:])
 
 seen.clear()
 w.people = [{"name": "", "accountId": ""}]
 w._seq += 1
-w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2))
+w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2), "resolved")
 check("a person with no name costs no per-person query",
       not [q for q in seen if "assignee =" in str(q)],
       str([q for q in seen if "assignee =" in str(q)]))
@@ -204,7 +205,7 @@ def coverage_status(total_completed, unassigned):
     class App:
         config = {"projectKey": "SD"}
 
-        def _count_issues(self, jql):
+        def _count_issues(self, jql, session=None):
             if "assignee IS EMPTY" in jql:
                 return (unassigned, False)
             if "assignee" not in jql:
@@ -220,7 +221,7 @@ def coverage_status(total_completed, unassigned):
     w2.app = App()
     w2._set_status = lambda text, warn=False: status.update(text=text, warn=warn)
     w2._seq += 1
-    w2._work(w2._seq, date(2026, 1, 1), date(2026, 1, 31))
+    w2._work(w2._seq, date(2026, 1, 1), date(2026, 1, 31), "resolved")
     return status
 
 
@@ -264,17 +265,14 @@ for name in ("=1+1", "+SUM(A1:A9)", "-2+3", "@SUM(1,1)", "\tcmd", "-"):
 for name in ("Sam Carter", "O'Brien", ""):
     check(f"{name!r} is left alone", ov.csv_safe(name) == name)
 
-# --- Reading a Tk variable from the counting thread -------------------------
-# _work runs on a background thread and reads self.v_basis, a tk.StringVar,
-# once at the top. Tk variables are not documented as thread-safe, but
-# CPython's _tkinter marshals a cross-thread Tcl call onto whichever thread
-# is running mainloop and blocks the caller until it's served - which is
-# safe PROVIDED mainloop is actually running continuously, as it is in the
-# live app. A test using periodic manual update() calls instead of a real
-# mainloop() found what looked like a hang; it was the test's threading
-# model, not the app - restored here with a real mainloop so the result
-# means something. A watchdog kills the process rather than hanging the
-# suite if this regresses.
+# --- Counting on a worker thread racing a window close ----------------------
+# _work runs on a background thread. It used to read self.v_basis (a
+# tk.StringVar) once at the top - a cross-thread Tcl call that only works
+# when mainloop continuously serves it, and deadlocks or crashes otherwise.
+# refresh() now reads the variable on the main thread and passes `basis`
+# in, so _work touches no Tcl state at all; this trial keeps covering the
+# close-during-count race itself. A watchdog kills the process rather than
+# hanging the suite if this regresses.
 import threading                                      # noqa: E402
 
 
@@ -304,7 +302,7 @@ for trial in range(TRIALS):
     class SlowApp:
         config = {"projectKey": "SD"}
 
-        def _count_issues(self, jql):
+        def _count_issues(self, jql, session=None):
             time.sleep(0.005)
             return (1, False)
 
@@ -316,7 +314,7 @@ for trial in range(TRIALS):
 
     def worker(tw=tw, trial=trial):
         try:
-            tw._work(trial, date(2026, 1, 1), date(2026, 1, 2))
+            tw._work(trial, date(2026, 1, 1), date(2026, 1, 2), "resolved")
         except Exception as exc:                      # noqa: BLE001
             race_errors.append((trial, exc))
         finally:
@@ -374,7 +372,7 @@ def _refresh_race_trial(n_clicks):
             self.value, self.delay = value, delay
             self.config = {"projectKey": "SD"}
 
-        def _count_issues(self, jql):
+        def _count_issues(self, jql, session=None):
             time.sleep(self.delay)
             return (self.value, False)
 
@@ -402,6 +400,51 @@ rapid_failures = [(t, r) for t in range(8)
                   if (r := _refresh_race_trial(5)) != [4]]
 check("only the latest of 5 rapid clicks ever renders, 8 times over",
       not rapid_failures, str(rapid_failures))
+
+# --- _work counts four-wide rather than one round-trip per person ------------
+# A barrier of two proves overlap deterministically: with concurrent counts
+# any pair of calls meets it instantly; a serial loop blocks on the first
+# wait, times out, and every count comes back None.
+import threading                                    # noqa: E402
+barrier = threading.Barrier(2)
+
+
+class StubApp:
+    config = {"projectKey": "SD", "email": "e@x", "token": "t"}
+
+    def __init__(self):
+        self.calls = []
+        self.posted = []
+
+    def _count_issues(self, jql, session=None):
+        self.calls.append((jql, session is not None))
+        barrier.wait(timeout=5)
+        return (7 if "assignee =" in jql else 3), False
+
+    def _post(self, fn):
+        self.posted.append(fn)
+
+
+stub = StubApp()
+win = object.__new__(ov.TeamReportWindow)
+win.app = stub
+win.people = [{"name": "A", "accountId": "a"},
+              {"name": "B", "accountId": "b"}]
+win._closed = False
+win._seq = 1
+done_args = []
+win._done = lambda *a: done_args.append(a)
+ov.TeamReportWindow._work(win, 1, date(2026, 8, 1), date(2026, 8, 26),
+                          "resolved")
+check("the worker handed exactly one completion to the main thread",
+      len(stub.posted) == 1, str(len(stub.posted)))
+stub.posted[0]()
+_seq, rows, total, completed, unassigned = done_args[0]
+check("counts ran concurrently and stayed ordered and correct",
+      rows == [("A", 7), ("B", 7)] and total == 14
+      and completed == 3 and unassigned == 3, str(done_args))
+check("worker threads brought their own session",
+      all(own for _jql, own in stub.calls), str(stub.calls))
 
 root.destroy()
 print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")

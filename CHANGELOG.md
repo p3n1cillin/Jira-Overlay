@@ -4,6 +4,71 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`) — see `APP_VERSION` in either app, and
 Settings, for what a running install is actually on.
 
+## [2026.08.26]
+
+### Added
+- Launching the overlay a second time no longer exits silently — it signals
+  the running instance, which shows itself (a named Windows event handed to
+  the main thread through the existing queue).
+- Notifications say where a ticket landed: every alert names its queue —
+  a summary-less alert becomes "New ticket in Escalations", and a summary
+  carries an extra `In <queue>` line. The hover popup groups tickets under
+  per-queue headings (when more than one alert queue is configured) and
+  lists a ticket matching several alert queues only once.
+- `triage_eval.py build` guards every per-issue pass like the learner's own
+  backfill — one malformed ticket no longer aborts the whole dataset build —
+  writes the dataset atomically, and cuts off on the Jira account's timezone.
+- Learning windows and cutoffs in the triage learner are now built in the
+  Jira account's own profile timezone (read once from `/myself`), not the
+  workstation's — a machine/Jira timezone mismatch or DST difference no
+  longer silently shifts every learning window. `tzdata` (the IANA database,
+  absent on Windows) is installed alongside the other dependencies.
+- The overlay's error log rotates at 5 MB, and the learner's activity log at
+  20 MB, so neither grows unbounded.
+
+### Changed
+- Alert-queue issue pulls run four-wide instead of queue-after-queue, so a
+  desk watching several queues fits comfortably inside the 5-second live
+  poll. Each pull slot keeps its own connection pool for the life of the
+  app — a shared `requests.Session` across threads races its cookie jar,
+  and per-call sessions would re-handshake TLS every poll.
+- The first-run alert-queue picker offers checkboxes for several queues
+  instead of forcing a single choice — adding the second alert queue no
+  longer requires a trip into Settings.
+- The team report counts everyone four-wide instead of one HTTP round-trip
+  per person — a ten-person desk's ranking lands in about a quarter of the
+  time. Each worker keeps its own connection pool: a shared
+  `requests.Session` across threads races its cookie jar.
+- Error back-off carries ±15% jitter, so a fleet of overlays recovering
+  from a shared outage doesn't retry in lockstep and knock the server back
+  over.
+- The team report reads its "Count by" setting on the main thread before the
+  background count starts; reading a Tk variable on a worker thread could
+  crash or deadlock the count.
+- Config saves are serialised across threads — a fetch-thread save could
+  previously interleave with a main-thread save and lose keys.
+- Slow-loop routing searches fetch up to 500 issues per cycle instead of 50:
+  after the machine was asleep for days, transitions past the first page were
+  silently lost for good. Intake predictions likewise cover 500 tickets, and
+  the People picker paginates past the first 200 assignable users.
+- Fallback issue counting (older Jira without approximate-count) follows
+  pagination instead of capping every figure at "200+".
+- Opening the People picker no longer blocks the UI on the Jira lookup; the
+  list fills in when it returns, keeping whatever was already ticked.
+- Both apps close their HTTP sessions on shutdown.
+
+### Fixed
+- One malformed record in the learner's activity log tail could kill every
+  future report permanently (the log is append-only, so the bad line never
+  aged out).
+- A fragile single-instance mutex check in the learner could read a stale
+  last-error and let two instances run.
+- An unwritable learner log file crashed error paths instead of being
+  tolerated like the overlay's.
+- `suggestionsFile` in the config is now treated as a bare filename — a
+  hand-edited path traversal value can no longer point the overlay at
+  arbitrary files to display as suggestions.
+
 ## [2026.08.24]
 
 ### Added

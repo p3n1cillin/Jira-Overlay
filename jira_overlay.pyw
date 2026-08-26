@@ -6,7 +6,8 @@ A lightweight Windows desktop overlay that monitors Jira Service Management
 queues in real time.
 
 Requirements:  Python 3.9+ (Windows)
-               pip install requests pystray Pillow  (auto-installed on first run)
+               pip install requests pystray Pillow tzdata
+               (auto-installed on first run)
 
 Quick start:   double-click setup.bat once, then launch.bat
 
@@ -24,6 +25,7 @@ import json
 import os
 import csv
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -36,6 +38,7 @@ import urllib.parse
 import webbrowser
 import winreg
 import winsound
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 import tkinter as tk
@@ -45,7 +48,12 @@ from tkinter import messagebox
 # Dependency bootstrap — must run before any third-party import
 # ---------------------------------------------------------------------------
 
-_BOOTSTRAP_DEPS = [("requests", "requests"), ("PIL", "Pillow"), ("pystray", "pystray")]
+# tzdata ships the IANA timezone database as a pure-Python package —
+# Windows has no system copy of it, and without it zoneinfo can't resolve
+# any named zone (the triage learner needs one to build JQL windows in the
+# Jira account's own timezone).
+_BOOTSTRAP_DEPS = [("requests", "requests"), ("PIL", "Pillow"),
+                   ("pystray", "pystray"), ("tzdata", "tzdata")]
 
 
 def _bootstrap() -> None:
@@ -153,7 +161,7 @@ import pystray
 # automatically — it's a single-file script someone may have just copied,
 # not necessarily a git checkout — so this is the plain, low-maintenance
 # answer to "what version is this" for a support conversation.
-APP_VERSION  = "2026.08.21"
+APP_VERSION  = "2026.08.26"
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
 STARTUP_NAME = "JiraOverlay"
 LEARNER_STARTUP_NAME = "JiraTriageLearner"
@@ -551,7 +559,22 @@ def normalise_domain(raw: str) -> str:
     return host
 
 
+# A fetch-thread save (desk discovery, projectKey backfill) can interleave
+# with a main-thread save (drag-release, queue picker, settings Save).
+# Both do a read-merge-write of the same JSON file, so two unsynchronised
+# saves lose whichever keys the other had just merged in — including keys
+# belonging to the triage learner that the merge exists specifically to
+# preserve. One process-wide lock serialises them.
+_CONFIG_SAVE_LOCK = threading.Lock()
+
+
 def save_config(cfg: dict) -> None:
+    """Thread-safe entry point — see _save_config_unlocked."""
+    with _CONFIG_SAVE_LOCK:
+        _save_config_unlocked(cfg)
+
+
+def _save_config_unlocked(cfg: dict) -> None:
     """Atomic write — a crash mid-save can't corrupt the existing config.
 
     Only this app's own keys are rewritten. The overlay holds its config in
@@ -724,6 +747,60 @@ def release_single_instance() -> None:
         except Exception:
             pass
         _INSTANCE_MUTEX = None
+
+
+_SHOW_EVENT_NAME = "JiraOverlayShowRequest"
+_SHOW_EVENT: Optional[int] = None
+
+
+def _create_show_event() -> None:
+    """Manual-reset event a second launch signals to bring the running
+    overlay to the front — previously a second launch just died silently,
+    which read as "the app is broken" rather than "it's already running"."""
+    global _SHOW_EVENT
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateEventW.restype = ctypes.c_void_p
+        k32.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                     ctypes.c_bool, ctypes.c_wchar_p]
+        _SHOW_EVENT = k32.CreateEventW(None, True, False, _SHOW_EVENT_NAME)
+    except Exception:
+        _SHOW_EVENT = None      # focus-on-relaunch is a nicety, never a need
+
+
+def request_running_overlay_show() -> None:
+    """Signal the running instance's show event (second-launch path)."""
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.OpenEventW.restype = ctypes.c_void_p
+        k32.OpenEventW.argtypes = [ctypes.c_uint32, ctypes.c_bool,
+                                   ctypes.c_wchar_p]
+        handle = k32.OpenEventW(0x0002, False,      # EVENT_MODIFY_STATE
+                                _SHOW_EVENT_NAME)
+        if handle:
+            k32.SetEvent.argtypes = [ctypes.c_void_p]
+            k32.SetEvent(handle)
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            k32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def _start_show_waiter(app: "JiraOverlay") -> None:
+    """Daemon thread that turns a show signal into a main-thread show."""
+    if not _SHOW_EVENT:
+        return
+
+    def wait() -> None:
+        k32 = ctypes.windll.kernel32
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.ResetEvent.argtypes = [ctypes.c_void_p]
+        while True:
+            k32.WaitForSingleObject(ctypes.c_void_p(_SHOW_EVENT), 0xFFFFFFFF)
+            k32.ResetEvent(ctypes.c_void_p(_SHOW_EVENT))
+            app._post(app._user_show)
+
+    threading.Thread(target=wait, daemon=True).start()
 
 
 def _startup_entries() -> dict[str, str]:
@@ -1416,11 +1493,18 @@ class TeamReportWindow:
 
         self._seq += 1
         seq = self._seq
+        # Read the basis here, on the main thread: StringVar.get() talks to
+        # the Tcl interpreter, which must only ever be touched from the
+        # thread running mainloop. Reading it inside _work was a cross-thread
+        # Tcl call — it kills the worker outright on non-threaded Tcl builds
+        # (leaving the report stuck on "Counting…") and deadlocks whenever
+        # the main thread is simultaneously blocked on something else.
+        basis = self.v_basis.get()
         self._set_status("Counting…")
-        threading.Thread(target=self._work, args=(seq, start, end),
+        threading.Thread(target=self._work, args=(seq, start, end, basis),
                          daemon=True).start()
 
-    def _work(self, seq: int, start: date, end: date) -> None:
+    def _work(self, seq: int, start: date, end: date, basis: str) -> None:
         # basis names a JQL FIELD, not a value, so it can't be quoted the
         # way jql_quote() quotes a string literal — the only defence for a
         # bare identifier is restricting it to the fixed set the UI itself
@@ -1429,42 +1513,70 @@ class TeamReportWindow:
         # unvalidated field name interpolated straight into JQL is an
         # injection point exactly like an unvalidated column name in SQL.
         allowed_bases = {v for _label, v in REPORT_BASES}
-        basis = self.v_basis.get()
         if basis not in allowed_bases:
             basis = "resolved"
         pk = self.app.config.get("projectKey", "")
         # `end` is inclusive, so compare against the following midnight.
         window = (f'{basis} >= "{start}" AND {basis} < "{end + timedelta(days=1)}"')
-        results: list[tuple[str, Optional[int]]] = []
-        for person in self.people:
-            if self._closed or seq != self._seq:
-                return
-            if not (person.get("accountId") or person.get("name")):
-                results.append((person.get("name", ""), None))
-                continue
-            # accountId is opaque and unambiguous; the display name is only a
-            # fallback, and must be quoted like any other user-supplied text.
-            who = jql_quote(person["accountId"] or person["name"])
-            jql = (f'project = {pk} AND statusCategory = Done '
-                   f'AND {window} AND assignee = {who}')
+        base_jql = f'project = {pk} AND statusCategory = Done AND {window}'
+
+        # Counts run four-wide rather than one HTTP round-trip per person:
+        # on a ten-person desk the sequential loop spent most of a report's
+        # life waiting on network round-trips that don't depend on each
+        # other. Each worker thread gets its OWN session — sharing a single
+        # requests.Session across threads races its cookie jar — kept alive
+        # per thread so connections aren't re-handshaked for every count.
+        local = threading.local()
+
+        def session_for() -> requests.Session:
+            s = getattr(local, "session", None)
+            if s is None:
+                s = requests.Session()
+                s.auth = HTTPBasicAuth(self.app.config.get("email", ""),
+                                       self.app.config.get("token", ""))
+                s.headers["Accept"] = "application/json"
+                local.session = s
+            return s
+
+        def count(jql: str) -> Optional[int]:
             try:
-                count, _rejected = self.app._count_issues(jql)
+                n, _rejected = self.app._count_issues(jql,
+                                                      session=session_for())
+                return n
             except Exception:
-                count = None
-            results.append((person["name"], count))
-        total = sum(c for _n, c in results if c is not None)
+                return None          # one failed count blanks one row
+
+        def person_count(person: dict) -> Optional[int]:
+            if not (person.get("accountId") or person.get("name")):
+                return None
+            # accountId is opaque and unambiguous; the display name is only
+            # a fallback, and must be quoted like any other user-supplied text.
+            who = jql_quote(person["accountId"] or person["name"])
+            return count(f'{base_jql} AND assignee = {who}')
 
         # How much of the completed work this ranking actually accounts for.
         # A desk that resolves tickets without assigning them can leave most
         # of its output invisible here, and a ranking presented as though it
-        # were the whole picture would be quietly misleading.
-        everything = f'project = {pk} AND statusCategory = Done AND {window}'
-        try:
-            completed, _r = self.app._count_issues(everything)
-            unassigned, _r = self.app._count_issues(
-                everything + " AND assignee IS EMPTY")
-        except Exception:
-            completed = unassigned = None
+        # were the whole picture would be quietly misleading. The two totals
+        # ride the same pool as the per-person counts.
+        everything = base_jql
+        workers = min(4, max(1, len(self.people) + 2))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs       = [pool.submit(person_count, p) for p in self.people]
+            fut_done   = pool.submit(count, everything)
+            fut_unasg  = pool.submit(count,
+                                     everything + " AND assignee IS EMPTY")
+            counts: list[Optional[int]] = []
+            for f in futs:
+                if self._closed or seq != self._seq:
+                    return          # superseded mid-report; let the pool drain
+                counts.append(f.result())
+            completed  = fut_done.result()
+            unassigned = fut_unasg.result()
+
+        results = [(p.get("name", ""), c)
+                   for p, c in zip(self.people, counts)]
+        total = sum(c for _n, c in results if c is not None)
         self.app._post(
             lambda: self._done(seq, results, total, completed, unassigned))
 
@@ -1625,25 +1737,19 @@ class _PeoplePicker:
         sb.pack(side="right", fill="y")
 
         self.vars: list[tuple[tk.BooleanVar, dict]] = []
-        people, already_chosen = self._merge(current, self._discover())
+        self._body = body
+        self._wrap = wrap
+        self._scroll_cmd = lambda e: canvas.yview_scroll(
+            -1 * (e.delta // 120), "units")
 
-        for person in people:
-            var = tk.BooleanVar(value=already_chosen(person))
-            cb = tk.Checkbutton(body, text=person["name"], variable=var,
-                                font=_font(9), fg=_C["fg"], bg=BG,
-                                selectcolor=_C["input"], activebackground=_C["chip"],
-                                activeforeground=_C["fg_bright"],
-                                highlightthickness=0, bd=0, anchor="w")
-            cb.pack(fill="x", pady=1)
-            cb.bind("<Enter>", lambda _e, w=cb: w.config(bg=_C["chip"]))
-            cb.bind("<Leave>", lambda _e, w=cb: w.config(bg=BG))
-            self.vars.append((var, person))
-        scroll = lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units")
-        _bind_wheel(wrap, scroll)
-
-        if not self.vars:
-            tk.Label(body, text="No assignable users came back from Jira.",
-                     font=_font(9), fg=_C["fg_dim"], bg=BG).pack(anchor="w")
+        # Show whoever is already chosen straight away; the full assignable
+        # list fills in when discovery lands. The lookup used to run inline
+        # here, blocking the whole UI for up to the request timeout.
+        self._populate(list(current), self._already_chosen_pred(current))
+        self._pending_discovery: Optional[tuple] = None
+        threading.Thread(target=self._discover_bg, args=(list(current),),
+                         daemon=True).start()
+        self._poll_discovery()
 
         foot = tk.Frame(self.win, bg=BG)
         foot.pack(fill="x", padx=16, pady=12)
@@ -1656,6 +1762,74 @@ class _PeoplePicker:
 
         self.win.grab_set()
         parent.wait_window(self.win)
+
+    @staticmethod
+    def _already_chosen_pred(current: list[dict]):
+        """Predicate saying whether a person is already ticked, before any
+        Jira lookup has come back."""
+        chosen_ids = {p["accountId"] for p in current if p.get("accountId")}
+        chosen_names = {p["name"].strip().lower() for p in current
+                        if p.get("name")}
+
+        def pred(person: dict) -> bool:
+            return (person.get("accountId") in chosen_ids
+                    or person.get("name", "").strip().lower() in chosen_names)
+        return pred
+
+    def _populate(self, people: list[dict], already_chosen) -> None:
+        """(Re)build the checkbox list, keeping whatever was ticked."""
+        BG = _C["bg"]
+        # Preserve ticks across a repopulation so discovery arriving late
+        # doesn't reset choices made in the meantime.
+        prev: dict[str, bool] = {}
+        for var, person in self.vars:
+            key = (person.get("accountId")
+                   or "name:" + person["name"].strip().lower())
+            prev[key] = bool(var.get())
+        for child in self._body.winfo_children():
+            child.destroy()
+        self.vars = []
+        for person in people:
+            key = (person.get("accountId")
+                   or "name:" + person["name"].strip().lower())
+            value = prev[key] if key in prev else already_chosen(person)
+            var = tk.BooleanVar(value=value)
+            cb = tk.Checkbutton(self._body, text=person["name"], variable=var,
+                                font=_font(9), fg=_C["fg"], bg=BG,
+                                selectcolor=_C["input"],
+                                activebackground=_C["chip"],
+                                activeforeground=_C["fg_bright"],
+                                highlightthickness=0, bd=0, anchor="w")
+            cb.pack(fill="x", pady=1)
+            cb.bind("<Enter>", lambda _e, w=cb: w.config(bg=_C["chip"]))
+            cb.bind("<Leave>", lambda _e, w=cb: w.config(bg=BG))
+            self.vars.append((var, person))
+        if not self.vars:
+            tk.Label(self._body, text="Looking up assignable users…",
+                     font=_font(9), fg=_C["fg_dim"], bg=BG).pack(anchor="w")
+        # New checkboxes need their own wheel bindings — _bind_wheel only
+        # reaches children that exist when it runs.
+        _bind_wheel(self._wrap, self._scroll_cmd)
+
+    def _discover_bg(self, current: list[dict]) -> None:
+        """Discovery off the main thread. The result is handed over through
+        a plain attribute — an atomic rebinding under the GIL — that the
+        main-thread poller picks up; the worker must not touch Tk itself."""
+        try:
+            self._pending_discovery = self._merge(current, self._discover())
+        except Exception:
+            pass              # picker stays on the already-chosen-only list
+
+    def _poll_discovery(self) -> None:
+        pending = self._pending_discovery
+        if pending is not None:
+            self._pending_discovery = None
+            self._populate(pending[0], pending[1])
+            return
+        try:
+            self.win.after(120, self._poll_discovery)
+        except tk.TclError:
+            pass              # dialog closed before discovery landed
 
     @staticmethod
     def _merge(current: list[dict], discovered: list[dict]):
@@ -1693,19 +1867,33 @@ class _PeoplePicker:
         return people, already_chosen
 
     def _discover(self) -> list[dict]:
-        """Users Jira says can be assigned work in this project."""
+        """Users Jira says can be assigned work in this project.
+
+        Paginated: a single 200-user page silently hid everyone past it on
+        orgs larger than that, leaving them untickable in this dialog."""
         pk = self.app.config.get("projectKey", "")
+        out: list[dict] = []
+        start = 0
         try:
-            r = self.app._session.get(
-                self.app._jira_url("/rest/api/3/user/assignable/search"),
-                params={"project": pk, "maxResults": 200}, timeout=15)
-            if not r.ok:
-                return []
-            return [{"name": u.get("displayName", ""),
-                     "accountId": u.get("accountId", "")}
-                    for u in r.json() if u.get("displayName")]
+            while True:
+                r = self.app._session.get(
+                    self.app._jira_url("/rest/api/3/user/assignable/search"),
+                    params={"project": pk, "maxResults": 200,
+                            "startAt": start}, timeout=15)
+                if not r.ok:
+                    break
+                page = r.json()
+                if not isinstance(page, list):
+                    break
+                out.extend({"name": u.get("displayName", ""),
+                            "accountId": u.get("accountId", "")}
+                           for u in page if u.get("displayName"))
+                if len(page) < 200 or len(out) >= 1000:
+                    break
+                start += len(page)
         except Exception:
-            return []
+            pass          # partial results beat none — what came back is usable
+        return out
 
     def _save(self) -> None:
         self.result = [person for var, person in self.vars if var.get()]
@@ -1738,13 +1926,32 @@ class NewTicketTooltip:
                  bg=_C["input"], pady=4).pack(fill="x")
         tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x")
 
-        for issue in issues[:15]:
-            key     = issue.get("issueKey") or issue.get("key", "")
-            summary = (issue.get("fields") or {}).get("summary", "(no summary)")
-            short   = summary[:55] + "…" if len(summary) > 55 else summary
-            url     = f"https://{domain}/browse/{key}"
-            sugg    = (suggestions or {}).get(key)
-            self._make_issue_row(url, key, short, sugg)
+        groups, multi = self._group_by_queue(issues)
+        shown = 0
+        for qname, group in groups:
+            if multi and qname:
+                tk.Label(self.win, text=f"  {qname}  ",
+                         font=_font(7, "bold"), fg=_C["info"],
+                         bg=_C["input"], anchor="w"
+                         ).pack(fill="x", pady=(4, 0))
+            for issue in group:
+                if shown >= 15:
+                    break
+                key     = issue.get("issueKey") or issue.get("key", "")
+                summary = ((issue.get("fields") or {})
+                           .get("summary", "(no summary)"))
+                short   = summary[:55] + "…" if len(summary) > 55 else summary
+                url     = f"https://{domain}/browse/{key}"
+                sugg    = (suggestions or {}).get(key)
+                self._make_issue_row(url, key, short, sugg)
+                shown += 1
+        # Group lengths already account for cross-queue duplicates being
+        # dropped, so they sum to exactly the number of rows there are to show.
+        total = sum(len(group) for _name, group in groups)
+        if shown < total:
+            tk.Label(self.win, text=f"  …and {total - shown} more  ",
+                     font=_font(7), fg=_C["fg_dim"],
+                     bg=_C["input"], anchor="w").pack(fill="x")
 
         if on_mark_seen:
             tk.Frame(self.win, bg=_C["fg_dim"], height=1).pack(fill="x", pady=(4, 0))
@@ -1754,6 +1961,33 @@ class NewTicketTooltip:
                       relief="flat", pady=4, cursor="hand2",
                       activebackground=_C["chip"], activeforeground=_C["ok"]
                       ).pack(fill="x", padx=8, pady=(0, 4))
+
+    @staticmethod
+    def _group_by_queue(issues: list[dict],
+                        ) -> tuple[list[tuple[str, list[dict]]], bool]:
+        """Group issues by their source queue, one entry per ticket.
+
+        Returns (groups, multiple_queues). Groups arrive already sorted by
+        queue (see _tooltip_show); this folds them into contiguous lists so
+        the popup can head each queue's block. A ticket whose JQL matches
+        two alert queues arrives twice — it is listed once, under the first
+        queue that contains it. Keyless issues can't be deduped reliably
+        and pass through untouched.
+        """
+        seen_keys: set[str] = set()
+        groups: list[tuple[str, list[dict]]] = []
+        for issue in issues:
+            k = issue.get("issueKey") or issue.get("key", "")
+            if k and k in seen_keys:
+                continue
+            if k:
+                seen_keys.add(k)
+            qname = issue.get("_queue", "")
+            if groups and groups[-1][0] == qname:
+                groups[-1][1].append(issue)
+            else:
+                groups.append((qname, [issue]))
+        return groups, sum(1 for name, _g in groups if name) > 1
 
     def _make_issue_row(self, url: str, key: str, summary: str,
                         sugg: Optional[dict] = None) -> None:
@@ -1921,6 +2155,7 @@ class JiraOverlay:
         self._session.auth = HTTPBasicAuth(config.get("email", ""),
                                            config.get("token", ""))
         self._session.headers["Accept"] = "application/json"
+        self._aux_sessions: list[requests.Session] = []   # per pull-slot; see _worker_session
         self._last_full_fetch: float = 0.0   # epoch when stats were last fetched
         self._approx_count_ok = True   # server supports /search/approximate-count
         self._alert_queues_missing: list[str] = []   # configured but gone
@@ -2426,13 +2661,60 @@ class JiraOverlay:
         self._user_hide()
 
     @staticmethod
-    def _log_error(detail: str) -> None:
+    def _compose_alert(truly_new, summaries, queues_by_key, suggestions):
+        """Title/body for a new-ticket toast.
+
+        Pure on purpose: both the one-ticket and many-ticket shapes are
+        unit-tested without firing Windows' notification pipeline.
+        """
+        if len(truly_new) == 1:
+            key     = next(iter(truly_new))
+            summary = summaries.get(key, "")
+            src     = queues_by_key.get(key, "")
+            title   = f"Jira — {key}"
+            body    = (summary[:120] if summary else
+                       f"New ticket in {src}" if src else
+                       "New ticket in alert queue")
+            # A summary rarely says where the desk wants the ticket to go —
+            # the queue it landed in does. One extra short line, same as the
+            # multi-ticket path below already shows.
+            if summary and src:
+                body += f"\nIn {src}"
+            s = (suggestions or {}).get(key) or {}
+            if s.get("label"):
+                body += f"\n{'⚠' if s.get('review') else '💡'} {s['label']}"
+            return title, body
+        title = f"Jira — {len(truly_new)} new tickets"
+        lines = []
+        for key in list(truly_new)[:3]:
+            s_sum = summaries.get(key, "")
+            src   = queues_by_key.get(key, "")
+            line  = (f"{key}: {s_sum[:60]}" if s_sum else
+                     f"{key} · {src}" if src else key)
+            sg    = (suggestions or {}).get(key) or {}
+            if sg.get("label"):
+                line += f" {'⚠' if sg.get('review') else '💡'} {sg['label']}"
+            lines.append(line)
+        if len(truly_new) > 3:
+            lines.append(f"…and {len(truly_new) - 3} more")
+        return title, "\n".join(lines)
+
+    _ERROR_LOG_MAX = 5 * 1024 * 1024   # rotate jira_overlay_error.log past this
+
+    @classmethod
+    def _log_error(cls, detail: str) -> None:
         """Record a non-fatal failure. pythonw has no console, so without
         this the user just sees a feature quietly do nothing."""
         try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "jira_overlay_error.log"),
-                      "a", encoding="utf-8") as f:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "jira_overlay_error.log")
+            try:
+                if os.path.getsize(path) > cls._ERROR_LOG_MAX:
+                    # One rotating generation, like the learner's own log.
+                    os.replace(path, path + ".old")
+            except OSError:
+                pass
+            with open(path, "a", encoding="utf-8") as f:
                 f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{detail}\n\n")
         except OSError:
             pass
@@ -2557,12 +2839,12 @@ class JiraOverlay:
         _round_corners(win)
 
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        tk.Label(win, text="Which queue should trigger alerts?",
+        tk.Label(win, text="Which queues should trigger alerts?",
                  font=_font(11, "bold"),
                  fg=_C["fg_bright"], bg=_C["bg_dark"]).pack(pady=(18, 4))
         tk.Label(win,
                  text="The overlay will appear and notifications will fire\n"
-                      "when new tickets arrive in this queue.",
+                      "when new tickets arrive in any of these queues.",
                  font=_font(8), fg=_C["fg_dim"],
                  bg=_C["bg_dark"], justify="center").pack(pady=(0, 10))
 
@@ -2579,24 +2861,45 @@ class JiraOverlay:
         sb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        def pick(name: str) -> None:
-            self.config["alertQueue"]  = name
-            self.config["alertQueues"] = [name]
+        # Tick several, not just one: the very queues worth alerting on are
+        # rarely the first-run default, and sending people through Settings
+        # to add the second one lost most of them forever.
+        q_vars: dict[str, tk.BooleanVar] = {}
+        for q in self.queues:
+            var = tk.BooleanVar(value=False)
+            q_vars[q["name"]] = var
+            cb = tk.Checkbutton(sf, text=q["name"], variable=var,
+                                bg=_C["bg_dark"], fg=_C["fg_bright"],
+                                selectcolor=_C["input"],
+                                activebackground=_C["chip"],
+                                activeforeground=_C["fg_bright"],
+                                font=_font(10), anchor="w",
+                                highlightthickness=0, bd=0)
+            cb.pack(fill="x", pady=1, padx=4)
+
+        def save() -> None:
+            chosen = [n for n, v in q_vars.items() if v.get()]
+            self.config["alertQueue"]  = chosen[0] if chosen else ""
+            self.config["alertQueues"] = chosen
             save_config(self.config)
             win.destroy()
 
-        for q in self.queues:
-            tk.Button(sf, text=q["name"], command=lambda n=q["name"]: pick(n),
-                      bg=_C["input"], fg=_C["fg_bright"], font=_font(10),
-                      relief="flat", padx=12, pady=7, cursor="hand2",
-                      activebackground=_C["accent"], activeforeground="white"
-                      ).pack(fill="x", pady=3, padx=4)
-        tk.Button(sf, text="Don't alert me — just show the counts",
+        btns = tk.Frame(sf, bg=_C["bg_dark"])
+        btns.pack(fill="x", pady=(8, 3), padx=4)
+        tk.Button(btns, text="✓  Save",
+                  command=save,
+                  bg=_C["accent"], fg="white", font=_font(9, "bold"),
+                  relief="flat", padx=12, pady=6, cursor="hand2", bd=0,
+                  activebackground=_C["accent_hi"],
+                  activeforeground="white").pack(side="left",
+                                                 fill="x", expand=True,
+                                                 padx=(0, 4))
+        tk.Button(btns, text="Don't alert me — just show the counts",
                   command=win.destroy,
-                  bg=_C["bg_dark"], fg=_C["fg_dim"], font=_font(9),
+                  bg=_C["input"], fg=_C["fg_dim"], font=_font(9),
                   relief="flat", padx=12, pady=6, cursor="hand2",
                   activebackground=_C["chip"], activeforeground=_C["fg_bright"]
-                  ).pack(fill="x", pady=(8, 3), padx=4)
+                  ).pack(side="left", fill="x", expand=True)
 
         _bind_wheel(sf, pick_scroll)      # the buttons, not just the canvas
         win.update_idletasks()
@@ -2690,8 +2993,11 @@ class JiraOverlay:
         elif self._conn_error:
             delay = _LIVE_POLL_MS         # retry at live rate during reconnect
         elif self._error_count > 0:
-            delay = min(_LIVE_POLL_MS * (2 ** min(self._error_count, 6)),
-                        5 * 60 * 1_000)
+            # ±15% jitter: after a shared server recovers from an outage, a
+            # fleet of overlays all backing off on the same schedule would
+            # otherwise retry in lockstep and knock it straight back over.
+            delay = int(min(_LIVE_POLL_MS * (2 ** min(self._error_count, 6)),
+                            5 * 60 * 1_000) * random.uniform(0.85, 1.15))
         else:
             delay = _LIVE_POLL_MS         # always poll counts every 5 s
         self._refresh_job = self.root.after(delay, self._fetch)
@@ -2794,27 +3100,67 @@ class JiraOverlay:
         # includeCount is cached by JSM and can report a stale non-zero for an
         # empty queue, so we treat the live issue list as authoritative and
         # reconcile each queue's displayed count against what we actually pull.
+        # Paginated up to 200 per queue: with a single page of 50, a ticket
+        # landing deeper than that in a busy queue was never in the seen-set's
+        # input at all, so it sat unnotified until the queue drained below 50.
         _ISSUE_LIMIT = 50
+        _ISSUE_PAGES = 4
         issues: list[dict] = []
         complete = True
         reconciled: dict[str, int] = {}
+
+        def pull(q: dict, slot: int):
+            """One queue's pages over its own dedicated session."""
+            sess = self._worker_session(slot)
+            vals: list[dict] = []
+            for start in range(0, _ISSUE_LIMIT * _ISSUE_PAGES, _ISSUE_LIMIT):
+                ir = sess.get(
+                    self._jira_url(
+                        f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{q['id']}/issue"),
+                    params={"start": start, "limit": _ISSUE_LIMIT}, timeout=10)
+                if not ir.ok:
+                    return vals, False, False
+                page = ir.json().get("values") or []
+                vals.extend(page)
+                if len(page) < _ISSUE_LIMIT:
+                    return vals, True, True     # short page: whole queue seen
+            return vals, True, False            # ended on the page cap
+
+        busy = [q for q in alert_objs if q.get("issueCount", 0) > 0]
         for q in alert_objs:
-            cached = q.get("issueCount", 0)
-            if cached <= 0:
-                reconciled[q["name"]] = 0
-                continue
-            ir = self._session.get(
-                self._jira_url(
-                    f"/rest/servicedeskapi/servicedesk/{sd_id}/queue/{q['id']}/issue"),
-                params={"start": 0, "limit": _ISSUE_LIMIT}, timeout=10)
-            if ir.ok:
-                vals = ir.json().get("values") or []
-                issues.extend(vals)
-                # Exact when the whole queue fits in one page; else trust cache
-                reconciled[q["name"]] = len(vals) if cached <= _ISSUE_LIMIT else cached
-            else:
-                complete = False
-                reconciled[q["name"]] = cached   # fall back to cached on failure
+            if q.get("issueCount", 0) <= 0:
+                reconciled[q["name"]] = 0       # includeCount says empty
+        if busy:
+            # Queues pull four-wide rather than one after another: with
+            # several alert queues the sequential loop spent most of the
+            # 5-second budget waiting on round-trips that don't depend on
+            # each other. Each submitted task holds its own session slot,
+            # so no Session is ever shared across threads.
+            with ThreadPoolExecutor(max_workers=min(4, len(busy))) as pool:
+                futs = [(q, pool.submit(pull, q, i))
+                        for i, q in enumerate(busy)]
+                for q, fut in futs:
+                    try:
+                        vals, ok_all, enumerated = fut.result()
+                    except Exception:
+                        vals, ok_all, enumerated = [], False, False
+                    if ok_all:
+                        # Tag each issue with its source queue so
+                        # notifications can say where a ticket landed.
+                        for v in vals:
+                            v["_queue"] = q["name"]
+                        issues.extend(vals)
+                        # The live list is authoritative once the queue has
+                        # been fully enumerated (a short page ended it);
+                        # past the page cap trust the cached includeCount —
+                        # zeroing a busy queue off one odd reading would
+                        # trip the seen-set grace logic into re-notifying
+                        # everything.
+                        reconciled[q["name"]] = (len(vals) if enumerated
+                                                 else q.get("issueCount", 0))
+                    else:
+                        complete = False
+                        reconciled[q["name"]] = q.get("issueCount", 0)
         if complete:
             self.new_issues = issues
         # On partial failure keep the previous snapshot — replacing it would
@@ -2833,8 +3179,34 @@ class JiraOverlay:
         self._conn_error  = False
         self._error_count = 0
 
-    def _count_issues(self, jql: str) -> tuple[Optional[int], bool]:
+    def _worker_session(self, slot: int) -> requests.Session:
+        """A dedicated session for concurrent-pull slot `slot`.
+
+        Created on first use and kept for the life of the app: per-call
+        sessions would pay a fresh TLS handshake every 5-second poll, while
+        one shared Session across threads races its own cookie jar. Each
+        submitted task gets its own slot index, so two live workers never
+        hold the same session.
+        """
+        cache = getattr(self, "_aux_sessions", None)
+        if cache is None:               # direct instantiation (tests)
+            cache = self._aux_sessions = []
+        while len(cache) <= slot:
+            s = requests.Session()
+            s.auth = HTTPBasicAuth(self.config.get("email", ""),
+                                   self.config.get("token", ""))
+            s.headers["Accept"] = "application/json"
+            cache.append(s)
+        return cache[slot]
+
+    def _count_issues(self, jql: str,
+                      session: Optional[requests.Session] = None
+                      ) -> tuple[Optional[int], bool]:
         """Count issues matching `jql`.
+
+        `session` lets a caller bring its own connection pool — the team
+        report counts several people concurrently, and a shared Session
+        across threads races its own cookie jar.
 
         Returns (count, jql_rejected). `count` is None when the query didn't
         succeed; `jql_rejected` is True only when Jira actively rejected the
@@ -2846,8 +3218,9 @@ class JiraOverlay:
         old path pulled up to 200 whole issues purely to call len() on them,
         which also silently capped the figure at '200+'.
         """
+        sess = session or self._session
         if self._approx_count_ok:
-            r = self._session.post(
+            r = sess.post(
                 self._jira_url("/rest/api/3/search/approximate-count"),
                 json={"jql": jql}, timeout=10)
             if r.ok:
@@ -2863,16 +3236,39 @@ class JiraOverlay:
             # from here on.
             self._approx_count_ok = False
 
-        r = self._session.post(
-            self._jira_url("/rest/api/3/search/jql"),
-            json={"jql": jql, "maxResults": 200, "fields": ["status"]},
-            timeout=10)
-        if not r.ok:
-            return None, r.status_code == 400
-        try:
-            return len(r.json().get("issues") or []), False
-        except (ValueError, AttributeError):
-            return None, False
+        # Paginate via nextPageToken. A single 200-issue page silently
+        # capped every count at "200+" on older Jira without the
+        # approximate-count endpoint — which is exactly where the team
+        # report's totals and coverage figures were most wrong.
+        total = 0
+        token = None
+        for _page in range(100):          # hard stop: 100 pages = 20k issues
+            body: dict = {"jql": jql, "maxResults": 200,
+                          "fields": ["status"]}
+            if token:
+                body["nextPageToken"] = token
+            r = sess.post(
+                self._jira_url("/rest/api/3/search/jql"),
+                json=body, timeout=10)
+            if not r.ok:
+                return None, r.status_code == 400
+            try:
+                data = r.json()
+            except ValueError:
+                return None, False
+            if not isinstance(data, dict):
+                return None, False
+            page = data.get("issues")
+            if isinstance(page, list):
+                total += len(page)
+            token = data.get("nextPageToken")
+            # Stop on an explicit isLast, an empty page, or no next token —
+            # not on isLast merely being ABSENT: a server that paginates
+            # with tokens but omits the flag would otherwise end the count
+            # after one page.
+            if not token or data.get("isLast") is True or not page:
+                break
+        return total, False
 
     def _fetch_completion_stats(self, cfg: dict) -> None:
         """Fetch completed-today count and optional SLA compliance."""
@@ -2950,9 +3346,13 @@ class JiraOverlay:
         (e.g. a local triage learner). Display-only — the overlay never
         acts on them. Ignored if the file is missing or stale. Re-parsed
         only when the file actually changes (cached by mtime)."""
-        path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            self.config.get("suggestionsFile", "triage_suggestions.json"))
+        # Basename only: the file always lives next to this script. A
+        # hand-edited config pointing at an absolute path or a ..\ traversal
+        # would otherwise have the overlay read arbitrary JSON files and
+        # display their contents as suggestion labels.
+        name = os.path.basename(self.config.get("suggestionsFile", "")
+                                or "triage_suggestions.json")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
         try:
             mtime = os.path.getmtime(path)
             if time.time() - mtime > 900:
@@ -3093,27 +3493,13 @@ class JiraOverlay:
                 )
                 for i in self.new_issues
             }
-            if len(truly_new) == 1:
-                key     = next(iter(truly_new))
-                summary = summaries.get(key, "")
-                title   = f"Jira — {key}"
-                body    = summary[:120] if summary else "New ticket in alert queue"
-                s       = self._suggestions.get(key, {})
-                if s.get("label"):
-                    body += f"\n{'⚠' if s.get('review') else '💡'} {s['label']}"
-            else:
-                title   = f"Jira — {len(truly_new)} new tickets"
-                lines   = []
-                for key in list(truly_new)[:3]:
-                    s    = summaries.get(key, "")
-                    line = f"{key}: {s[:60]}" if s else key
-                    sg   = self._suggestions.get(key, {})
-                    if sg.get("label"):
-                        line += f" {'⚠' if sg.get('review') else '💡'} {sg['label']}"
-                    lines.append(line)
-                if len(truly_new) > 3:
-                    lines.append(f"…and {len(truly_new) - 3} more")
-                body = "\n".join(lines)
+            queues_by_key = {
+                (i.get("issueKey") or i.get("key", "")): i.get("_queue", "")
+                for i in self.new_issues
+            }
+            title, body = self._compose_alert(truly_new, summaries,
+                                              queues_by_key,
+                                              self._suggestions)
             if self.config.get("notificationsEnabled", True):
                 send_toast(title, body)
             if self.config.get("soundEnabled", True):
@@ -3880,6 +4266,15 @@ class JiraOverlay:
         finally:
             if self._tray:
                 self._tray.stop()
+            try:
+                self._session.close()   # release the keep-alive connections
+            except Exception:
+                pass
+            for s in getattr(self, "_aux_sessions", []):
+                try:
+                    s.close()           # concurrent-pull slots; see _worker_session
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -3888,14 +4283,20 @@ class JiraOverlay:
 
 def main() -> None:
     if not acquire_single_instance():
-        return          # another overlay already has the tray icon
+        # Another overlay already runs — don't just exit silently; ask it
+        # to show itself, so launching again reads as "bring it up".
+        request_running_overlay_show()
+        return
+    _create_show_event()
     config = load_config()
     if not config:
         setup  = SetupWindow()
         config = setup.result
         if not config:
             return
-    JiraOverlay(config).run()
+    app = JiraOverlay(config)
+    _start_show_waiter(app)
+    app.run()
 
 
 def _report_fatal(detail: str) -> None:
@@ -3905,13 +4306,7 @@ def _report_fatal(detail: str) -> None:
     otherwise kills the process with nothing on screen and nothing on disk —
     the app simply appears not to work.
     """
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "jira_overlay_error.log"),
-                  "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\n{detail}\n\n")
-    except OSError:
-        pass
+    JiraOverlay._log_error(detail)
     try:
         root = tk.Tk()
         root.withdraw()

@@ -64,7 +64,10 @@ def build() -> None:
         return
     print(f"project {w.project}: handoffs={w.dests or 'none'} "
           f"resolved={sorted(w.resolved)} moves={w.move_targets or 'none'}")
-    cutoff = f"{datetime.now() - timedelta(days=tl.BACKFILL_DAYS):%Y-%m-%d}"
+    # Same clock as the learner's own windows: Jira evaluates datetime
+    # literals against the account's profile timezone, so a workstation-
+    # local cutoff would silently shift what "last 90 days" means.
+    cutoff = f"{w._jira_now() - timedelta(days=tl.BACKFILL_DAYS):%Y-%m-%d}"
     records: list[dict] = []
     seen: set[str] = set()
 
@@ -87,17 +90,26 @@ def build() -> None:
            f'AFTER -{tl.BACKFILL_DAYS}d ORDER BY updated DESC')
     # "status CHANGED TO ()" is not valid JQL; a project where everything is
     # resolved in place simply has nothing for this pass to find.
+    skipped = 0
     for issue in (w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP)
                   if w.dests else []):
-        det = w._issue_details(issue)
-        routed, _ = w._transitions(det["key"])
-        req = det.get("requestType", "")
-        for tr in routed:
-            if tr["id"] in seen or tr["when"] < cutoff:
-                continue
-            seen.add(tr["id"])
-            records.append(rec_from(det, tr["dest"], tr["when"], req))
-    print(f"routings: {len(records)}")
+        # One unusable issue must not abort a pass that runs to thousands
+        # of calls — the same guard the learner's backfill carries.
+        try:
+            det = w._issue_details(issue)
+            routed, _ = w._transitions(det["key"])
+            req = det.get("requestType", "")
+            for tr in routed:
+                if tr["id"] in seen or tr["when"] < cutoff:
+                    continue
+                seen.add(tr["id"])
+                records.append(rec_from(det, tr["dest"], tr["when"], req))
+        except Exception:
+            skipped += 1
+    if skipped:
+        print(f"routings: {len(records)} ({skipped} unusable issue(s) skipped)")
+    else:
+        print(f"routings: {len(records)}")
 
     # 2. resolved inside the intake project, never handed off
     n0 = len(records)
@@ -105,16 +117,19 @@ def build() -> None:
     jql = (f'project = {w.project} AND status CHANGED TO ({resolved_list}) '
            f'AFTER -{tl.BACKFILL_DAYS}d ORDER BY updated DESC')
     for issue in w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP):
-        det = w._issue_details(issue)
-        routed, resolutions = w._transitions(det["key"])
-        if routed:
-            continue
-        req = det.get("requestType", "")
-        for tr in resolutions:
-            if tr["id"] in seen or tr["when"] < cutoff:
+        try:
+            det = w._issue_details(issue)
+            routed, resolutions = w._transitions(det["key"])
+            if routed:
                 continue
-            seen.add(tr["id"])
-            records.append(rec_from(det, w.resolved_label, tr["when"], req))
+            req = det.get("requestType", "")
+            for tr in resolutions:
+                if tr["id"] in seen or tr["when"] < cutoff:
+                    continue
+                seen.add(tr["id"])
+                records.append(rec_from(det, w.resolved_label, tr["when"], req))
+        except Exception:
+            skipped += 1
     print(f"resolved in place: {len(records) - n0}")
 
     # 3. moved out to another project
@@ -124,24 +139,35 @@ def build() -> None:
                f'ORDER BY created DESC')
         label = w.moved_label(target)
         for issue in w.jira.search(jql, w._FIELDS, cap=tl.BACKFILL_CAP):
-            det = w._issue_details(issue)
-            moves, orig_summary = w._project_moves(det["key"])
-            if not moves:
-                continue
-            if orig_summary:
-                det["summary"] = f"{orig_summary} — {det['summary']}"
-            for mv in moves:
-                if mv["id"] in seen or mv["when"] < cutoff:
+            try:
+                det = w._issue_details(issue)
+                moves, orig_summary = w._project_moves(det["key"])
+                if not moves:
                     continue
-                seen.add(mv["id"])
-                records.append(rec_from(det, label, mv["when"],
-                                        det.get("requestType", "")))
-    print(f"moved to another project: {len(records) - n0}")
+                if orig_summary:
+                    det["summary"] = f"{orig_summary} — {det['summary']}"
+                for mv in moves:
+                    if mv["id"] in seen or mv["when"] < cutoff:
+                        continue
+                    seen.add(mv["id"])
+                    records.append(rec_from(det, label, mv["when"],
+                                            det.get("requestType", "")))
+            except Exception:
+                skipped += 1
+    if skipped:
+        print(f"moved to another project: {len(records) - n0} "
+              f"({skipped} unusable issue(s) skipped overall)")
+    else:
+        print(f"moved to another project: {len(records) - n0}")
 
     records.sort(key=lambda r: r["when"])
-    with open(DATASET, "w", encoding="utf-8") as f:
+    # Atomic replace: a crash mid-write leaves the previous dataset intact
+    # rather than a truncated file every later command trips over.
+    tmp = DATASET + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, DATASET)
     print(f"dataset: {len(records)} decisions -> {DATASET}")
 
 

@@ -28,8 +28,12 @@ LEARNER = os.path.join(DIR, "triage_learner.pyw")
 CONFIG  = os.path.join(DIR, "jira_config.json")
 
 # (import name, pip name)
+# tzdata ships the IANA timezone database as a pure-Python package -
+# Windows has no system copy of it, and without it zoneinfo can't resolve
+# any named zone (the triage learner needs one to build JQL windows in the
+# Jira account's own timezone).
 DEPENDENCIES = [("requests", "requests"), ("PIL", "Pillow"),
-                ("pystray", "pystray")]
+                ("pystray", "pystray"), ("tzdata", "tzdata")]
 
 MIN_PYTHON = (3, 9)
 STARTUP_REG   = r"Software\Microsoft\Windows\CurrentVersion\Run"

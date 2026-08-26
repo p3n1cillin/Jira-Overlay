@@ -227,6 +227,7 @@ watcher._last_full_fetch = 9e18
 watcher._alert_queues_missing = []
 watcher._post = lambda fn: None
 watcher._fetch_completion_stats = lambda c: None
+watcher._worker_session = lambda slot: watcher._session
 watcher._seen_newly_ids = set()
 watcher._missing_once = set()
 

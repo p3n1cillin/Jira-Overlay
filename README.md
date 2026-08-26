@@ -27,7 +27,7 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 | Feature | Detail |
 |---|---|
 | Live queue counts | Queue counts poll every **5 s** (always on). SLA & completed-today refresh every 1 min by default (configurable: 30 s → 5 min) |
-| Multiple alert queues | Tick as many queues as you like — counts are summed and any of them can trigger the overlay, even if hidden from display |
+| Multiple alert queues | Tick as many as you like — at first run or in Settings; counts are summed and any of them can trigger the overlay, even if hidden from display |
 | Per-ticket deduplication | Each ticket key only fires one notification, no matter how many refreshes it sits there |
 | Dismiss | The hide button dismisses the overlay until a **new** ticket arrives — it won't nag you about tickets you've already seen |
 | Snooze | 15 min / 30 min / 1 hour — accessible via the moon button |
@@ -38,7 +38,7 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 | System tray icon | Badge shows the count for whichever queue you choose; right-click for quick actions |
 | Always-visible mode | Optional dashboard mode that keeps the overlay on screen permanently |
 | Multi-monitor aware | Clamps position to whichever monitor it's on; detects if it's been moved off-screen |
-| Auto-installs dependencies | First run installs `requests`, `Pillow`, and `pystray` automatically |
+| Auto-installs dependencies | First run installs `requests`, `Pillow`, `pystray`, and `tzdata` automatically |
 | Windows startup | Optional — toggle in Settings |
 | Fully configurable | Every filter, threshold, SLA field name, and queue is configurable per-user |
 | Single instance | A second launch quietly exits instead of double-polling and double-notifying |
@@ -96,7 +96,7 @@ After `setup.bat` finishes, the app starts and walks you through the rest:
 
 2. **Service desk** — if your account has access to multiple service desks, a picker appears. Click the one you want to monitor.
 
-3. **Alert queue** — a list of all your queues appears. Click one to set your initial alert queue (the one that triggers popups and notifications). You can add more alert queues later in Settings.
+3. **Alert queues** — a checklist of all your queues appears. Tick every queue that should trigger popups and notifications (you can change these any time in Settings), or choose to run as a passive dashboard with no alerts.
 
 Everything is saved to `jira_config.json` next to the app — your token encrypted, never in plain text (see [Configuration file](#configuration-file)) — and the whole file is gitignored, never committed.
 

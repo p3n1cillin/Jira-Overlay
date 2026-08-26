@@ -64,6 +64,7 @@ import winreg
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -83,7 +84,8 @@ except ImportError as _exc:
             "Triage Learner — missing dependencies",
             f"{_exc}\n\nStart the overlay once and it will install what is "
             "needed, or install them by hand:\n\n"
-            f'    "{_sys.executable}" -m pip install requests Pillow pystray')
+            f'    "{_sys.executable}" -m pip install '
+            "requests Pillow pystray tzdata")
         _root.destroy()
     except Exception:
         pass
@@ -97,7 +99,7 @@ except ImportError as _exc:
 
 # Bump on a meaningful change — see jira_overlay.pyw for why this is a
 # plain constant rather than something derived from git or a build step.
-APP_VERSION  = "2026.08.24"
+APP_VERSION  = "2026.08.26"
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE  = os.path.join(_DIR, "jira_config.json")
 STATE_FILE   = os.path.join(_DIR, "triage_state.json")
@@ -138,6 +140,14 @@ MIN_DRIFT_SAMPLE = 30
 # Per slow cycle, how many departed tickets to re-fetch when looking for ones
 # that left intake by being MOVED to another project (see _learn_moved_out).
 MOVE_LOOKUPS_PER_CYCLE = 20
+
+# Jira evaluates bare datetime literals in JQL against the *account's*
+# profile timezone — not this machine's — and stamps changelog timestamps
+# in that zone too. Windows and cutoffs were built from workstation-local
+# time, so any mismatch (a different timezone, or DST handled differently)
+# silently shifted every learning window. The account's own zone is read
+# once and used wherever a wall-clock feeds a query or a comparison.
+LOG_ROTATE_BYTES = 20 * 1024 * 1024   # rotate triage_log.jsonl past this size
 
 # A route is allowed to call itself confident only when recent chronological
 # validation supports that claim. Sparse/dormant outcomes remain visible as
@@ -272,8 +282,14 @@ def as_label_map(value) -> dict:
 
 
 def _log_error(msg: str) -> None:
-    with open(ERROR_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
+    try:
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
+    except OSError:
+        pass   # an unwritable log must never take the app down — this runs
+               # from error paths (including _report_fatal), where raising
+               # would replace the real failure with a crash. The overlay's
+               # own _log_error guards the same way.
 
 
 def _has_association(ext: str) -> bool:
@@ -523,7 +539,11 @@ class Jira:
             page = json_objects(data.get("issues"))
             issues.extend(page)
             token = data.get("nextPageToken")
-            if not token or data.get("isLast", True) or not page:
+            # Stop on an explicit isLast, an empty page, or no next token —
+            # not on isLast merely being ABSENT: a server that paginates
+            # with tokens but omits the flag would otherwise end the search
+            # after one page.
+            if not token or data.get("isLast") is True or not page:
                 break
         return issues
 
@@ -1516,8 +1536,20 @@ class ShadowWatcher:
 
     def _log(self, record: dict) -> None:
         record["ts"] = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        try:
+            if os.path.getsize(LOG_FILE) > LOG_ROTATE_BYTES:
+                # One rotating generation: the live log becomes .old (any
+                # previous .old is overwritten). _live_metrics notices the
+                # shrink on its next read and restarts its offset from zero.
+                try:
+                    os.replace(LOG_FILE, LOG_FILE + ".old")
+                except OSError:
+                    pass
+        except OSError:
+            pass
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(line)
 
     @staticmethod
     def _history_record(det: dict, dest: str, when: str) -> dict:
@@ -1685,7 +1717,7 @@ class ShadowWatcher:
         if self.state.get("backfillDone"):
             return
         # train strictly off the last BACKFILL_DAYS of decisions
-        cutoff = f"{datetime.now() - timedelta(days=BACKFILL_DAYS):%Y-%m-%d}"
+        cutoff = f"{self._jira_now() - timedelta(days=BACKFILL_DAYS):%Y-%m-%d}"
         jql = (f'project = {self.project} AND status CHANGED TO '
                f'({", ".join(jql_quote(d) for d in self.dests)}) '
                f'AFTER -{BACKFILL_DAYS}d ORDER BY updated DESC')
@@ -1819,11 +1851,45 @@ class ShadowWatcher:
 
     # -- live cycle --------------------------------------------------------------
 
+    def _jira_tz(self):
+        """The Jira account's profile timezone, resolved once per process."""
+        tz = getattr(self, "_tz_cache", None)
+        if tz is None:
+            name = ""
+            try:
+                me = self.jira.get("/rest/api/3/myself")
+                if isinstance(me, dict):
+                    name = str(me.get("timeZone") or "")
+            except Exception:
+                name = ""
+            try:
+                tz = ZoneInfo(name) if name else None
+            except Exception:
+                tz = None          # zone id unknown on this machine
+            # Fall back to this machine's zone: a slightly wrong window is
+            # strictly better than crashing, and equals the old behaviour.
+            self._tz_cache = tz or datetime.now().astimezone().tzinfo
+        return self._tz_cache
+
+    def _jira_now(self) -> datetime:
+        """Current wall-clock in the Jira account's timezone — naive, so it
+        formats and string-compares exactly like the timestamps Jira's own
+        API returns."""
+        return datetime.now(self._jira_tz()).replace(tzinfo=None)
+
     def _window_jql_time(self) -> str:
+        now = self._jira_now()
         last = self.state.get("lastPollEpoch", 0)
-        start = max(datetime.now() - timedelta(days=7),
-                    datetime.fromtimestamp(last) - timedelta(seconds=OVERLAP_SECS)
-                    if last else datetime.now() - timedelta(hours=2))
+        if last:
+            # lastPollEpoch is absolute epoch seconds, so converting it in
+            # the account's zone reproduces the wall-clock the earlier
+            # window was written against, whatever zone that was.
+            prev = datetime.fromtimestamp(last, self._jira_tz())
+            start = max(now - timedelta(days=7),
+                        prev.replace(tzinfo=None)
+                        - timedelta(seconds=OVERLAP_SECS))
+        else:
+            start = now - timedelta(hours=2)
         return f'"{start:%Y/%m/%d %H:%M}"'
 
     def predict_intake(self) -> None:
@@ -1836,9 +1902,14 @@ class ShadowWatcher:
         changed = False
         skipped = 0
         intake_keys: set[str] = set()
+        # cap=500, not 100: a desk whose intake backlog exceeds one page
+        # left tickets beyond it permanently unpredicted — no suggestion
+        # until the backlog dropped, which is exactly when routing help
+        # matters most. search() paginates, so the larger cap just costs
+        # more pages on the rare big-backlog cycle.
         for issue in self.jira.search(
                 f'project = {self.project} AND resolution = Unresolved '
-                f'AND statusCategory = New', self._FIELDS, cap=100):
+                f'AND statusCategory = New', self._FIELDS, cap=500):
             key = issue.get("key", "")
             if key:
                 intake_keys.add(key)
@@ -1863,7 +1934,7 @@ class ShadowWatcher:
                                   "source": p["source"], "why": p.get("why", []),
                                   "requestType": req_type,
                                   "summary": det["summary"][:120],
-                                  "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
+                                  "at": f"{self._jira_now():%Y-%m-%d %H:%M}"}
                 changed = True
                 self._log({"event": "would_have_done", "key": key,
                            "summary": det["summary"],
@@ -1900,9 +1971,14 @@ class ShadowWatcher:
         # rather than issuing a query that fails every cycle.
         dest_list = ", ".join(jql_quote(d) for d in self.dests)
         skipped = 0
+        # cap=500, not 50: `since` spans everything since the last poll plus
+        # overlap — which after a weekend asleep or a long backoff is days of
+        # transitions. A 50-issue cap silently dropped everything past the
+        # first page, and because lastPollEpoch advances regardless, those
+        # decisions were lost permanently: never scored, never learned.
         for issue in (self.jira.search(
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
-                f'AFTER {since}', self._FIELDS, cap=50) if self.dests else []):
+                f'AFTER {since}', self._FIELDS, cap=500) if self.dests else []):
             # One bad issue must not stall learning for every ticket in this
             # cycle, or worse — since seenTransitions only saves once, at the
             # end, an uncaught exception here re-fetches and re-fails on the
@@ -1933,7 +2009,7 @@ class ShadowWatcher:
         resolved_list = ", ".join(jql_quote(s) for s in sorted(self.resolved))
         for issue in self.jira.search(
                 f'project = {self.project} AND status CHANGED TO '
-                f'({resolved_list}) AFTER {since}', self._FIELDS, cap=50):
+                f'({resolved_list}) AFTER {since}', self._FIELDS, cap=500):
             try:
                 det = self._issue_details(issue)
                 routed, resolutions = self._transitions(det["key"])
@@ -1969,7 +2045,7 @@ class ShadowWatcher:
 
         # housekeeping
         self.state["seenTransitions"] = list(seen)[-SEEN_CAP:]
-        cutoff = f"{datetime.now() - timedelta(days=30):%Y-%m-%d}"
+        cutoff = f"{self._jira_now() - timedelta(days=30):%Y-%m-%d}"
         self.state["predicted"] = {k: v for k, v in predicted.items()
                                    if v.get("at", "9999") >= cutoff}
         self.state["lastPollEpoch"] = datetime.now().timestamp()
@@ -2018,7 +2094,7 @@ class ShadowWatcher:
                 req_type = det.get("requestType", "")
                 toks = self._features_for(det, req_type)
                 when = (moves[0]["when"] if moves
-                        else f"{datetime.now():%Y-%m-%d %H:%M}")
+                        else f"{self._jira_now():%Y-%m-%d %H:%M}")
                 by = moves[0]["by"] if moves else ""
                 correct = self._resolve_prediction(
                     dict(det, key=old_key), label, {"by": by, "when": when},
@@ -2597,7 +2673,7 @@ class ShadowWatcher:
     def _write_suggestions(self, predicted: dict) -> None:
         """Publish current suggestions for the overlay to display.
         Suggestions only — nothing here ever touches Jira."""
-        cutoff = f"{datetime.now() - timedelta(days=7):%Y-%m-%d}"
+        cutoff = f"{self._jira_now() - timedelta(days=7):%Y-%m-%d}"
         out = {}
         for key, p in predicted.items():
             if p.get("dest") and p.get("at", "") >= cutoff:
@@ -2973,14 +3049,22 @@ class ShadowWatcher:
                     pred_txt = f" — I said **{p}** {mark}" if p else ""
                     actual = self.canonical_dest(rec.get("dest", "unknown"))
                     lines.append(
-                        f"- `{rec['key']}` **{actual}** by {rec.get('by', '?')}"
-                        f" (clones: {', '.join(rec.get('clones', [])) or 'none'})"
+                        f"- `{rec.get('key', '')}` **{actual}** by "
+                        f"{rec.get('by', '?')}"
+                        f" (clones: {', '.join(rec.get('clones', []) or []) or 'none'})"
                         f"{pred_txt}  \n  {rec.get('summary', '')[:90]}")
                     shown += 1
                 elif ev == "would_have_done" and rec.get("prediction"):
+                    # .get throughout: a record from an older schema (or a
+                    # hand-truncated line that still parses) can be missing
+                    # any of these; a KeyError here escaped the per-line
+                    # guard below and killed the whole report — and because
+                    # the log is append-only, the bad line stayed in the
+                    # tail forever, stopping every future report too.
                     lines.append(
-                        f"- `{rec['key']}` would have done: **{rec['plan']}**"
-                        f" ({rec['confidence']}% confident)  \n"
+                        f"- `{rec.get('key', '')}` would have done: "
+                        f"**{rec.get('plan', '')}**"
+                        f" ({rec.get('confidence', 0)}% confident)  \n"
                         f"  {rec.get('summary', '')[:90]}")
                     shown += 1
         except FileNotFoundError:
@@ -3033,25 +3117,32 @@ class ShadowWatcher:
         except Exception:
             _log_error("backfill failed:\n" + traceback.format_exc())
         last_slow = 0.0
-        while not self.stop.is_set():
-            # fast: keep suggestions fresh for tickets currently at intake
+        try:
+            while not self.stop.is_set():
+                # fast: keep suggestions fresh for tickets currently at intake
+                try:
+                    self.predict_intake()
+                except Exception:
+                    _log_error("intake failed:\n" + traceback.format_exc())
+                # slow: score past suggestions against real routings and learn
+                if time.time() - last_slow >= POLL_SECONDS:
+                    try:
+                        self.resolve_and_learn()
+                        last_slow = time.time()
+                    except Exception:
+                        _log_error("resolve/learn failed:\n"
+                                   + traceback.format_exc())
+                    # once a day, self-tune on the accumulated history
+                    try:
+                        self.maybe_daily_tune()
+                    except Exception:
+                        _log_error("daily tune failed:\n" + traceback.format_exc())
+                self.stop.wait(FAST_POLL_SECONDS)
+        finally:
             try:
-                self.predict_intake()
+                self.jira.session.close()   # release keep-alive connections
             except Exception:
-                _log_error("intake failed:\n" + traceback.format_exc())
-            # slow: score past suggestions against real routings and learn
-            if time.time() - last_slow >= POLL_SECONDS:
-                try:
-                    self.resolve_and_learn()
-                    last_slow = time.time()
-                except Exception:
-                    _log_error("resolve/learn failed:\n" + traceback.format_exc())
-                # once a day, self-tune on the accumulated history
-                try:
-                    self.maybe_daily_tune()
-                except Exception:
-                    _log_error("daily tune failed:\n" + traceback.format_exc())
-            self.stop.wait(FAST_POLL_SECONDS)
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -3087,9 +3178,18 @@ def _report_fatal(message: str) -> None:
 
 
 def main() -> None:
-    # single-instance guard
-    ctypes.windll.kernel32.CreateMutexW(None, False, "JiraTriageLearner")
-    if ctypes.windll.kernel32.GetLastError() == 183:        # ERROR_ALREADY_EXISTS
+    # single-instance guard. restype/argtypes set explicitly, as the overlay's
+    # acquire_single_instance does: without them ctypes truncates the handle
+    # to c_int (harmless here, but wrong) and GetLastError is read through an
+    # undeclared call that other intervening ctypes bookkeeping can reset.
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW.restype  = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                 ctypes.c_wchar_p]
+    handle = k32.CreateMutexW(None, False, "JiraTriageLearner")
+    if k32.GetLastError() == 183:        # ERROR_ALREADY_EXISTS
+        if handle:
+            k32.CloseHandle(ctypes.c_void_p(handle))
         return
 
     try:

@@ -16,6 +16,7 @@ triage_state.json.*
 triage_suggestions.json
 triage_suggestions.json.*
 triage_log.jsonl
+triage_log.jsonl.*
 triage_history.jsonl
 triage_dataset.jsonl
 triage_learner.log
@@ -27,6 +28,7 @@ team-report-*.csv
 
 # Crash logs — may quote ticket text
 jira_overlay_error.log
+jira_overlay_error.log.*
 
 # ---------------------------------------------------------------------------
 # Python
