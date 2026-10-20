@@ -20,7 +20,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from source_layout import release_source
+from source_layout import release_source, activate
+activate(os.path.dirname(os.path.abspath(__file__)))
+import app_startup
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -38,7 +40,7 @@ DEPENDENCIES = [("requests", "requests"), ("PIL", "Pillow"),
 
 MIN_PYTHON = (3, 9)
 STARTUP_REG   = r"Software\Microsoft\Windows\CurrentVersion\Run"
-STARTUP_NAMES = {"JiraOverlay": OVERLAY, "JiraTriageLearner": LEARNER}
+STARTUP_NAMES = {"JiraOverlay": OVERLAY}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ def check_python() -> bool:
 def check_files() -> bool:
     modules = [str(release_source(DIR, name)) for name in
                ("triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
-                "app_release.py", "app_updates.py", "update_app.py")]
+                "app_release.py", "app_updates.py", "app_startup.py", "update_app.py")]
     missing = [os.path.basename(p) for p in (OVERLAY, LEARNER, *modules)
                if not os.path.exists(p)]
     if missing:
@@ -138,7 +140,7 @@ def install_dependencies() -> bool:
 
 
 def configure_startup() -> None:
-    """Register both apps to start with Windows.
+    """Register the coordinated launcher to start both apps with Windows.
 
     Idempotent by VALUE, not just by name: this folder can be moved (it
     lives under Temp) and Python can be upgraded to a new install path, and
@@ -150,18 +152,9 @@ def configure_startup() -> None:
     import winreg
     wanted = {name: f'"{pythonw()}" "{script}"'
               for name, script in STARTUP_NAMES.items()}
-    current: dict[str, str] = {}
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
-                            winreg.KEY_READ) as key:
-            for name in STARTUP_NAMES:
-                value = _value(key, name)
-                if value is not None:
-                    current[name] = value
-    except OSError:
-        pass
+    current = app_startup.entries(winreg, STARTUP_REG)
 
-    if all(current.get(name) == cmd for name, cmd in wanted.items()):
+    if all(current.get(name) == cmd for name, cmd in wanted.items()) and app_startup.LEGACY not in current:
         say("    Already set to start with Windows.")
         return
     if not current and not ask_yes_no(
@@ -169,23 +162,11 @@ def configure_startup() -> None:
         say("    Skipped - you can turn this on later in Settings.")
         return
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
-                            winreg.KEY_SET_VALUE) as key:
-            for name, cmd in wanted.items():
-                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, cmd)
+        app_startup.set_enabled(DIR, pythonw(), True, winreg, STARTUP_REG)
         say("    Enabled." if not current else
             "    Startup entry updated for this install's current location.")
     except OSError as exc:
         say(f"    Could not write the registry key: {exc}")
-
-
-def _value(key, name: str) -> str | None:
-    import winreg
-    try:
-        value, _ = winreg.QueryValueEx(key, name)
-        return value
-    except FileNotFoundError:
-        return None
 
 
 def launch() -> None:

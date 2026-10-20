@@ -149,7 +149,7 @@ def _manifest(value, expected_version=None, repository=REPOSITORY):
     if expected_version and value["version"] != expected_version:
         raise UpdateError("Package and advertised version differ")
     files = value.get("files")
-    required = {"app_release.py", "app_updates.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
+    required = {"app_release.py", "app_updates.py", "app_startup.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
                 "triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
                 "setup.py", "requirements.txt", "setup.bat", "setup.ps1", "launch.bat", "update.bat", "release_tools.py", "source_layout.py"}
     if not isinstance(files, dict) or not required <= files.keys() or len(files) > 100:

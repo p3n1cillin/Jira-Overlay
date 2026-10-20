@@ -4,7 +4,25 @@ from __future__ import annotations
 
 import threading
 import time
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
+
+
+def retry_delay(value, fallback, now=None):
+    """HTTP Retry-After supports seconds OR an HTTP date; stay interruptible."""
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        try:
+            stamp = parsedate_to_datetime(str(value))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            delay = (stamp - (now or datetime.now(timezone.utc))).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+    return min(86400.0, max(0.0, delay)) if math.isfinite(delay) else fallback
 
 
 def make_client(requests, HTTPBasicAuth, json_objects, log_error):
@@ -47,6 +65,8 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
             url = self._url(path)
             delay = 1.0
             for attempt in range(5):
+                if getattr(self, "stop", None) is not None and self.stop.is_set():
+                    return None
                 try:
                     r = self.session.request(
                         method, url, params=params, json=json_body, timeout=timeout
@@ -60,7 +80,7 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
                     if attempt == 4:
                         return None
                     ra = r.headers.get("Retry-After", "")
-                    if self._pause(float(ra) if ra.isdigit() else delay):
+                    if self._pause(retry_delay(ra, delay)):
                         return None
                     delay = min(delay * 2, 20)
                     continue
@@ -117,7 +137,9 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
             issues: list[dict] = []
             token: Optional[str] = None
             tokens_seen = set()
+            issues_seen = set()
             complete = False
+            valid = True
             while cap is None or len(issues) < cap:
                 stop = getattr(self, "stop", None)
                 if stop is not None and stop.is_set():
@@ -142,20 +164,45 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
                     break
                 # json_objects, not `or []`: an "issues" that is a string would
                 # otherwise be iterated one character at a time.
-                page = json_objects(data.get("issues"))
-                issues.extend(page)
+                raw = data.get("issues")
+                if not isinstance(raw, list):
+                    break
+                page = json_objects(raw)
+                if len(page) != len(raw):
+                    valid = False
+                added = 0
+                for issue in page:
+                    key = issue.get("key")
+                    if not isinstance(key, str) or not key.strip() or key in issues_seen:
+                        valid = False
+                        continue
+                    issues_seen.add(key)
+                    issues.append(issue)
+                    added += 1
                 token = data.get("nextPageToken")
+                if token is not None and not isinstance(token, str):
+                    valid = False
+                    break
+                token = token or None
+                if "isLast" in data and not isinstance(data["isLast"], bool):
+                    valid = False
+                    break
                 # Stop on an explicit isLast, an empty page, or no next token —
                 # not on isLast merely being ABSENT: a server that paginates
                 # with tokens but omits the flag would otherwise end the search
                 # after one page.
                 if not token or data.get("isLast") is True:
-                    complete = True
+                    complete = data.get("isLast") is not False
                     break
-                if not page or token in tokens_seen:
+                if not added or token in tokens_seen:
                     break
                 tokens_seen.add(token)
-            if not complete:
+            # Reaching an explicit sampling cap is expected, unlike a failed
+            # page. Full polling uses cap=None and still requires a terminal page.
+            if cap is not None and len(issues) >= cap:
+                issues = issues[:cap]
+                complete = True
+            if not complete or not valid:
                 self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
             return issues
 
@@ -163,7 +210,11 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
             """All changelog histories for an issue (paginated GET)."""
             out: list[dict] = []
             start = 0
+            ids_seen = set()
             while True:
+                if getattr(self, "stop", None) is not None and self.stop.is_set():
+                    self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
+                    break
                 data = self.get(
                     f"/rest/api/3/issue/{key}/changelog",
                     {"startAt": start, "maxResults": 100},
@@ -171,17 +222,45 @@ def make_client(requests, HTTPBasicAuth, json_objects, log_error):
                 if not isinstance(data, dict):
                     self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
                     break
-                page = json_objects(data.get("values"))
-                out.extend(page)
+                if "startAt" in data and (isinstance(data["startAt"], bool) or data["startAt"] != start):
+                    self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
+                    break
+                raw = data.get("values")
+                if not isinstance(raw, list):
+                    self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
+                    break
+                page = json_objects(raw)
+                valid = len(page) == len(raw)
+                added = 0
+                for entry in page:
+                    identity = entry.get("id")
+                    if not isinstance(identity, str) or not identity or identity in ids_seen:
+                        valid = False
+                        continue
+                    ids_seen.add(identity)
+                    out.append(entry)
+                    added += 1
+                if not valid:
+                    self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
                 # Stop on an empty page as well as isLast: a response that keeps
                 # claiming there is more, without returning any, would otherwise
                 # page for ever.
-                if data.get("isLast", True):
-                    break
-                if not page:
+                last = data.get("isLast")
+                if last is not None and not isinstance(last, bool):
                     self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
                     break
-                start += len(page)
+                if last is True:
+                    break
+                total = data.get("total")
+                if last is None and isinstance(total, int) and not isinstance(total, bool) and start + len(raw) >= total:
+                    break
+                if last is None and total is None:
+                    # Legacy single-page responses omit paging metadata.
+                    break
+                if not added:
+                    self.incomplete_reads = getattr(self, "incomplete_reads", 0) + 1
+                    break
+                start += len(raw)
             return out
 
     return Jira

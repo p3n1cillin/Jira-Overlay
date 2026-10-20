@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 SHARED_FILES = frozenset({"app_release.py", "app_updates.py", "triage_support.py",
-    "triage_evaluation.py", "triage_jira.py", "triage_storage.py"})
+    "triage_evaluation.py", "triage_jira.py", "triage_storage.py", "app_startup.py"})
 
 
 def activate(root):

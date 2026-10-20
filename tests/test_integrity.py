@@ -113,7 +113,7 @@ pages = iter(
     [
         Page(
             {
-                "issues": [{"key": str(i)} for i in range(100)],
+                "issues": [{"key": str(n * 100 + i)} for i in range(100)],
                 "nextPageToken": str(n + 1),
             }
         )
@@ -151,10 +151,11 @@ check(
     w.state["lastPollEpoch"] == 100 and w.state["pollIncomplete"],
 )
 w.jira.search = lambda *args, **kwargs: []
+w.state["runtimeProblem"] = "Previous poll failed"
 w.resolve_and_learn()
 check(
     "a completed retry advances the checkpoint and restores health",
-    w.state["lastPollEpoch"] > 100 and not w.state["pollIncomplete"],
+    w.state["lastPollEpoch"] > 100 and not w.state["pollIncomplete"] and "runtimeProblem" not in w.state,
 )
 
 # Several rotations and a fresh process must still see every event once.

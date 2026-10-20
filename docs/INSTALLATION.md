@@ -2,7 +2,7 @@
 
 ## One installer for every user
 
-Download **JiraOverlay-2026.10.20.2-Setup.exe** (or the newer `-Setup.exe`) from
+Download **JiraOverlay-<version>-Setup.exe** from
 [the latest release](https://github.com/p3n1cillin/Jira-Overlay/releases/latest).
 Double-click it. The same EXE installs a new user, repairs missing program files,
 or upgrades an existing installation. No ZIP extraction, Python installation,
@@ -73,7 +73,7 @@ Interactive installation is recommended for migration. For IT deployment under
 the target user's account:
 
 ```powershell
-.\JiraOverlay-2026.10.20.2-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
+.\JiraOverlay-2026.10.20.3-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
 ```
 
 Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"`,
@@ -81,3 +81,10 @@ Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"
 `/LOG="installer log path"`. Avoid system-account deployment: this application
 and its credentials are per-user. Silent uninstall uses the installed
 `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+
+Windows startup uses one overlay command; it starts the learner after credentials
+are available. Enabling startup retires the old independently launched learner
+command. A stale command for another folder/interpreter is not shown as enabled.
+Offline workflow discovery retries automatically (up to five minutes between
+attempts), and historical transport failures retain a resumable checkpoint.
+Runtime problems are shown through the existing learner health display and report.

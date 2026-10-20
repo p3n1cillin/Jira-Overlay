@@ -234,7 +234,10 @@ try {
                 [void](New-Item -Path $runKey -Force)
                 $python = Join-Path $Target 'runtime\pythonw.exe'
                 New-ItemProperty -LiteralPath $runKey -Name 'JiraOverlay' -Value ('"' + $python + '" "' + (Join-Path $Target 'jira_overlay.pyw') + '"') -PropertyType String -Force | Out-Null
-                New-ItemProperty -LiteralPath $runKey -Name 'JiraTriageLearner' -Value ('"' + $python + '" "' + (Join-Path $Target 'triage_learner.pyw') + '"') -PropertyType String -Force | Out-Null
+                # The overlay starts the learner only after credentials exist.
+                if ((Get-ItemProperty -LiteralPath $runKey).PSObject.Properties['JiraTriageLearner']) {
+                    Remove-ItemProperty -LiteralPath $runKey -Name 'JiraTriageLearner'
+                }
             }
         }
         'RemoveStartup' { Remove-OwnedStartup @($Target) }

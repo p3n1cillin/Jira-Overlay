@@ -143,6 +143,14 @@ class FakeWinReg:
     def OpenKey(self, hive, path, res, access):
         return _FakeKey()
 
+    def CreateKeyEx(self, hive, path, res, access):
+        return _FakeKey()
+
+    def DeleteValue(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+
     def QueryValueEx(self, key, name):
         if name not in self.values:
             raise FileNotFoundError(name)
@@ -179,7 +187,7 @@ def run_configure(initial: dict, answer: bool):
 
 values, asked = run_configure({}, True)
 check("a fresh machine asks before registering startup", asked == 1)
-check("  and registers both apps once the user agrees", values == wanted,
+check("  and registers the coordinated app once the user agrees", values == wanted,
       values)
 
 values, asked = run_configure({}, False)
@@ -195,9 +203,9 @@ values, asked = run_configure(dict(wanted), True)
 check("an already-correct registration is left alone and not re-asked",
       values == wanted and asked == 0, f"asked={asked}")
 
-partial = {next(iter(su.STARTUP_NAMES)): next(iter(wanted.values()))}
+partial = {"JiraTriageLearner": next(iter(stale.values()))}
 values, asked = run_configure(partial, True)
-check("a partially-registered install is completed without asking",
+check("a legacy learner-only startup is migrated without re-asking",
       values == wanted and asked == 0, f"asked={asked} values={values}")
 
 # --- setup scripts must be readable by Windows PowerShell 5.1 --------------

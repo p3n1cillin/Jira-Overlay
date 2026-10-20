@@ -410,6 +410,8 @@ check("  and remembers which transitions it already scored",
       str(len(w5.state.get("seenTransitions", []))))
 check("  without marking the backfill as finished",
       not w5.state.get("backfillDone"))
+check("  and preserves the historical learning count at a shutdown checkpoint",
+      w5.state.get("backfillCount") == len(saved))
 
 # --- One unusable issue must not cost the whole pass ------------------------
 # Unlike the stop above, this is a genuine failure reaching changelog() - a

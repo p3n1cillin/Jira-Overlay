@@ -220,8 +220,8 @@ ov.set_startup(True)
 on, names = ov.startup_enabled(), values()
 ov.set_startup(False)
 off, left = ov.startup_enabled(), values()
-check("the startup switch registers overlay and learner together",
-      on and len(names) == 2, str(sorted(names)))
+check("the startup switch registers one coordinated launch for both apps",
+      on and names == ["JiraOverlay"], str(sorted(names)))
 check("  and removes both again", (not off) and not left)
 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, TEST_KEY)
 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\JiraOverlayTest")

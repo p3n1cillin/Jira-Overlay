@@ -46,6 +46,7 @@ from tkinter import messagebox
 from source_layout import activate
 activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
+import app_startup
 from app_release import VERSION as APP_VERSION
 from triage_support import status_view
 
@@ -164,8 +165,6 @@ import pystray
 
 # Both desktop processes share the bundle's release version.
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
-STARTUP_NAME = "JiraOverlay"
-LEARNER_STARTUP_NAME = "JiraTriageLearner"
 STARTUP_REG  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _SNAP_MARGIN  = 60   # px from a corner to snap
 _LIVE_POLL_MS = 5_000   # queue-count poll interval — always 5 s regardless of settings
@@ -804,33 +803,10 @@ def _start_show_waiter(app: "JiraOverlay") -> None:
     threading.Thread(target=wait, daemon=True).start()
 
 
-def _startup_entries() -> dict[str, str]:
-    """Registry value name -> script, for every part of the app.
-
-    The overlay and the triage learner are one product, so the single
-    "Run on Windows startup" switch has to cover both — registering only the
-    overlay left the learner silently not starting, and its suggestions
-    quietly absent.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    entries = {STARTUP_NAME: os.path.abspath(__file__)}
-    learner = os.path.join(here, "triage_learner.pyw")
-    if os.path.exists(learner):
-        entries[LEARNER_STARTUP_NAME] = learner
-    return entries
-
-
 def startup_enabled() -> bool:
-    """True when everything present is registered to start with Windows."""
+    """A stale command from a moved install is not an enabled startup."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
-                            winreg.KEY_READ) as k:
-            for name in _startup_entries():
-                try:
-                    winreg.QueryValueEx(k, name)
-                except FileNotFoundError:
-                    return False
-        return True
+        return app_startup.enabled(os.path.dirname(os.path.abspath(__file__)), _pythonw_exe(), winreg, STARTUP_REG)
     except OSError:
         return False
 
@@ -846,21 +822,12 @@ def _pythonw_exe() -> str:
     return exe
 
 
-def set_startup(enable: bool) -> None:
+def set_startup(enable: bool) -> bool:
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG, 0,
-                            winreg.KEY_SET_VALUE) as k:
-            for name, script in _startup_entries().items():
-                if enable:
-                    winreg.SetValueEx(k, name, 0, winreg.REG_SZ,
-                                      f'"{_pythonw_exe()}" "{script}"')
-                else:
-                    try:
-                        winreg.DeleteValue(k, name)
-                    except FileNotFoundError:
-                        pass
+        app_startup.set_enabled(os.path.dirname(os.path.abspath(__file__)), _pythonw_exe(), enable, winreg, STARTUP_REG)
+        return True
     except OSError:
-        pass
+        return False
 
 
 class _MONITORINFO(ctypes.Structure):
@@ -4296,7 +4263,9 @@ class JiraOverlay:
         was_sla_field = (cfg.get("slaField") or "").strip()
 
         def _save() -> None:
-            set_startup(s_startup.get())
+            if set_startup(s_startup.get()) is False:
+                messagebox.showerror("Windows startup", "Windows did not allow the startup setting to be changed. Other settings have not been saved; check your Windows permissions and try again.", parent=self.root)
+                return
             alert_list = [n for n, v in s_alert_vars.items() if v.get()]
             try:
                 max_q = max(0, int(s_max_q.get()))

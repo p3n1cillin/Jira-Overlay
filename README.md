@@ -59,7 +59,7 @@ That's all. The recommended installer includes its own Python runtime and depend
 
 ## Install
 
-Download **JiraOverlay-2026.10.20.2-Setup.exe** (or the newer `-Setup.exe`) from [Releases](https://github.com/p3n1cillin/Jira-Overlay/releases/latest) and double-click it. **The same installer installs fresh, repairs, or upgrades.** No ZIP extraction, Python installation or administrator account is needed. First launch asks for that user's own Jira details.
+Download **JiraOverlay-<version>-Setup.exe** from [Releases](https://github.com/p3n1cillin/Jira-Overlay/releases/latest) and double-click it. **The same installer installs fresh, repairs, or upgrades.** No ZIP extraction, Python installation or administrator account is needed. First launch asks for that user's own Jira details.
 
 Older ZIP/clone users can select their previous application folder during setup to copy their settings and learner data. The original folder is retained. New users leave that field blank. Never share credentials or trained models between users.
 

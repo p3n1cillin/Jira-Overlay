@@ -4,6 +4,19 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.20.3]
+
+### Reliability
+- One coordinated Windows startup command starts the learner only after credentials are ready. Startup detection checks the actual install/interpreter paths; enabling creates a missing Run key and retires the old independent learner command.
+- Workflow/field discovery retries automatically with bounded, interruptible backoff instead of leaving an inactive tray process after a transient outage. Failed field discovery no longer persists empty defaults.
+- Learner status/report surfaces discovery and polling failures immediately, then clears the warning after a completed learning poll.
+- Malformed, repeated and incomplete Jira pages retain valid records but cannot advance a full-poll checkpoint. Repeated changelog pages terminate safely, and explicit historical sampling caps are distinguished from transport failures.
+- Interrupted historical reads retain learning progress and retry automatically without replaying already learned transitions.
+- Retry-After supports HTTP dates and fractional seconds; cancellation prevents new requests after shutdown.
+
+### Compatibility
+- No site-specific routes, tenant IDs, accuracy thresholds or model weights changed. Existing models, user configuration, private histories and legacy ZIP updater compatibility are preserved.
+
 ## [2026.10.20.2]
 
 ### Added

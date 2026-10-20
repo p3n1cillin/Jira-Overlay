@@ -487,9 +487,14 @@ class Discovery:
                         else DEFAULT_CONTEXT_FIELDS)]
         pinned_ctx  = self.cfg.get("contextFieldIds")
         if pinned_rt and pinned_ctx is not None:
+            self.fields_complete = True
             return pinned_rt, as_name_list(pinned_ctx)
 
-        catalogue = json_objects(self.jira.get("/rest/api/3/field"))
+        raw = self.jira.get("/rest/api/3/field")
+        self.fields_complete = isinstance(raw, list)
+        if not self.fields_complete:
+            return pinned_rt, as_name_list(pinned_ctx)
+        catalogue = json_objects(raw)
         req_field, context = pinned_rt, []
         for f in catalogue:
             fid    = f.get("id", "")
@@ -1222,8 +1227,8 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         self.discovery = Discovery(self.jira, self.cfg)
         self.req_field, self.context_fields = self.discovery.fields()
         # Remember the ids so the field catalogue isn't re-fetched every start.
-        if self.cfg.get("requestTypeField") != self.req_field or \
-                self.cfg.get("contextFieldIds") != self.context_fields:
+        if self.discovery.fields_complete and (self.cfg.get("requestTypeField") != self.req_field or
+                self.cfg.get("contextFieldIds") != self.context_fields):
             self._save_cfg({"requestTypeField": self.req_field,
                             "contextFieldIds": self.context_fields})
         # These are hand-editable, so none of them can be trusted to hold the
@@ -1307,10 +1312,19 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         for truthiness made it repeat the whole 250-changelog scan on every
         single startup.
         """
+        if not getattr(self.discovery, "fields_complete", True):
+            self.req_field, self.context_fields = self.discovery.fields()
+            if not self.discovery.fields_complete:
+                return False
+            self._issue_fields = ["summary", "description", "labels", "components",
+                                  "issuelinks", "reporter", "status"]
+            self._issue_fields.extend(([self.req_field] if self.req_field else []) + self.context_fields)
+            self._save_cfg({"requestTypeField": self.req_field, "contextFieldIds": self.context_fields})
         if self.resolved and (self.dests
                               or self.state.get("workflowDiscovered")):
             return True
 
+        reads_before = getattr(self.jira, "incomplete_reads", 0)
         done, _open = self.discovery.status_categories(self.project)
         if not done:
             _log_error(f"could not read statuses for project {self.project} "
@@ -1346,6 +1360,8 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
                     transitions[key] = moved_to
             except Exception:
                 continue
+        if getattr(self.jira, "incomplete_reads", 0) != reads_before:
+            return False
         resolved, handoffs = self.discovery.outcome_statuses(
             issues, transitions, done)
 
@@ -1646,7 +1662,7 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
 
     # -- backfill --------------------------------------------------------------
 
-    def _backfill_checkpoint(self, seen: dict) -> None:
+    def _backfill_checkpoint(self, seen: dict, count=None) -> None:
         """Save progress so an interrupted backfill doesn't discard it.
 
         This is a one-time, potentially slow pass over a project's whole
@@ -1659,11 +1675,15 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         with what was already learned kept, rather than starting over.
         """
         self.state["seenTransitions"] = list(seen)
+        if count is not None:
+            self.state["backfillCount"] = count
         self._save_state()
 
     def backfill(self) -> None:
         if self.state.get("backfillDone"):
             return
+        reads_before = getattr(self.jira, "incomplete_reads", 0)
+        base_count = self.state.get("backfillCount", 0)
         # train strictly off the last BACKFILL_DAYS of decisions
         cutoff = f"{self._jira_now() - timedelta(days=BACKFILL_DAYS):%Y-%m-%d}"
         jql = (f'project = {self.project} AND status CHANGED TO '
@@ -1680,7 +1700,7 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         first_routing = "9999"
         for issue in issues:
             if self.stop.is_set():
-                self._backfill_checkpoint(seen)
+                self._backfill_checkpoint(seen, base_count + learned)
                 return
             try:
                 det = self._issue_details(issue)
@@ -1725,7 +1745,7 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
                 f'ORDER BY updated DESC')
         for issue in self.jira.search(jql2, self._FIELDS, cap=BACKFILL_CAP):
             if self.stop.is_set():
-                self._backfill_checkpoint(seen)
+                self._backfill_checkpoint(seen, base_count + learned)
                 return
             try:
                 det = self._issue_details(issue)
@@ -1762,7 +1782,7 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
             for issue in self.jira.search(jql3, self._FIELDS,
                                           cap=BACKFILL_CAP):
                 if self.stop.is_set():
-                    self._backfill_checkpoint(seen)
+                    self._backfill_checkpoint(seen, base_count + learned)
                     return
                 try:
                     det = self._issue_details(issue)
@@ -1794,8 +1814,11 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
             _log_error(f"backfill skipped {skipped} unusable issue(s) — "
                        f"{learned} decision(s) learned from the rest")
         self.state["seenTransitions"] = list(seen)
-        self.state["backfillDone"]    = True
-        self.state["backfillCount"]   = learned
+        complete = getattr(self.jira, "incomplete_reads", 0) == reads_before and not self.stop.is_set()
+        self.state["backfillDone"] = complete
+        self.state["backfillCount"] = base_count + learned
+        if not complete:
+            _log_error("Historical reads were incomplete; retained progress will be retried")
         self._save_state()
         self.write_report()
 
@@ -2007,6 +2030,7 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         complete = getattr(self.jira, "incomplete_reads", 0) == reads_before
         self.state["pollIncomplete"] = not complete
         if complete:
+            self.state.pop("runtimeProblem", None)
             self.state["lastPollEpoch"] = poll_started
             self.state["lastSuccessfulPoll"] = poll_started
         self._save_state(force=False)
@@ -2592,6 +2616,9 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         # identical to a healthy quiet desk otherwise. _note_refusal
         # already tracks this per process run; it just never surfaced here.
         refusals = getattr(getattr(self, "jira", None), "_refusals", set())
+        problem = self.state.get("runtimeProblem") or self.state.get("intakeProblem")
+        if problem:
+            lines += ["## Learner needs attention", "", str(problem), ""]
         if refusals:
             codes = ", ".join(str(c) for c in sorted(refusals))
             lines += [f"## ⚠ Jira has been refusing requests ({codes}) "
@@ -2880,8 +2907,8 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
         status = {
             "updatedAt": datetime.now().isoformat(timespec="seconds"),
             "version": APP_VERSION,
-            "healthy": not refusals and not self.state.get("pollIncomplete", False),
-            "healthMessage": ("Polling is incomplete; retrying from the last checkpoint"
+            "healthy": not problem and not refusals and not self.state.get("pollIncomplete", False),
+            "healthMessage": (str(problem) if problem else "Polling is incomplete; retrying from the last checkpoint"
                               if self.state.get("pollIncomplete") else
                               "Jira is refusing requests" if refusals else "Healthy"),
             "lastSuccessfulPoll": self.state.get("lastSuccessfulPoll"),
@@ -2912,27 +2939,50 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
     # -- main loop --------------------------------------------------------------
 
     def run_forever(self) -> None:
+        def problem(message, stage="runtimeProblem"):
+            self.state[stage] = message
+            try:
+                self.write_report()
+            except Exception:
+                _log_error("Could not publish learner health:\n" + traceback.format_exc())
+
         try:
-            if not self.ensure_workflow_known():
-                _log_error("could not determine this project's workflow — "
-                           "set triageStatuses / resolvedStatuses in "
-                           "jira_config.json and restart")
-                return
-        except Exception:
-            _log_error("workflow discovery failed:\n" + traceback.format_exc())
-            return
-        try:
-            self.backfill()
-        except Exception:
-            _log_error("backfill failed:\n" + traceback.format_exc())
-        last_slow = 0.0
-        try:
+            delay = 30
             while not self.stop.is_set():
+                try:
+                    if self.ensure_workflow_known():
+                        break
+                except Exception:
+                    _log_error("workflow discovery failed:\n" + traceback.format_exc())
+                problem("Waiting for Jira workflow discovery; retrying automatically. Check access or workflow configuration if this persists.")
+                if self.stop.wait(delay):
+                    return
+                delay = min(300, delay * 2)
+            if self.stop.is_set():
+                return
+            try:
+                self.backfill()
+            except Exception:
+                _log_error("backfill failed:\n" + traceback.format_exc())
+            last_backfill = time.monotonic()
+            last_slow = 0.0
+            while not self.stop.is_set():
+                if not self.state.get("backfillDone") and time.monotonic() - last_backfill >= 300:
+                    try:
+                        self.backfill()
+                    except Exception:
+                        _log_error("backfill retry failed:\n" + traceback.format_exc())
+                    last_backfill = time.monotonic()
                 # fast: keep suggestions fresh for tickets currently at intake
                 try:
                     self.predict_intake()
+                    if self.state.pop("intakeProblem", None):
+                        self.write_report()
                 except Exception:
                     _log_error("intake failed:\n" + traceback.format_exc())
+                    problem("Intake prediction failed; retrying automatically. See the private learner log for details.", "intakeProblem")
+                if self.stop.is_set():
+                    break
                 # slow: score past suggestions against real routings and learn
                 if time.time() - last_slow >= POLL_SECONDS:
                     try:
@@ -2941,6 +2991,9 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
                     except Exception:
                         _log_error("resolve/learn failed:\n"
                                    + traceback.format_exc())
+                        problem("Learning poll failed; retained checkpoint will be retried automatically.")
+                    if self.stop.is_set():
+                        break
                     # once a day, self-tune on the accumulated history
                     try:
                         self.maybe_daily_tune()

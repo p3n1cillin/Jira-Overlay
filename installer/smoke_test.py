@@ -32,6 +32,13 @@ def check_install(root):
         "import app_release, requests, PIL, pystray, tzdata, tkinter; "
         "from zoneinfo import ZoneInfo; ZoneInfo('Europe/London'); "
         "r=tkinter.Tk(); r.withdraw(); r.update(); r.destroy(); print(app_release.VERSION)"])
+    # Import the real entry points under the PRIVATE interpreter. Do not call
+    # main(), construct a watcher or contact Jira, even with migration fixtures.
+    execute([root / "runtime/python.exe", "-B", "-c",
+        "import importlib.util,sys,pathlib;root=pathlib.Path(sys.argv[1]);"
+        "\nfor name in ('jira_overlay','triage_learner'):"
+        "\n spec=importlib.util.spec_from_file_location(name,root/(name+'.pyw'));"
+        "module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)", root])
     assert (root / "unins000.exe").is_file(), "Missing uninstaller"
     assert (root / "installer_support.ps1").is_file()
 
@@ -105,11 +112,26 @@ def main(installer):
         for name, data in personal.items():
             assert (root / name).read_bytes() == data, "Uninstall removed personal data"
         # Retained data is picked up when reinstalling the very same EXE.
-        execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "reinstall.log")])
+        execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "reinstall.log")])
         check_install(root)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            command = winreg.QueryValueEx(key, "JiraOverlay")[0]
+            assert str(root) in command and "jira_overlay.pyw" in command
+            try:
+                winreg.QueryValueEx(key, "JiraTriageLearner")
+                raise AssertionError("An independent learner startup would race first-run setup")
+            except FileNotFoundError:
+                pass
         for name, data in personal.items():
             assert (root / name).read_bytes() == data
         execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            try:
+                assert str(root) not in winreg.QueryValueEx(key, "JiraOverlay")[0]
+            except FileNotFoundError:
+                pass
     print("PASS: native fresh/migration, upgrade/repair, uninstall/data retention and reinstall")
 
 
