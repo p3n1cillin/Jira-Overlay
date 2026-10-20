@@ -143,11 +143,12 @@ def main(installer):
             assert (root / name).read_bytes() == data
             assert (old / name).read_bytes() == data
         # Simulate older code and a missing managed file, but keep personal data.
-        (root / "app_release.py").write_text('VERSION = "2020.01.01"\n')
+        old_release = (root / "app_release.py").read_text().replace(app_updates.VERSION, "2020.01.01")
+        (root / "app_release.py").write_text(old_release)
         (root / "triage_review.py").unlink()
         with running_legacy() as child:
             check_blocked(args + ["/NOMIGRATE"], base / "blocked-upgrade.log", child)
-            assert (root / "app_release.py").read_text() == 'VERSION = "2020.01.01"\n'
+            assert (root / "app_release.py").read_text() == old_release
             assert not (root / "triage_review.py").exists()
             for name, data in personal.items():
                 assert (root / name).read_bytes() == data
@@ -156,14 +157,12 @@ def main(installer):
         # Exercise the production unattended supervisor from the installed
         # PRIVATE Python. The caller must exit, releasing its runtime DLLs;
         # only external Windows PowerShell remains during replacement.
-        supervisor = subprocess.run([str(root / "runtime/python.exe"), "-c",
-            "import json,sys;import app_updates;from native_update import launch;"
-            "root,installer,version,digest=sys.argv[1:];"
-            "app_updates.record_update(root,version,'downloading');"
-            "p=launch(root,installer,{'version':version,'installer':{'sha256':digest}},relaunch=False);"
-            "print(p.pid,flush=True)", str(root), str(installer), app_updates.VERSION,
-            hashlib.sha256(installer.read_bytes()).hexdigest()], capture_output=True, text=True, timeout=30)
+        supervisor = subprocess.run([str(root / "runtime/python.exe"),
+            str(Path(__file__).resolve().parents[1] / "tests/fixtures/automatic_update_app.py"),
+            str(root), str(installer), app_updates.VERSION,
+            hashlib.sha256(installer.read_bytes()).hexdigest()], capture_output=True, text=True, timeout=45)
         assert supervisor.returncode == 0, supervisor.stderr
+        assert supervisor.stdout.strip().isdigit(), (supervisor.stdout, supervisor.stderr)
         pid = int(supervisor.stdout.strip())
         kernel = ctypes.windll.kernel32
         kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]

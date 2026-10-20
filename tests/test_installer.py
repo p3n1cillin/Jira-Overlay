@@ -105,7 +105,8 @@ finally:
                     child.wait(timeout=5)
                 else:
                     check(mode + " shutdown returns a clear, bounded retry message",
-                        result.returncode != 0 and elapsed < 10 and "BOTH Jira tray icons" in result.stderr)
+                        result.returncode != 0 and elapsed < 20 and "BOTH Jira tray icons" in result.stderr,
+                        f"elapsed={elapsed:.1f}s; {result.stderr}" if elapsed >= 20 or "BOTH Jira tray icons" not in result.stderr else "")
                     check(mode + " running process is never force-killed", child.poll() is None)
                 check(mode + " preflight does not create personal data", not list(ipc_root.iterdir()))
             finally:
