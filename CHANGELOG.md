@@ -10,6 +10,7 @@ Settings, for what a running install is actually on.
 - One self-contained Windows Setup EXE for fresh installs, repairs and upgrades; includes a private Python/Tk runtime and locked dependencies (no Python installation or administrator account required).
 - Standard Start menu shortcuts and one uninstaller in Windows Installed apps. Uninstall removes installed program files and owned startup entries, retaining credentials and learner data for reinstallation.
 - Optional verified migration from old ZIP/clone folders, with automatic discovery from Windows startup entries. Originals and their historical backups are never deleted; existing personal datasets are never merged or overwritten.
+- First-run launch ordering starts the learner only after the overlay has collected the fresh user's credentials, avoiding a missing-configuration error during setup.
 - Native installations use the same verified installer for in-app upgrades, including runtime updates. Older ZIP installations retain their code-only updater.
 - Windows installer lifecycle regression tests and automated fresh-install, upgrade, uninstall and reinstall smoke tests.
 

@@ -4421,6 +4421,15 @@ def main() -> None:
             return
     app = JiraOverlay(config)
     updates.listen_for_update(root, lambda: app._post(app.root.destroy))
+    # A fresh user's learner must not start until SetupWindow has saved their
+    # credentials. Existing Windows Run entries may also launch it; its named
+    # mutex keeps that harmless and avoids duplicate polling.
+    learner = os.path.join(root, "triage_learner.pyw")
+    if os.path.isfile(learner):
+        try:
+            subprocess.Popen([_pythonw_exe(), learner], cwd=root, creationflags=0x08000000)
+        except OSError as exc:
+            app._log_error("Could not start the learner: " + str(exc))
     _start_show_waiter(app)
     app.run()
 

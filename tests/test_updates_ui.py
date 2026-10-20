@@ -74,6 +74,28 @@ finally:
     app.root.destroy()
     app._session.close()
 
+# Fresh users must complete credential setup BEFORE the learner is launched.
+startup_order = []
+class FreshOverlay:
+    def __init__(self, config): startup_order.append("overlay-ready")
+    def run(self): startup_order.append("running")
+class FreshSetup:
+    def __init__(self):
+        startup_order.append("credentials-ready")
+        self.result = {"domain": "example.invalid", "token": "FAKE"}
+with patch.object(ov.updates, "recover_pending", return_value=False), \
+     patch.object(ov, "acquire_single_instance", return_value=True), \
+     patch.object(ov, "_create_show_event"), \
+     patch.object(ov, "_start_show_waiter"), \
+     patch.object(ov.updates, "listen_for_update"), \
+     patch.object(ov, "load_config", return_value=None), \
+     patch.object(ov, "SetupWindow", FreshSetup), \
+     patch.object(ov, "JiraOverlay", FreshOverlay), \
+     patch.object(ov.subprocess, "Popen", side_effect=lambda *a, **k: startup_order.append("learner-started")):
+    ov.main()
+check("fresh-user configuration is saved before the learner is started",
+      startup_order == ["credentials-ready", "overlay-ready", "learner-started", "running"])
+
 # Exercise the learner's real main() lifecycle with a fake data source/tray.
 # No actual global mutex, Jira session, model or configuration is touched.
 tl = load_learner()

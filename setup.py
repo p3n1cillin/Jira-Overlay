@@ -191,7 +191,7 @@ def _value(key, name: str) -> str | None:
 def launch() -> None:
     flags = 0x08000000          # CREATE_NO_WINDOW
     subprocess.Popen([pythonw(), OVERLAY], cwd=DIR, creationflags=flags)
-    subprocess.Popen([pythonw(), LEARNER], cwd=DIR, creationflags=flags)
+    # The overlay launches the learner only after first-run credentials exist.
 
 
 # ---------------------------------------------------------------------------
