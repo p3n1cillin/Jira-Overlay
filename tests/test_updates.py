@@ -171,6 +171,8 @@ with tempfile.TemporaryDirectory() as folder:
         mutex = "JiraOverlay-test-" + uuid.uuid4().hex
         program = """
 import sys,threading
+from source_layout import activate
+activate(__import__('os').getcwd())
 import app_updates as u
 k=u._kernel(); h=k.CreateMutexW(None,False,sys.argv[2]); stop=threading.Event()
 u.listen_for_update(sys.argv[1],stop.set)

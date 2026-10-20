@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from source_layout import release_source
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -95,7 +96,7 @@ def check_python() -> bool:
 
 
 def check_files() -> bool:
-    modules = [os.path.join(DIR, name) for name in
+    modules = [str(release_source(DIR, name)) for name in
                ("triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
                 "app_release.py", "app_updates.py", "update_app.py")]
     missing = [os.path.basename(p) for p in (OVERLAY, LEARNER, *modules)

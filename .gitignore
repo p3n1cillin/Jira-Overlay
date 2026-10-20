@@ -30,6 +30,10 @@ triage_backups/
 .app-updates/
 app_update_error.log
 dist/
+.jira-overlay-install
+.migration-*/
+.ruff_cache/
+.mypy_cache/
 
 # Exported reports may name staff and ticket volumes
 team-report-*.csv

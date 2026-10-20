@@ -53,15 +53,25 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 - **Windows 10 or 11**
 - A **Jira Service Management** account
 
-That's all. Setup installs Python and everything else if the machine hasn't got it.
+That's all. The recommended installer includes its own Python runtime and dependencies.
 
 ---
 
 ## Install
 
-Download the latest **JiraOverlay-<version>.zip** from [Releases](https://github.com/p3n1cillin/Jira-Overlay/releases/latest), then extract it into your own stable local folder (not a shared data folder or temporary download directory). Developers can also clone [the repository](https://github.com/p3n1cillin/Jira-Overlay).
+Download **JiraOverlay-2026.10.20.2-Setup.exe** (or the newer `-Setup.exe`) from [Releases](https://github.com/p3n1cillin/Jira-Overlay/releases/latest) and double-click it. **The same installer installs fresh, repairs, or upgrades.** No ZIP extraction, Python installation or administrator account is needed. First launch asks for that user's own Jira details.
 
-### Double-click **`setup.bat`**
+Older ZIP/clone users can select their previous application folder during setup to copy their settings and learner data. The original folder is retained. New users leave that field blank. Never share credentials or trained models between users.
+
+Uninstall through **Windows Settings > Apps > Installed apps > Jira Overlay** or the Start menu's **Uninstall Jira Overlay** shortcut; both use one uninstaller. Personal settings and learner data are retained for reinstallation. The EXE is currently unsigned, so Windows or corporate application-control policies may show a publisher warning.
+
+See [installation, migration and uninstall](docs/INSTALLATION.md) for details, silent deployment and data retention. See [project structure and maintenance](docs/PROJECT_STRUCTURE.md) for the organised source layout and developer commands.
+
+### Source/developer alternative
+
+Developers can clone [the repository](https://github.com/p3n1cillin/Jira-Overlay), or extract the source ZIP into a stable local folder. Existing source launch commands remain supported.
+
+Double-click **`setup.bat`** for a source install.
 
 It does the lot:
 
@@ -78,24 +88,24 @@ Afterwards, start it with **`launch.bat`** — or just let it start with Windows
 
 ### Application updates
 
-ZIP installations check the public GitHub repository on startup and every six hours. A new stable release produces a desktop notice (when desktop notifications are enabled). Settings shows the installed bundle version, **Check for updates** and **Update and restart**; the tray also has a manual check. Automatic checks can be turned off in Settings. Checks send no Jira credentials, configuration, ticket text or learner data. They are notices only: updates always require your confirmation.
+Installations check the public GitHub repository on startup and every six hours. A new stable release produces a desktop notice (when desktop notifications are enabled). Settings shows the installed bundle version, **Check for updates** and **Update and restart**; the tray also has a manual check. Automatic checks can be turned off in Settings. Checks send no Jira credentials, configuration, ticket text or learner data. They are notices only: updates always require your confirmation. Native installations use the same verified Windows Setup EXE for upgrades, including their private runtime; rerunning the latest installer also repairs an install.
 
-The updater downloads the complete release package, checks GitHub's SHA-256 digest and its internal file manifest, prepares dependencies, then asks both processes to save and close. Only verified application code, bootstrap files and documentation are replaced. `jira_config.json`, models, history, logs, reviews, reports and other personal files are not part of a release. The previous code is backed up under `.app-updates/backups`; a copy failure automatically restores it, and an interrupted transaction is recovered at the next launch. To explicitly roll back application code, run `update.bat --rollback` and select your installed folder. Model/data formats must remain backward compatible within this update channel; rolling back code does not rewind learning data.
+For legacy ZIP installations, the code-only updater downloads the complete release package, checks GitHub's SHA-256 digest and its internal file manifest, prepares dependencies, then asks both processes to save and close. Only verified application code, bootstrap files and documentation are replaced. `jira_config.json`, models, history, logs, reviews, reports and other personal files are not part of a release. The previous code is backed up under `.app-updates/backups`; a copy failure automatically restores it, and an interrupted transaction is recovered at the next launch. To explicitly roll back ZIP application code, run `update.bat --rollback` and select your installed folder. Native installations should use the installer for repair, not this code-only rollback. Model/data formats must remain backward compatible within this update channel; rolling back code does not rewind learning data.
 
 Updates trust HTTPS and the configured GitHub publisher. Checksums protect package integrity; they are not an independent publisher signature. An unreachable GitHub API, missing package/digest, partial download or verification failure leaves the installed code alone. Never distribute your working folder, credentials or learner files to another user. Each user runs setup with their own Jira account and token.
 
-**One-time upgrade for users of the old repository or an older ZIP:** download the new release, extract it into a separate folder, close both old tray icons, run the new folder's `update.bat`, and select the existing installed folder. It preserves that user's configuration and learning data. Future releases can then be installed from Settings. Do not replace the whole existing folder or copy someone else's configuration into it.
+**One-time upgrade for users of the old repository or an older ZIP:** run the latest Setup EXE and select your old folder on the migration page. Close both old tray icons first if that version lacks graceful shutdown. It preserves that user's configuration and learning data. Future releases can be installed from Settings or by rerunning Setup. The older `update.bat` source-only migration remains supported. Do not replace the whole existing folder or copy someone else's configuration into it.
 
 **Git clones:** receive update notices but the updater refuses to overwrite a checkout. Close both apps, commit/stash any code edits as appropriate, and use `git pull --ff-only`, then run `setup.bat` if dependencies changed. When migrating from the old repository, change the checkout's remote to `https://github.com/p3n1cillin/Jira-Overlay.git` first. The project history is preserved.
 
 ### Publishing a release
 
-1. Update `VERSION` in `app_release.py` and add the matching section in `CHANGELOG.md`. Both desktop processes use this single version. Use `YYYY.MM.DD` or `YYYY.MM.DD.N` for same-day releases.
+1. Update `VERSION` in `app/app_release.py` and add the matching section in `CHANGELOG.md`. Both desktop processes use this single version. Use `YYYY.MM.DD` or `YYYY.MM.DD.N` for same-day releases.
 2. Run `python tests/run_all.py`, `python -m ruff check .` and `python release_tools.py --output dist`.
 3. Commit and push code only, then create and push the matching tag, e.g. `git tag v2026.10.20.1` and `git push origin v2026.10.20.1`.
-4. The release workflow tests Windows/Python 3.9 and 3.14 again, builds the allowlisted ZIP and publishes it with a checksum and release notes only if both test jobs pass. Users receive their next check's notice; they can also subscribe to GitHub release notifications.
+4. The release workflow tests Windows/Python 3.9 and 3.14 again, builds the allowlisted ZIP and self-contained Setup EXE, exercises real install/upgrade/uninstall/reinstall on clean Windows, and only then publishes both packages with checksums and release notes. Users receive their next check's notice; they can also subscribe to GitHub release notifications.
 
-The workflow can also be dispatched for an existing version tag. Never move an already-published tag or replace its assets: issue a new version instead. Fork maintainers should change `REPOSITORY` in `app_release.py` before publishing their own update channel. Release publishing includes only the explicit `RELEASE_FILES` allowlist, never arbitrary workspace contents.
+The workflow can also be dispatched for an existing version tag. Never move an already-published tag or replace its assets: issue a new version instead. Fork maintainers should change `REPOSITORY` in `app/app_release.py` before publishing their own update channel. Release publishing includes only the explicit `RELEASE_FILES` allowlist (plus the native installer support script and isolated runtime), never arbitrary workspace contents.
 
 | File | Purpose |
 |---|---|

@@ -18,6 +18,8 @@ import importlib.util
 import json
 import os
 import sys
+from source_layout import activate
+activate(os.path.dirname(os.path.abspath(__file__)))
 from triage_support import threshold_experiment
 from datetime import timedelta
 from typing import Optional

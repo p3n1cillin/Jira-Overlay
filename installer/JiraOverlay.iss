@@ -47,6 +47,9 @@ Source: "support.ps1"; Flags: dontcopy
 Name: "{group}\Jira Overlay"; Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Check: MakeShortcuts
 Name: "{group}\Uninstall Jira Overlay"; Filename: "{uninstallexe}"; Check: MakeShortcuts
 
+[INI]
+Filename: "{app}\.jira-overlay-install"; Section: "Install"; Key: "Application"; String: "JiraOverlay"
+
 [Run]
 Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Flags: nowait; Check: LaunchApplication
 
@@ -165,5 +168,5 @@ begin
       RaiseException('Cannot remove this installation startup entries. Uninstall cancelled.');
 end;
 
-; No [UninstallDelete] wildcard: Inno removes ONLY files it installed.
-; Settings, credentials, models, history, reports and private backups remain.
+// No broad uninstall deletion: Inno removes ONLY files it installed.
+// Settings, credentials, models, history, reports and private backups remain.

@@ -11,6 +11,8 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from source_layout import activate
+activate(Path(__file__).resolve().parent)
 
 import app_updates as updates
 from app_release import VERSION

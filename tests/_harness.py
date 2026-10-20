@@ -27,6 +27,8 @@ except (AttributeError, ValueError):
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT)
+from source_layout import activate
+activate(PROJECT)
 
 
 def load(script: str, name: str):

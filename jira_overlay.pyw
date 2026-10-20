@@ -43,6 +43,8 @@ from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 import tkinter as tk
 from tkinter import messagebox
+from source_layout import activate
+activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
 from app_release import VERSION as APP_VERSION
 from triage_support import status_view

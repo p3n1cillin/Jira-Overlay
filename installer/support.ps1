@@ -127,6 +127,7 @@ function Migrate-Data([string]$Old, [string]$New) {
     [void][IO.Directory]::CreateDirectory($New)
     $stage = Join-Path $New ('.migration-' + [Guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($stage)
+    $moved = @()
     try {
         foreach ($file in $files) {
             $copy = Join-Path $stage $file.Name
@@ -138,7 +139,11 @@ function Migrate-Data([string]$Old, [string]$New) {
         # Historical backups remain at the original path (which is never deleted).
         foreach ($file in $files) {
             Move-Item -LiteralPath (Join-Path $stage $file.Name) -Destination (Join-Path $New $file.Name)
+            $moved += (Join-Path $New $file.Name)
         }
+    } catch {
+        foreach ($created in $moved) { Remove-Item -LiteralPath $created -Force }
+        throw
     } finally {
         # This is a freshly created, exact staging directory, never the application root.
         if ((Split-Path -Parent $stage) -ne $New -or (Split-Path -Leaf $stage) -notmatch '^\.migration-[a-f0-9]{32}$') {
@@ -184,6 +189,9 @@ try {
     if (Test-Path -LiteralPath $Target) {
         Safe-Tree $Target
         if (Test-Path -LiteralPath (Join-Path $Target '.git')) { throw 'Never install over a Git checkout. Choose a separate installation directory.' }
+        if (Test-Path -LiteralPath (Join-Path $Target 'app\app_release.py')) {
+            throw 'Never overwrite an organised source tree. Install into a separate directory and use the source folder only as a migration source.'
+        }
         if ($Action -eq 'Prepare') {
             $releaseFile = Join-Path $Target 'app_release.py'
             if ($Version -and (Test-Path -LiteralPath $releaseFile)) {
@@ -195,6 +203,7 @@ try {
             if ((@(Get-ChildItem -LiteralPath $Target -Force).Count -gt 0) -and
                 -not ((Test-Path -LiteralPath (Join-Path $Target 'jira_overlay.pyw')) -and
                       (Test-Path -LiteralPath (Join-Path $Target 'triage_learner.pyw'))) -and
+                -not (Test-Path -LiteralPath (Join-Path $Target '.jira-overlay-install')) -and
                 (@(Personal-Files $Target).Count -eq 0)) {
                 throw 'The destination is a non-empty unrelated folder. Choose a dedicated application folder.'
             }

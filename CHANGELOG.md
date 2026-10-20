@@ -17,6 +17,11 @@ Settings, for what a running install is actually on.
 - Per-user installation only, graceful shutdown without force-killing learners, Git checkout/junction protection, and no service-desk-specific defaults.
 - The executable is currently unsigned; checksums verify downloads but are not a publisher signature.
 
+### Project organisation
+- Grouped shared application modules under `app/`, separated installer, tools, tests and documentation, and documented stable compatibility entry points/data paths.
+- Added one repeatable verification command and narrowly scoped generated-cache cleanup; personal models, history and backups are never classified as dead files.
+- Source layout and published flat ZIP compatibility are handled centrally, keeping already-released updater clients working.
+
 ## [2026.10.20.1]
 
 ### Added

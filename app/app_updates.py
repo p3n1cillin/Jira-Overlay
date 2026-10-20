@@ -56,7 +56,8 @@ def managed_name(name):
     return isinstance(name, str) and bool(
         re.fullmatch(r"[a-z][a-z0-9_]*\.pyw?", name)
         or name in {"update.bat", "launch.bat", "setup.bat", "setup.ps1", "requirements.txt",
-                    "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "jira_config.example.json"})
+                    "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "jira_config.example.json",
+                    "INSTALLATION.md", "PROJECT_STRUCTURE.md"})
 
 
 def _safe_url(url):
@@ -150,7 +151,7 @@ def _manifest(value, expected_version=None, repository=REPOSITORY):
     files = value.get("files")
     required = {"app_release.py", "app_updates.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
                 "triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
-                "setup.py", "requirements.txt", "setup.bat", "setup.ps1", "launch.bat", "update.bat", "release_tools.py"}
+                "setup.py", "requirements.txt", "setup.bat", "setup.ps1", "launch.bat", "update.bat", "release_tools.py", "source_layout.py"}
     if not isinstance(files, dict) or not required <= files.keys() or len(files) > 100:
         raise UpdateError("Incomplete application package")
     for name, digest in files.items():
@@ -230,6 +231,8 @@ def _target(root):
         raise UpdateError("Select the existing application folder, not a parent or data folder")
     if (root / ".git").exists():
         raise UpdateError("This is a Git checkout. Close both apps and use git pull --ff-only instead; local edits will not be overwritten.")
+    if (root / "app" / "app_release.py").is_file():
+        raise UpdateError("This is an organised source tree. Use Git to update it, or migrate its data with the Windows installer into a separate folder.")
     return root
 
 

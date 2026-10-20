@@ -42,6 +42,8 @@ def main(installer):
     import ctypes
     # No installer test may stop a user's live learner or edit their startup.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from source_layout import activate
+    activate(Path(__file__).resolve().parents[1])
     import app_updates
     if app_updates.apps_running():
         raise RuntimeError("Refusing smoke test: real companions are running")

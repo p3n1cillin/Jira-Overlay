@@ -67,6 +67,8 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+from source_layout import activate
+activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
 from app_release import VERSION as APP_VERSION
 from triage_support import (accuracy_counts, wilson_lower, segment_name, rolling_metrics,

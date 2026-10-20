@@ -16,6 +16,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from source_layout import activate
+activate(ROOT)
 from app_release import VERSION
 from app_updates import unpack_package
 from release_tools import build_release
