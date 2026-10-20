@@ -64,6 +64,12 @@ try:
                 time.sleep(0.01)
         check("confirmed ZIP updates launch a helper but do not quit before its shutdown request",
               bool(launched) and "--payload" in launched[0] and bool(app.root.winfo_exists()))
+        launched.clear()
+        with patch.object(ov.subprocess, "Popen", side_effect=lambda args, **kwargs: launched.append(args)):
+            app._launch_native_installer(folder, Path(folder)/"Setup.exe")
+        check("native updates run the same installer without quitting the learner early",
+              bool(launched) and "/SILENT" in launched[0] and "/DIR=" + folder in launched[0]
+              and bool(app.root.winfo_exists()))
 finally:
     app.root.destroy()
     app._session.close()

@@ -21,14 +21,14 @@ def clean_generated(root=ROOT):
     targets = [root / name for name in (".ruff_cache", ".mypy_cache", "__pycache__")]
     for directory in ("app", "tools", "installer", "tests"):
         folder = root / directory
-        if folder.is_dir() and not folder.is_symlink():
+        if folder.is_dir() and not folder.is_symlink() and folder.resolve() == folder:
             targets.extend(folder.rglob("__pycache__"))
     count = 0
     for target in targets:
         resolved = target.resolve()
         if not target.exists():
             continue
-        if target.is_symlink() or root not in resolved.parents or target.name not in {
+        if target.is_symlink() or resolved != target or root not in resolved.parents or target.name not in {
                 "__pycache__", ".ruff_cache", ".mypy_cache"}:
             raise ValueError("Refusing unsafe cache removal: " + str(target))
         shutil.rmtree(target)

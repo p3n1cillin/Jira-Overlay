@@ -23,7 +23,8 @@ def build_release(root, output):
     # Windows build and the Linux publisher produce identical file contents.
     contents = {name: release_source(root, name).read_bytes().replace(b"\r\n", b"\n") for name in RELEASE_FILES}
     for name in ("INSTALLATION.md", "PROJECT_STRUCTURE.md"):
-        contents["README.md"] = contents["README.md"].replace(("(docs/" + name + ")").encode(), ("(" + name + ")").encode())
+        contents["README.md"] = contents["README.md"].replace(("(docs/" + name + ")").encode(),
+            (f"(https://github.com/{REPOSITORY}/blob/main/docs/{name})").encode())
     manifest = {"schema": 1, "version": VERSION, "repository": REPOSITORY,
                 "files": {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}}
     contents[MANIFEST] = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")

@@ -67,6 +67,8 @@ def main():
         if not target_text:
             return 0
         target = updates._target(target_text)
+        if updates.native_install(target):
+            raise updates.UpdateError("This installation has a private runtime. Run the latest Windows Setup EXE to upgrade or repair it; do not apply a code-only update/rollback.")
         if args.rollback:
             _, backups = updates._storage(target)
             choices = sorted((p for p in backups.iterdir() if p.is_dir() and (p/"backup.json").is_file()), reverse=True)

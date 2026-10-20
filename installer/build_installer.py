@@ -25,7 +25,7 @@ from release_tools import build_release
 
 def copy_tree(source, target):
     shutil.copytree(source, target, ignore=shutil.ignore_patterns(
-        "__pycache__", "*.pyc", "test", "tests", "idle_test"))
+        "__pycache__", "*.pyc", "test", "tests", "idle_test", "demos"))
 
 
 def runtime(target):
@@ -53,7 +53,7 @@ def runtime(target):
     subprocess.run([sys.executable, "-m", "pip", "--isolated", "install", "--only-binary=:all:",
                     "--no-compile", "--target", str(lib / "site-packages"),
                     "-r", str(ROOT / "installer" / "requirements.lock")], check=True)
-    subprocess.run([str(target / "python.exe"), "-c",
+    subprocess.run([str(target / "python.exe"), "-B", "-c",
         "import tkinter, requests, PIL, pystray, tzdata, ssl, sqlite3, ctypes; "
         "from zoneinfo import ZoneInfo; ZoneInfo('Europe/London'); "
         "r=tkinter.Tk(); r.withdraw(); r.update(); r.destroy(); "
@@ -68,6 +68,10 @@ def build(compiler, output):
     with tempfile.TemporaryDirectory(prefix="jira-installer-build-") as scratch:
         stage = Path(scratch) / "app"
         unpack_package(archive, stage, VERSION)
+        (stage / "docs").mkdir()
+        for name in ("INSTALLATION.md", "PROJECT_STRUCTURE.md"):
+            shutil.copy2(ROOT / "docs" / name, stage / "docs" / name)
+        shutil.copy2(ROOT / "README.md", stage / "README.md")
         runtime(stage / "runtime")
         shutil.copy2(ROOT / "installer" / "support.ps1", stage / "installer_support.ps1")
         subprocess.run([str(compiler), "/DAppVersion=" + VERSION,

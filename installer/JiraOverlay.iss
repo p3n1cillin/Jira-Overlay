@@ -56,7 +56,7 @@ Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw
 [Code]
 var
   LegacyPage: TInputDirWizardPage;
-  ErrorFile, Helper: String;
+  ErrorFile, Helper, InstallRoot: String;
   AlreadyInstalled: Boolean;
 
 function ReadResult(var Value: String): Boolean;
@@ -85,7 +85,7 @@ var Args, ErrorText: String; Code: Integer;
 begin
   DeleteFile(ErrorFile);
   Args := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script +
-    '" -Action ' + Action + ' -Target "' + ExpandConstant('{app}') +
+    '" -Action ' + Action + ' -Target "' + InstallRoot +
     '" -ResultFile "' + ErrorFile + '" -Version "{#AppVersion}"';
   if Source <> '' then Args := Args + ' -Source "' + Source + '"';
   if Startup then Args := Args + ' -EnableStartup';
@@ -103,7 +103,8 @@ begin
   ExtractTemporaryFile('support.ps1');
   Helper := ExpandConstant('{tmp}\support.ps1');
   ErrorFile := ExpandConstant('{tmp}\jira-installer-result.txt');
-  AlreadyInstalled := FileExists(ExpandConstant('{app}\unins000.exe'));
+  InstallRoot := WizardDirValue;
+  AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
   LegacyPage := CreateInputDirPage(wpSelectDir, 'Previous ZIP installation (optional)',
     'Fresh install or upgrade: the same installer handles both.',
     'If you used a ZIP/clone before, select its folder to COPY your settings and learner data. ' +
@@ -114,9 +115,9 @@ begin
   LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|' + LegacyPage.Values[0] + '}');
   if AlreadyInstalled then begin
     if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
-      and (Pos(Lowercase(ExpandConstant('{app}\jira_overlay.pyw')), Lowercase(RunValue)) > 0) then
+      and (Pos(Lowercase(InstallRoot + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) then
       WizardSelectTasks('startup')
-    else WizardSelectTasks('');
+    else WizardSelectTasks('!startup');
   end;
 end;
 
@@ -154,6 +155,7 @@ function InitializeUninstall: Boolean;
 var Detail: String;
 begin
   ErrorFile := ExpandConstant('{tmp}\jira-uninstall-result.txt');
+  InstallRoot := ExpandConstant('{app}');
   Result := RunHelper('Stop', '', ExpandConstant('{app}\installer_support.ps1'), False);
   if not Result then begin
     if not ReadResult(Detail) then Detail := 'Close both Jira tray icons and retry uninstall.';

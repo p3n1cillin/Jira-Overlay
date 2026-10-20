@@ -11,5 +11,4 @@ RELEASE_FILES = (
     "triage_storage.py", "triage_support.py", "setup.py", "setup.bat",
     "setup.ps1", "launch.bat", "requirements.txt", "jira_config.example.json",
     "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "launch_installed.pyw", "source_layout.py",
-    "INSTALLATION.md", "PROJECT_STRUCTURE.md",
 )
