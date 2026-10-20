@@ -3,6 +3,7 @@ target-version = "py39"   # matches setup.py's MIN_PYTHON
 extend-include = ["*.pyw"]
 
 [tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 # Default selection (pycodestyle E/W + pyflakes F) is enough for a project
 # this size — it already catches everything that matters (undefined names,
 # unused imports, unreachable code) without reaching for a stricter preset

@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt
-      - run: python -m pip install ruff
+      - run: python -m pip install ruff==0.15.20
       - run: python -m ruff check .
       - run: python tests/run_all.py
       - run: python -m compileall -q triage_support.py triage_evaluation.py triage_storage.py triage_review.py triage_eval.py
