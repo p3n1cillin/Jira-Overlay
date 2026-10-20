@@ -37,9 +37,10 @@ newer builds to save/close. Identifiable older builds are closed through their
 Tk/pystray window loops, without terminating other Python programs. Legacy builds
 retain their last-saved data; unlike newer builds, they cannot promise to flush
 unsaved learning on exit. Unrecognised or security-blocked copies require
-**Quit** on both tray icons. If apps are still saving
-after 30 seconds, setup returns a clear retry message; tuning can take several
-minutes. Wait for both tray icons to disappear, then **Retry**. A fresh install
+**Quit** on both tray icons. Setup automatically waits up to five minutes for
+supported builds to finish saving/tuning, with elapsed progress, and up to 30
+seconds for an old window loop to close. If that limit is reached, wait for both
+tray icons to disappear, then **Retry**. A fresh install
 also requires any old running copy to close. The installer never force-kills a learner.
 
 Setup logs are created automatically in `%TEMP%` as `Setup Log ... .txt`.
@@ -57,7 +58,7 @@ and launch are automatic, respecting the user's existing startup preference.
 | `JIRA-I101` | Unsafe/invalid destination, newer installed build, or wrong old folder. Follow the specific path message. |
 | `JIRA-I110` | Windows could not verify or signal running apps. Quit both tray icons and retry. |
 | `JIRA-I111` | Running copy could not be identified/asked to quit. Select its folder or quit both tray icons. |
-| `JIRA-I112` | App is still saving/running after 30 seconds. Wait for both icons to disappear, then retry. |
+| `JIRA-I112` | App is still running after the displayed save/close limit. Wait for both icons to disappear, then retry. |
 | `JIRA-I113` | Legacy quit bridge failed or was blocked. Quit both icons manually; ask IT if policy blocked it. |
 | `JIRA-I120` | Personal-data migration failed or would merge learners. Original data is retained; follow the specific copy/destination reason. |
 | `JIRA-I130` | Windows startup registration/cleanup failed. Check the log and rerun setup to repair. |

@@ -6,7 +6,7 @@ param(
     [string]$ResultFile,
     [string]$Version,
     [switch]$EnableStartup,
-    [ValidateRange(1,60)][int]$TimeoutSeconds = 30
+    [ValidateRange(1,600)][int]$TimeoutSeconds = 300
 )
 $ErrorActionPreference = 'Stop'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -158,16 +158,20 @@ function Stop-Companions([string[]]$Roots,
                 throw 'A Jira copy is running but could not be safely identified or asked to quit. Select its previous-install folder, or choose Quit on BOTH Jira tray icons, then Retry. Hiding the overlay is not enough. No application code or personal data was replaced.'
             }
         }
+        # Modern learners may finish a tuning pass before saving. Keep that
+        # automatic with visible elapsed progress, not repeated Retry clicks.
+        $waitSeconds = $TimeoutSeconds
+        if ($handles.Count -eq 0) { $waitSeconds = [Math]::Min(30, $waitSeconds) }
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $lastNotice = -5
         do {
             if (-not (Running-Companions $MutexNames)) { return }
-            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            if ($timer.Elapsed.TotalSeconds -ge $waitSeconds) {
                 $script:FailureCode = 'JIRA-I112'
                 throw 'The apps are still saving or running. Choose Quit on BOTH Jira tray icons, wait for them to disappear, then Retry. Learner tuning can take several minutes. Nothing was force-killed and no application code or personal data was replaced.'
             }
             if ($timer.Elapsed.TotalSeconds - $lastNotice -ge 5) {
-                Progress (15 + [int](15 * $timer.Elapsed.TotalSeconds / $TimeoutSeconds)) ('Waiting for the companions to save and close ({0}s). Never force-killing the learner...' -f [int]$timer.Elapsed.TotalSeconds)
+                Progress (15 + [int](15 * $timer.Elapsed.TotalSeconds / $waitSeconds)) ('Waiting for the companions to save and close ({0}/{1}s). Never force-killing the learner...' -f [int]$timer.Elapsed.TotalSeconds, $waitSeconds)
                 $lastNotice = $timer.Elapsed.TotalSeconds
             }
             Start-Sleep -Milliseconds 200
