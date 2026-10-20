@@ -6,14 +6,48 @@ and no native installation may already exist. No Jira requests are made.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import winreg
 
 
 APP_ID = "{70CD5DF5-2577-42CC-AD73-24419C907568}_is1"
+
+
+@contextlib.contextmanager
+def running_legacy():
+    """CI-only old app simulator: owns the real mutex, has NO stop listener."""
+    code = r'''
+import ctypes, sys
+k = ctypes.windll.kernel32
+k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+k.CreateMutexW.restype = ctypes.c_void_p
+k.CloseHandle.argtypes = [ctypes.c_void_p]
+handle = k.CreateMutexW(None, False, 'JiraOverlaySingleInstance')
+assert handle
+print('READY', flush=True)
+try: sys.stdin.readline()
+finally: k.CloseHandle(handle)
+'''
+    child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "READY"
+        yield child
+    finally:
+        child.communicate("\n", timeout=10)
+
+
+def check_blocked(command, log, child):
+    result = subprocess.run([str(x) for x in command] + ["/LOG=" + str(log)], timeout=45)
+    text = log.read_text(encoding="utf-8-sig", errors="replace")
+    assert result.returncode != 0, "A running legacy writer must block code replacement"
+    assert "BOTH Jira tray icons" in text, text[-10000:]
+    assert child.poll() is None, "Installer force-killed a running legacy writer"
 
 
 def execute(command):
@@ -50,7 +84,6 @@ def main(installer):
             raise RuntimeError("Refusing smoke test: this user already has a native installation")
     except FileNotFoundError:
         pass
-    import sys
     import ctypes
     # No installer test may stop a user's live learner or edit their startup.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -75,6 +108,13 @@ def main(installer):
             (old / name).write_bytes(data)
         args = [installer, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                 "/NOSTARTUP", "/NOSHORTCUTS", "/NOLAUNCH", "/DIR=" + str(root)]
+        with running_legacy() as child:
+            check_blocked(args + ["/NOMIGRATE"], base / "blocked-fresh.log", child)
+            check_blocked(args + ["/LEGACYDIR=" + str(old)], base / "blocked-migration.log", child)
+            assert not (root / "jira_overlay.pyw").exists()
+            assert not (root / "jira_config.json").exists()
+            for name, data in personal.items():
+                assert (old / name).read_bytes() == data
         execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "fresh.log")])
         check_install(root)
         assert not (root / "jira_config.json").exists(), "Installer must not ship credentials"
@@ -88,6 +128,12 @@ def main(installer):
         # Simulate older code and a missing managed file, but keep personal data.
         (root / "app_release.py").write_text('VERSION = "2020.01.01"\n')
         (root / "triage_review.py").unlink()
+        with running_legacy() as child:
+            check_blocked(args + ["/NOMIGRATE"], base / "blocked-upgrade.log", child)
+            assert (root / "app_release.py").read_text() == 'VERSION = "2020.01.01"\n'
+            assert not (root / "triage_review.py").exists()
+            for name, data in personal.items():
+                assert (root / name).read_bytes() == data
         # Upgrade without the override: an explicitly disabled startup choice
         # must remain disabled even if the previous installer task was checked.
         execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "upgrade.log")])

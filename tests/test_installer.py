@@ -10,7 +10,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
+import uuid
 from unittest.mock import patch
 
 from _harness import Checker, PROJECT as PROJECT_DIR
@@ -60,6 +63,57 @@ with tempfile.TemporaryDirectory() as directory:
         check("tampered installers are never staged for execution", rejected)
 
     if os.name == "nt":
+        # Real Windows IPC, but with unique mutex names: NEVER signal/stop the
+        # developer's running overlay or learner. Children exit cooperatively.
+        for mode in ("legacy", "cooperative", "slow"):
+            ipc_root = root / mode
+            ipc_root.mkdir()
+            mutex_name = "Local\\JiraInstallerTest-" + uuid.uuid4().hex
+            event_name = u._event_name(ipc_root, "stop")
+            child_code = r'''
+import ctypes, sys
+k = ctypes.windll.kernel32
+k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+k.CreateMutexW.restype = ctypes.c_void_p
+k.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p]
+k.CreateEventW.restype = ctypes.c_void_p
+k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+k.CloseHandle.argtypes = [ctypes.c_void_p]
+mutex = k.CreateMutexW(None, False, sys.argv[1])
+assert mutex
+event = k.CreateEventW(None, True, False, sys.argv[2]) if sys.argv[3] != 'legacy' else None
+assert sys.argv[3] == 'legacy' or event
+print('READY', flush=True)
+try:
+    if sys.argv[3] == 'cooperative':
+        assert k.WaitForSingleObject(event, 20000) == 0
+    else:
+        sys.stdin.readline()
+finally:
+    if event: k.CloseHandle(event)
+    k.CloseHandle(mutex)
+'''
+            child = subprocess.Popen([sys.executable, "-c", child_code, mutex_name, event_name, mode],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                assert child.stdout.readline().strip() == "READY"
+                started = time.monotonic()
+                result = ps(f"$TimeoutSeconds = 1; Stop-Companions @('{ipc_root}') @('{mutex_name}')")
+                elapsed = time.monotonic() - started
+                if mode == "cooperative":
+                    check("real shutdown event closes a supported child", result.returncode == 0)
+                    child.wait(timeout=5)
+                else:
+                    check(mode + " shutdown returns a clear, bounded retry message",
+                        result.returncode != 0 and elapsed < 10 and "BOTH Jira tray icons" in result.stderr)
+                    check(mode + " running process is never force-killed", child.poll() is None)
+                check(mode + " preflight does not create personal data", not list(ipc_root.iterdir()))
+            finally:
+                child.communicate("\n", timeout=25)
+        absent = "Local\\JiraInstallerAbsent-" + uuid.uuid4().hex
+        result = ps(f"Stop-Companions @('{root}') @('{absent}')")
+        check("fresh install without running companions needs no shutdown event", result.returncode == 0)
+        check("shutdown helper needs no dynamic C# compilation", "Add-Type" not in support.read_text())
         old, new = root / "older build", root / "new build"
         old.mkdir()
         (old / "jira_config.json").write_bytes(b'{"tenant":"arbitrary","token":"fake"}')

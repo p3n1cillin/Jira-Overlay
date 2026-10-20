@@ -35,6 +35,7 @@ VersionInfoVersion={#AppVersion}
 LicenseFile={#StageDir}\LICENSE
 DisableReadyPage=yes
 Uninstallable=yes
+SetupLogging=yes
 
 [Tasks]
 Name: startup; Description: "Start Jira Overlay and the learner when I sign in"; Flags: checkedonce
@@ -58,6 +59,8 @@ var
   LegacyPage: TInputDirWizardPage;
   ErrorFile, Helper, InstallRoot: String;
   AlreadyInstalled: Boolean;
+  PreparationPage: TOutputProgressWizardPage;
+  ShowingPreparation: Boolean;
 
 function ReadResult(var Value: String): Boolean;
 var Data: AnsiString;
@@ -80,6 +83,13 @@ begin Result := not HasFlag('NOSHORTCUTS'); end;
 function LaunchApplication: Boolean;
 begin Result := not HasFlag('NOLAUNCH'); end;
 
+procedure HelperLog(const S: String; const Error, FirstLine: Boolean);
+begin
+  Log(S);
+  if ShowingPreparation then
+    PreparationPage.SetText(S, 'Your original installation is retained. Never force-close a learner that is saving.');
+end;
+
 function RunHelper(Action, Source, Script: String; Startup: Boolean): Boolean;
 var Args, ErrorText: String; Code: Integer;
 begin
@@ -89,10 +99,14 @@ begin
     '" -ResultFile "' + ErrorFile + '" -Version "{#AppVersion}"';
   if Source <> '' then Args := Args + ' -Source "' + Source + '"';
   if Startup then Args := Args + ' -EnableStartup';
-  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    Args, '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  Result := ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Args, '', SW_HIDE, ewWaitUntilTerminated, Code, @HelperLog) and (Code = 0);
   if not Result then begin
-    if not ReadResult(ErrorText) then ErrorText := 'Installer preparation failed. Close both tray icons and retry.';
+    if not ReadResult(ErrorText) then begin
+      ErrorText := 'Installer helper failed (code ' + IntToStr(Code) + '). See the Setup Log in your Windows TEMP folder. ' +
+        'If PowerShell was blocked by security policy, ask your IT team. No running learner is force-killed.';
+      SaveStringToFile(ErrorFile, UTF8Encode(ErrorText), False);
+    end;
     Log(ErrorText);
   end;
 end;
@@ -105,6 +119,7 @@ begin
   ErrorFile := ExpandConstant('{tmp}\jira-installer-result.txt');
   InstallRoot := WizardDirValue;
   AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
+  PreparationPage := CreateOutputProgressPage('Preparing installation', 'Checking apps and safely copying any selected personal data');
   LegacyPage := CreateInputDirPage(wpSelectDir, 'Previous ZIP installation (optional)',
     'Fresh install or upgrade: the same installer handles both.',
     'If you used a ZIP/clone before, select its folder to COPY your settings and learner data. ' +
@@ -133,10 +148,18 @@ begin
   Result := '';
   Source := LegacyPage.Values[0];
   if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
-  WizardForm.StatusLabel.Caption := 'Saving and closing both companions. Learner tuning can take several minutes...';
-  if not RunHelper('Prepare', Source, Helper, False) then begin
-    if not ReadResult(Detail) then Detail := 'Preparation failed. No application code was replaced.';
-    Result := Detail;
+  PreparationPage.SetText('Checking the previous installation...', 'Older builds must be closed using Quit on both tray icons.');
+  PreparationPage.SetProgress(0, 0);
+  PreparationPage.Show;
+  ShowingPreparation := True;
+  try
+    if not RunHelper('Prepare', Source, Helper, False) then begin
+      if not ReadResult(Detail) then Detail := 'Preparation failed. No application code was replaced.';
+      Result := Detail;
+    end;
+  finally
+    ShowingPreparation := False;
+    PreparationPage.Hide;
   end;
 end;
 

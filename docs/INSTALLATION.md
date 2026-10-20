@@ -34,8 +34,16 @@ Windows DPAPI and should not be copied between users. Original folders and their
 historical `triage_backups/` stay untouched for recovery. Do not delete the old
 folder until you have checked the new installation. Old builds without graceful
 shutdown support must be closed using **both** tray icons before installing.
-Newer builds are asked to save/close automatically; tuning can take several
-minutes. The installer never force-kills a learner.
+Newer builds are asked to save/close automatically. If they are still saving
+after 30 seconds, setup returns a clear retry message; tuning can take several
+minutes. Wait for both tray icons to disappear, then **Retry**. A fresh install
+also requires any old running copy to close. The installer never force-kills a learner.
+
+Setup logs are created automatically in `%TEMP%` as `Setup Log ... .txt`.
+If setup closes unexpectedly, share the newest log with the maintainer (review
+it for local paths first). An explicit `/LOG="path"` can select the log location.
+If security software blocks the PowerShell helper, ask your IT team rather than
+disabling security controls.
 
 Git checkouts are never overwritten. A checkout can be a read-only migration
 source, or developers can continue using Git and `setup.bat` instead.
@@ -73,7 +81,7 @@ Interactive installation is recommended for migration. For IT deployment under
 the target user's account:
 
 ```powershell
-.\JiraOverlay-2026.10.20.3-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
+.\JiraOverlay-2026.10.20.4-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
 ```
 
 Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"`,

@@ -6,7 +6,7 @@ param(
     [string]$ResultFile,
     [string]$Version,
     [switch]$EnableStartup,
-    [int]$TimeoutSeconds = 600
+    [ValidateRange(1,60)][int]$TimeoutSeconds = 30
 )
 $ErrorActionPreference = 'Stop'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -24,7 +24,8 @@ function Safe-Tree([string]$Path, [bool]$Recursive = $true) {
         if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Linked/junction application paths are not supported. Choose a normal local folder.'
         }
-        $cursor = $cursor.Parent
+        if ($cursor -is [IO.DirectoryInfo]) { $cursor = $cursor.Parent }
+        else { $cursor = $cursor.Directory }
     }
     if ($item.PSIsContainer -and $Recursive) {
         foreach ($child in Get-ChildItem -LiteralPath $Path -Force -Recurse) {
@@ -53,17 +54,21 @@ function Legacy-Paths {
     return @($paths | Select-Object -Unique)
 }
 
-function Stop-Companions([string[]]$Roots) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class JiraInstallerEvents {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    public static extern IntPtr CreateEvent(IntPtr attributes, bool manual, bool initial, string name);
-    [DllImport("kernel32.dll")] public static extern bool SetEvent(IntPtr handle);
-    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+function Running-Companions([string[]]$MutexNames) {
+    foreach ($mutexName in $MutexNames) {
+        try {
+            $mutex = [Threading.Mutex]::OpenExisting($mutexName)
+            $mutex.Dispose()
+            return $true
+        } catch [Threading.WaitHandleCannotBeOpenedException] { }
+    }
+    return $false
 }
-'@
+
+function Stop-Companions([string[]]$Roots,
+    [string[]]$MutexNames = @('JiraOverlaySingleInstance','JiraTriageLearner')) {
+    Write-Output 'Checking whether the overlay and learner are running...'
+    if (-not (Running-Companions $MutexNames)) { return }
     $handles = @()
     try {
         foreach ($root in ($Roots | Select-Object -Unique)) {
@@ -71,29 +76,33 @@ public static class JiraInstallerEvents {
             try { $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((Canonical $root).ToLowerInvariant())) }
             finally { $sha.Dispose() }
             $hash = ([BitConverter]::ToString($bytes)).Replace('-','').ToLowerInvariant().Substring(0,24)
-            $handle = [JiraInstallerEvents]::CreateEvent([IntPtr]::Zero, $true, $false, "Local\JiraOverlay-$hash-stop")
-            if ($handle -eq [IntPtr]::Zero) { throw 'Cannot request a safe application shutdown.' }
-            $handles += $handle
-            if (-not [JiraInstallerEvents]::SetEvent($handle)) { throw 'Cannot signal the application.' }
+            # Open ONLY an existing listener. Creating a new event used to look
+            # successful even when a legacy app could never hear the request.
+            try {
+                $handle = [Threading.EventWaitHandle]::OpenExisting("Local\JiraOverlay-$hash-stop",
+                    [Security.AccessControl.EventWaitHandleRights]::Modify)
+                $handles += $handle
+                if (-not $handle.Set()) { throw 'Cannot signal the application.' }
+            } catch [Threading.WaitHandleCannotBeOpenedException] { }
         }
-        $until = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        if ($handles.Count -eq 0 -and (Running-Companions $MutexNames)) {
+            throw 'A Jira copy is running without a shutdown listener (an older build, still starting, or in another folder). Choose Quit on BOTH Jira tray icons, then Retry. Hiding the overlay is not enough. No application code or personal data was replaced.'
+        }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $lastNotice = -5
         do {
-            $running = $false
-            foreach ($mutexName in @('JiraOverlaySingleInstance','JiraTriageLearner')) {
-                try {
-                    $mutex = [Threading.Mutex]::OpenExisting($mutexName)
-                    $mutex.Dispose()
-                    $running = $true
-                } catch [Threading.WaitHandleCannotBeOpenedException] { }
+            if (-not (Running-Companions $MutexNames)) { return }
+            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw 'The apps are still saving or running. Choose Quit on BOTH Jira tray icons, wait for them to disappear, then Retry. Learner tuning can take several minutes. Nothing was force-killed and no application code or personal data was replaced.'
             }
-            if (-not $running) { return }
-            if ([DateTime]::UtcNow -ge $until) {
-                throw 'The apps are still running. Close BOTH Jira tray icons, then retry. No running learner is force-killed.'
+            if ($timer.Elapsed.TotalSeconds - $lastNotice -ge 5) {
+                Write-Output ('Waiting for the companions to save and close ({0}s). Never force-killing the learner...' -f [int]$timer.Elapsed.TotalSeconds)
+                $lastNotice = $timer.Elapsed.TotalSeconds
             }
             Start-Sleep -Milliseconds 200
         } while ($true)
     } finally {
-        foreach ($handle in $handles) { [void][JiraInstallerEvents]::CloseHandle($handle) }
+        foreach ($handle in $handles) { $handle.Dispose() }
     }
 }
 
@@ -120,6 +129,7 @@ function File-Digest([string]$Path) {
 function Migrate-Data([string]$Old, [string]$New) {
     if ($Old -eq $New) { return }
     $files = @(Personal-Files $Old)
+    foreach ($file in $files) { Safe-Tree $file.FullName $false }
     if ($files.Count -eq 0) { return }
     if ((Test-Path -LiteralPath $New) -and (@(Personal-Files $New).Count -gt 0)) {
         throw 'The destination already has personal data. Refusing to merge two learners. Use the existing installation or choose an empty destination.'
@@ -130,6 +140,7 @@ function Migrate-Data([string]$Old, [string]$New) {
     $moved = @()
     try {
         foreach ($file in $files) {
+            Write-Output ('Copying and verifying personal data: ' + $file.Name)
             $copy = Join-Path $stage $file.Name
             Copy-Item -LiteralPath $file.FullName -Destination $copy
             if ((File-Digest $copy) -ne (File-Digest $file.FullName)) {
@@ -141,6 +152,7 @@ function Migrate-Data([string]$Old, [string]$New) {
             Move-Item -LiteralPath (Join-Path $stage $file.Name) -Destination (Join-Path $New $file.Name)
             $moved += (Join-Path $New $file.Name)
         }
+        Write-Output 'Personal data copied and verified. The original folder is unchanged.'
     } catch {
         foreach ($created in $moved) { Remove-Item -LiteralPath $created -Force }
         throw
@@ -180,6 +192,7 @@ try {
         if ($found.Count -eq 1) { [IO.File]::WriteAllText($ResultFile, $found[0], (New-Object Text.UTF8Encoding $false)) }
         exit 0
     }
+    Write-Output ('Installer phase: ' + $Action)
     $Target = Canonical $Target
     if ($Target -eq [IO.Path]::GetPathRoot($Target).TrimEnd('\') -or
         $Target -eq [Environment]::GetFolderPath('UserProfile') -or
@@ -216,7 +229,9 @@ try {
     $roots = @($Target)
     if (-not [string]::IsNullOrWhiteSpace($Source)) {
         $Source = Canonical $Source
-        Safe-Tree $Source
+        # Only allowlisted data files are read; do not traverse an old clone's
+        # virtual environments, caches or private backup trees.
+        Safe-Tree $Source $false
         foreach ($name in @('jira_overlay.pyw','triage_learner.pyw')) {
             if (-not (Test-Path -LiteralPath (Join-Path $Source $name) -PathType Leaf)) { throw 'Select the old application folder, containing both scripts.' }
         }

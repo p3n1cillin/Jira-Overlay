@@ -1,6 +1,6 @@
 """One version and update source for the complete application bundle."""
 
-VERSION = "2026.10.20.3"
+VERSION = "2026.10.20.4"
 REPOSITORY = "p3n1cillin/Jira-Overlay"
 
 # Explicit publishing allowlist: never archive a working directory wholesale.
