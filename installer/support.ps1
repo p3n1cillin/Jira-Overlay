@@ -11,6 +11,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $names = @('JiraOverlay', 'JiraTriageLearner')
+$script:FailureCode = 'JIRA-I100'
+
+function Progress([int]$Percent, [string]$Message) {
+    Write-Output ('JIRA_PROGRESS|{0}|{1}' -f $Percent, $Message)
+}
 
 function Canonical([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { throw 'An application path is required.' }
@@ -65,9 +70,61 @@ function Running-Companions([string[]]$MutexNames) {
     return $false
 }
 
+function Request-LegacyQuit([string[]]$Roots, [bool]$DiscoverRunning = $false) {
+    $script:FailureCode = 'JIRA-I113'
+    $bridge = Join-Path $PSScriptRoot 'legacy_shutdown.cs'
+    if (-not ('JiraLegacyShutdown' -as [type])) { Add-Type -Path $bridge }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $sent = 0
+    foreach ($process in Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'") {
+        if ($process.SessionId -ne $session -or -not $process.CommandLine) { continue }
+        $arguments = [JiraLegacyShutdown]::Arguments($process.CommandLine)
+        # Only a direct script invocation, never 'python other.py <app path>',
+        # -c, -m or unrelated Python programs. Unrecognised forms fail closed.
+        $index = 1
+        while ($index -lt $arguments.Count -and $arguments[$index] -in @('-B','-u','-I','-E','-s')) { $index++ }
+        if ($index -ge $arguments.Count -or -not [IO.Path]::IsPathRooted($arguments[$index])) { continue }
+        $scriptPath = Canonical $arguments[$index]
+        $matched = $false
+        foreach ($root in $Roots) {
+            foreach ($name in @('jira_overlay.pyw','triage_learner.pyw')) {
+                if ($scriptPath -eq (Join-Path (Canonical $root) $name)) { $matched = $true }
+            }
+        }
+        if ($DiscoverRunning -and -not $matched -and [IO.Path]::GetFileName($scriptPath) -in @('jira_overlay.pyw','triage_learner.pyw')) {
+            # Fresh-install mode may have neither a selected old folder nor a
+            # startup entry. Identify a real legacy bundle, not a bare script.
+            $directory = Split-Path -Parent $scriptPath
+            $matched = (Test-Path -LiteralPath (Join-Path $directory 'jira_overlay.pyw') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $directory 'triage_learner.pyw') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $directory 'jira_config.json') -PathType Leaf)
+        }
+        if (-not $matched) { continue }
+        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+        if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $identity) { continue }
+        # Never trust PID alone: obtain a process handle before rechecking its
+        # identity, and retain it until the window messages have been posted.
+        try { $live = [Diagnostics.Process]::GetProcessById([int]$process.ProcessId) }
+        catch [ArgumentException] { continue }
+        try {
+            $null = $live.Handle
+            $fresh = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.ProcessId)
+            if (-not $fresh -or $fresh.CreationDate -ne $process.CreationDate -or
+                $fresh.CommandLine -ne $process.CommandLine) { continue }
+            $sent += [JiraLegacyShutdown]::Request($process.ProcessId, ([IO.Path]::GetFileName($scriptPath) -eq 'triage_learner.pyw'))
+        } finally { $live.Dispose() }
+    }
+    if ($sent -gt 0) {
+        Progress 15 'Requested Quit for the selected older app windows. Waiting for them to close...'
+    }
+    return $sent
+}
+
 function Stop-Companions([string[]]$Roots,
     [string[]]$MutexNames = @('JiraOverlaySingleInstance','JiraTriageLearner')) {
-    Write-Output 'Checking whether the overlay and learner are running...'
+    $script:FailureCode = 'JIRA-I110'
+    Progress 10 'Checking whether the overlay and learner are running...'
     if (-not (Running-Companions $MutexNames)) { return }
     $handles = @()
     try {
@@ -85,18 +142,32 @@ function Stop-Companions([string[]]$Roots,
                 if (-not $handle.Set()) { throw 'Cannot signal the application.' }
             } catch [Threading.WaitHandleCannotBeOpenedException] { }
         }
+        # Listener builds save/join their worker before exiting. Only use the
+        # compatibility bridge if there was NO supported listener to signal.
         if ($handles.Count -eq 0 -and (Running-Companions $MutexNames)) {
-            throw 'A Jira copy is running without a shutdown listener (an older build, still starting, or in another folder). Choose Quit on BOTH Jira tray icons, then Retry. Hiding the overlay is not enough. No application code or personal data was replaced.'
+            # Windows startup can identify an old running ZIP even when a
+            # fresh install was chosen. Never import data from these roots.
+            $discoverRunning = ($MutexNames.Count -eq 2 -and $MutexNames[0] -eq 'JiraOverlaySingleInstance' -and $MutexNames[1] -eq 'JiraTriageLearner')
+            $legacyRoots = @($Roots)
+            if ($discoverRunning) { $legacyRoots += @(Legacy-Paths) }
+            $requested = @(Request-LegacyQuit $legacyRoots $discoverRunning)
+            # Relay progress separately from the integer return value.
+            foreach ($notice in $requested) { if ($notice -is [string]) { Write-Output $notice } }
+            $script:FailureCode = 'JIRA-I111'
+            if ($requested[-1] -eq 0 -and (Running-Companions $MutexNames)) {
+                throw 'A Jira copy is running but could not be safely identified or asked to quit. Select its previous-install folder, or choose Quit on BOTH Jira tray icons, then Retry. Hiding the overlay is not enough. No application code or personal data was replaced.'
+            }
         }
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $lastNotice = -5
         do {
             if (-not (Running-Companions $MutexNames)) { return }
             if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                $script:FailureCode = 'JIRA-I112'
                 throw 'The apps are still saving or running. Choose Quit on BOTH Jira tray icons, wait for them to disappear, then Retry. Learner tuning can take several minutes. Nothing was force-killed and no application code or personal data was replaced.'
             }
             if ($timer.Elapsed.TotalSeconds - $lastNotice -ge 5) {
-                Write-Output ('Waiting for the companions to save and close ({0}s). Never force-killing the learner...' -f [int]$timer.Elapsed.TotalSeconds)
+                Progress (15 + [int](15 * $timer.Elapsed.TotalSeconds / $TimeoutSeconds)) ('Waiting for the companions to save and close ({0}s). Never force-killing the learner...' -f [int]$timer.Elapsed.TotalSeconds)
                 $lastNotice = $timer.Elapsed.TotalSeconds
             }
             Start-Sleep -Milliseconds 200
@@ -127,6 +198,7 @@ function File-Digest([string]$Path) {
 }
 
 function Migrate-Data([string]$Old, [string]$New) {
+    $script:FailureCode = 'JIRA-I120'
     if ($Old -eq $New) { return }
     $files = @(Personal-Files $Old)
     foreach ($file in $files) { Safe-Tree $file.FullName $false }
@@ -139,20 +211,22 @@ function Migrate-Data([string]$Old, [string]$New) {
     [void][IO.Directory]::CreateDirectory($stage)
     $moved = @()
     try {
+        $number = 0
         foreach ($file in $files) {
-            Write-Output ('Copying and verifying personal data: ' + $file.Name)
+            Progress (35 + [int](55 * $number / $files.Count)) ('Copying and verifying personal data: ' + $file.Name)
             $copy = Join-Path $stage $file.Name
             Copy-Item -LiteralPath $file.FullName -Destination $copy
             if ((File-Digest $copy) -ne (File-Digest $file.FullName)) {
                 throw 'A personal-data copy did not verify; the original installation is untouched.'
             }
+            $number++
         }
         # Historical backups remain at the original path (which is never deleted).
         foreach ($file in $files) {
             Move-Item -LiteralPath (Join-Path $stage $file.Name) -Destination (Join-Path $New $file.Name)
             $moved += (Join-Path $New $file.Name)
         }
-        Write-Output 'Personal data copied and verified. The original folder is unchanged.'
+        Progress 95 'Personal data copied and verified. The original folder is unchanged.'
     } catch {
         foreach ($created in $moved) { Remove-Item -LiteralPath $created -Force }
         throw
@@ -192,7 +266,8 @@ try {
         if ($found.Count -eq 1) { [IO.File]::WriteAllText($ResultFile, $found[0], (New-Object Text.UTF8Encoding $false)) }
         exit 0
     }
-    Write-Output ('Installer phase: ' + $Action)
+    $script:FailureCode = 'JIRA-I101'
+    Progress 0 ('Installer phase: ' + $Action)
     $Target = Canonical $Target
     if ($Target -eq [IO.Path]::GetPathRoot($Target).TrimEnd('\') -or
         $Target -eq [Environment]::GetFolderPath('UserProfile') -or
@@ -241,9 +316,11 @@ try {
         'Prepare' {
             Stop-Companions $roots
             if ($Source) { Migrate-Data $Source $Target }
+            Progress 100 'Preparation complete. Ready to install program files.'
         }
         'Stop' { Stop-Companions @($Target) }
         'Finish' {
+            $script:FailureCode = 'JIRA-I130'
             Remove-OwnedStartup $roots
             if ($EnableStartup) {
                 [void](New-Item -Path $runKey -Force)
@@ -255,12 +332,14 @@ try {
                 }
             }
         }
-        'RemoveStartup' { Remove-OwnedStartup @($Target) }
+        'RemoveStartup' { $script:FailureCode = 'JIRA-I130'; Remove-OwnedStartup @($Target) }
     }
     exit 0
 } catch {
-    if ($ResultFile) { [IO.File]::WriteAllText($ResultFile, $_.Exception.Message, (New-Object Text.UTF8Encoding $false)) }
-    Write-Error $_.Exception.Message -ErrorAction Continue
+    $detail = '[' + $script:FailureCode + '] ' + $_.Exception.Message
+    if ($script:FailureCode -eq 'JIRA-I113') { $detail += ' Windows could not run the legacy quit helper. Quit both tray icons manually and Retry; ask IT if a policy blocks the helper.' }
+    if ($ResultFile) { [IO.File]::WriteAllText($ResultFile, $detail, (New-Object Text.UTF8Encoding $false)) }
+    Write-Error $detail -ErrorAction Continue
     exit 1
 }
 }

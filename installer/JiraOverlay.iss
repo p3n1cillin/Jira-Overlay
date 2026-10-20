@@ -36,6 +36,7 @@ LicenseFile={#StageDir}\LICENSE
 DisableReadyPage=yes
 Uninstallable=yes
 SetupLogging=yes
+UninstallLogging=yes
 
 [Tasks]
 Name: startup; Description: "Start Jira Overlay and the learner when I sign in"; Flags: checkedonce
@@ -43,6 +44,7 @@ Name: startup; Description: "Start Jira Overlay and the learner when I sign in";
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"
 Source: "support.ps1"; Flags: dontcopy
+Source: "legacy_shutdown.cs"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\Jira Overlay"; Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Check: MakeShortcuts
@@ -84,10 +86,23 @@ function LaunchApplication: Boolean;
 begin Result := not HasFlag('NOLAUNCH'); end;
 
 procedure HelperLog(const S: String; const Error, FirstLine: Boolean);
+var MessageText, Number: String; Separator, Percent: Integer;
 begin
   Log(S);
-  if ShowingPreparation then
-    PreparationPage.SetText(S, 'Your original installation is retained. Never force-close a learner that is saving.');
+  if ShowingPreparation then begin
+    MessageText := S;
+    if Pos('JIRA_PROGRESS|', S) = 1 then begin
+      MessageText := Copy(S, 15, Length(S));
+      Separator := Pos('|', MessageText);
+      if Separator > 0 then begin
+        Number := Copy(MessageText, 1, Separator - 1);
+        Percent := StrToIntDef(Number, 0);
+        PreparationPage.SetProgress(Percent, 100);
+        MessageText := Copy(MessageText, Separator + 1, Length(MessageText));
+      end;
+    end;
+    PreparationPage.SetText(MessageText, 'Closing apps, checking folders and verifying personal data. Your old folder is retained.');
+  end;
 end;
 
 function RunHelper(Action, Source, Script: String; Startup: Boolean): Boolean;
@@ -103,7 +118,7 @@ begin
     Args, '', SW_HIDE, ewWaitUntilTerminated, Code, @HelperLog) and (Code = 0);
   if not Result then begin
     if not ReadResult(ErrorText) then begin
-      ErrorText := 'Installer helper failed (code ' + IntToStr(Code) + '). See the Setup Log in your Windows TEMP folder. ' +
+      ErrorText := '[JIRA-I900] Installer helper failed (Windows/helper status ' + IntToStr(Code) + '). See the Setup Log in your Windows TEMP folder. ' +
         'If PowerShell was blocked by security policy, ask your IT team. No running learner is force-killed.';
       SaveStringToFile(ErrorFile, UTF8Encode(ErrorText), False);
     end;
@@ -115,6 +130,7 @@ procedure InitializeWizard;
 var OldPath, RunValue: String;
 begin
   ExtractTemporaryFile('support.ps1');
+  ExtractTemporaryFile('legacy_shutdown.cs');
   Helper := ExpandConstant('{tmp}\support.ps1');
   ErrorFile := ExpandConstant('{tmp}\jira-installer-result.txt');
   InstallRoot := WizardDirValue;
@@ -123,7 +139,7 @@ begin
   LegacyPage := CreateInputDirPage(wpSelectDir, 'Previous ZIP installation (optional)',
     'Fresh install or upgrade: the same installer handles both.',
     'If you used a ZIP/clone before, select its folder to COPY your settings and learner data. ' +
-    'The old folder and its backups are kept. Leave blank for a new user. Close both old tray icons first if they do not close automatically.', False, '');
+    'The old folder and its backups are kept. Leave blank for a new user. Setup will ask any running apps to quit automatically.', False, '');
   LegacyPage.Add('Previous application folder:');
   if RunHelper('Discover', '', Helper, False) then
     if ReadResult(OldPath) then LegacyPage.Values[0] := OldPath;
@@ -148,8 +164,8 @@ begin
   Result := '';
   Source := LegacyPage.Values[0];
   if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
-  PreparationPage.SetText('Checking the previous installation...', 'Older builds must be closed using Quit on both tray icons.');
-  PreparationPage.SetProgress(0, 0);
+  PreparationPage.SetText('Checking the previous installation...', 'Running apps will be asked to quit automatically.');
+  PreparationPage.SetProgress(0, 100);
   PreparationPage.Show;
   ShowingPreparation := True;
   try
@@ -164,13 +180,15 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var Source: String;
+var Source, Detail: String;
 begin
   if CurStep = ssPostInstall then begin
     Source := LegacyPage.Values[0];
     if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
-    if not RunHelper('Finish', Source, Helper, WizardIsTaskSelected('startup') and not HasFlag('NOSTARTUP')) then
-      RaiseException('The files were installed but startup registration failed. Run the installer again to repair it.');
+    if not RunHelper('Finish', Source, Helper, WizardIsTaskSelected('startup') and not HasFlag('NOSTARTUP')) then begin
+      if not ReadResult(Detail) then Detail := '[JIRA-I130] Startup registration failed.';
+      RaiseException(Detail + ' Program files are installed. Run setup again to repair startup registration.');
+    end;
   end;
 end;
 
@@ -187,10 +205,13 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var Detail: String;
 begin
   if CurUninstallStep = usUninstall then
-    if not RunHelper('RemoveStartup', '', ExpandConstant('{app}\installer_support.ps1'), False) then
-      RaiseException('Cannot remove this installation startup entries. Uninstall cancelled.');
+    if not RunHelper('RemoveStartup', '', ExpandConstant('{app}\installer_support.ps1'), False) then begin
+      if not ReadResult(Detail) then Detail := '[JIRA-I130] Cannot remove this installation startup entries.';
+      RaiseException(Detail + ' Uninstall cancelled; personal data is retained.');
+    end;
 end;
 
 // No broad uninstall deletion: Inno removes ONLY files it installed.

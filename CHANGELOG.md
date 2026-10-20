@@ -7,11 +7,12 @@ Settings, for what a running install is actually on.
 ## [2026.10.20.4]
 
 ### Installer recovery
-- Running legacy copies without shutdown support now produce an immediate instruction to Quit both tray icons and Retry, including during a fresh install, instead of an invisible ten-minute wait.
+- Setup automatically requests shutdown for supported builds, and closes identifiable older builds through their Tk/pystray window loops. Matching checks the script path, Windows user and session; unrelated Python programs are never terminated.
+- Unidentifiable running copies produce an immediate instruction to Quit both tray icons and Retry, including during a fresh install, instead of an invisible ten-minute wait.
 - Supported copies receive a safe shutdown request; a bounded wait reports progress and explains how to retry if the learner is still saving. No learner is force-killed.
-- Preparation has a visible progress page, helper output is captured, and setup logs are enabled by default to diagnose helper/policy failures.
+- Preparation has a staged progress bar, helper output is captured, and setup logs are enabled by default. Stable JIRA-Ixxx failure codes distinguish path validation, app shutdown, data migration, startup registration and helper/policy failures.
 - Migration checks only the personal files being imported, avoiding unrelated old virtual environments and backup trees. Originals and credentials are preserved.
-- Regression coverage includes actual running legacy, cooperative and slow shutdown processes, plus blocked native installation retries.
+- Regression coverage includes actual running legacy Tk/pystray loops, cooperative and slow shutdown processes, automatic old-build quit, plus blocked native installation retries.
 
 ## [2026.10.20.3]
 

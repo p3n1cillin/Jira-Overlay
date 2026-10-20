@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +48,7 @@ def check_blocked(command, log, child):
     text = log.read_text(encoding="utf-8-sig", errors="replace")
     assert result.returncode != 0, "A running legacy writer must block code replacement"
     assert "BOTH Jira tray icons" in text, text[-10000:]
+    assert "JIRA-I111" in text, text[-10000:]
     assert child.poll() is None, "Installer force-killed a running legacy writer"
 
 
@@ -118,6 +120,21 @@ def main(installer):
         execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "fresh.log")])
         check_install(root)
         assert not (root / "jira_config.json").exists(), "Installer must not ship credentials"
+        # Actual EXE asks an old tray-based learner to quit before replacing
+        # its script/private interpreter. This is the user's reported scenario.
+        fixture = (Path(__file__).resolve().parents[1] / "tests/fixtures/legacy_shutdown_app.py").read_bytes()
+        (root / "triage_learner.pyw").write_bytes(fixture)
+        child = subprocess.Popen([str(root / "runtime/python.exe"), str(root / "triage_learner.pyw")],
+            env=dict(os.environ, JIRA_TEST_MUTEX="JiraTriageLearner"), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert child.stdout.readline().strip() == "READY"
+            execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "automatic-quit.log")])
+            child.wait(timeout=10)
+            assert (root / "closed.txt").read_text() == "normal loop exit"
+            assert (root / "triage_learner.pyw").read_bytes() != fixture
+        finally:
+            child.communicate("\n", timeout=20)
         execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         # Legacy migration, with deterministic explicit selection in silent mode.
         execute(args + ["/LEGACYDIR=" + str(old), "/LOG=" + str(base / "install.log")])

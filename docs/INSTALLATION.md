@@ -32,9 +32,12 @@ merge or replace a different dataset already at the destination.
 Use the **same Windows account**: encrypted Jira credentials are protected by
 Windows DPAPI and should not be copied between users. Original folders and their
 historical `triage_backups/` stay untouched for recovery. Do not delete the old
-folder until you have checked the new installation. Old builds without graceful
-shutdown support must be closed using **both** tray icons before installing.
-Newer builds are asked to save/close automatically. If they are still saving
+folder until you have checked the new installation. Setup automatically asks
+newer builds to save/close. Identifiable older builds are closed through their
+Tk/pystray window loops, without terminating other Python programs. Legacy builds
+retain their last-saved data; unlike newer builds, they cannot promise to flush
+unsaved learning on exit. Unrecognised or security-blocked copies require
+**Quit** on both tray icons. If apps are still saving
 after 30 seconds, setup returns a clear retry message; tuning can take several
 minutes. Wait for both tray icons to disappear, then **Retry**. A fresh install
 also requires any old running copy to close. The installer never force-kills a learner.
@@ -44,6 +47,25 @@ If setup closes unexpectedly, share the newest log with the maintainer (review
 it for local paths first). An explicit `/LOG="path"` can select the log location.
 If security software blocks the PowerShell helper, ask your IT team rather than
 disabling security controls.
+
+Preparation shows a progress bar for app shutdown, checks and verified migration;
+file installation then uses the normal setup progress bar. Startup registration
+and launch are automatic, respecting the user's existing startup preference.
+
+| Failure code | Reason and next step |
+| --- | --- |
+| `JIRA-I101` | Unsafe/invalid destination, newer installed build, or wrong old folder. Follow the specific path message. |
+| `JIRA-I110` | Windows could not verify or signal running apps. Quit both tray icons and retry. |
+| `JIRA-I111` | Running copy could not be identified/asked to quit. Select its folder or quit both tray icons. |
+| `JIRA-I112` | App is still saving/running after 30 seconds. Wait for both icons to disappear, then retry. |
+| `JIRA-I113` | Legacy quit bridge failed or was blocked. Quit both icons manually; ask IT if policy blocked it. |
+| `JIRA-I120` | Personal-data migration failed or would merge learners. Original data is retained; follow the specific copy/destination reason. |
+| `JIRA-I130` | Windows startup registration/cleanup failed. Check the log and rerun setup to repair. |
+| `JIRA-I900` | PowerShell helper could not run/complete. The log includes its Windows/helper status; ask IT about policy restrictions. |
+
+These diagnostic codes are displayed in the message and log; the setup process
+still uses standard Inno exit statuses for deployment tools. Code `JIRA-I100`
+is reserved for an unexpected failure before a lifecycle phase starts.
 
 Git checkouts are never overwritten. A checkout can be a read-only migration
 source, or developers can continue using Git and `setup.bat` instead.

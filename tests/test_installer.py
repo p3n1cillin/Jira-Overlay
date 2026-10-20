@@ -113,7 +113,30 @@ finally:
         absent = "Local\\JiraInstallerAbsent-" + uuid.uuid4().hex
         result = ps(f"Stop-Companions @('{root}') @('{absent}')")
         check("fresh install without running companions needs no shutdown event", result.returncode == 0)
-        check("shutdown helper needs no dynamic C# compilation", "Add-Type" not in support.read_text())
+        check("new supported builds need no legacy Windows bridge",
+            "Add-Type" not in support.read_text().split("function Stop-Companions", 1)[1])
+        fixture = (PROJECT / "tests/fixtures/legacy_shutdown_app.py").read_bytes()
+        for script in ("jira_overlay.pyw", "triage_learner.pyw"):
+            old_root = root / ("legacy-" + script)
+            old_root.mkdir()
+            for name in ("jira_overlay.pyw", "triage_learner.pyw"):
+                (old_root / name).write_bytes(fixture)
+            (old_root / "jira_config.json").write_bytes(b'{"test":"not-a-real-credential"}')
+            mutex = "Local\\JiraInstallerTest-" + uuid.uuid4().hex
+            env = dict(os.environ, JIRA_TEST_MUTEX=mutex)
+            child = subprocess.Popen([sys.executable, str(old_root / script)], env=env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                assert child.stdout.readline().strip() == "READY"
+                result = ps(f"$TimeoutSeconds=5; Stop-Companions @('{old_root}') @('{mutex}')")
+                if result.returncode:
+                    print(result.stdout, result.stderr)
+                check(script + " legacy windows quit automatically without killing Python", result.returncode == 0)
+                child.wait(timeout=10)
+                check(script + " reaches normal loop cleanup", (old_root / "closed.txt").exists())
+                check(script + " retains existing config", (old_root / "jira_config.json").read_bytes() == b'{"test":"not-a-real-credential"}')
+            finally:
+                child.communicate("\n", timeout=20)
         old, new = root / "older build", root / "new build"
         old.mkdir()
         (old / "jira_config.json").write_bytes(b'{"tenant":"arbitrary","token":"fake"}')
@@ -150,6 +173,8 @@ finally:
         }} finally {{ Remove-Item -LiteralPath $runKey }}
         """)
         check("uninstall removes only startup entries belonging to its own folder", p.returncode == 0)
+        invalid = ps("$Action='Prepare'; $Target=[Environment]::GetFolderPath('UserProfile'); Invoke-Lifecycle")
+        check("validation failures include a stable reason code", invalid.returncode != 0 and "JIRA-I101" in invalid.stderr)
 
 check("installer source has no wildcard data deletion",
       "[UninstallDelete]" not in (PROJECT / "installer/JiraOverlay.iss").read_text().split("[Code]")[0])

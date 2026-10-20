@@ -74,6 +74,7 @@ def build(compiler, output):
         shutil.copy2(ROOT / "README.md", stage / "README.md")
         runtime(stage / "runtime")
         shutil.copy2(ROOT / "installer" / "support.ps1", stage / "installer_support.ps1")
+        shutil.copy2(ROOT / "installer" / "legacy_shutdown.cs", stage / "legacy_shutdown.cs")
         subprocess.run([str(compiler), "/DAppVersion=" + VERSION,
                         "/DStageDir=" + str(stage), "/DOutputDir=" + str(output),
                         str(ROOT / "installer" / "JiraOverlay.iss")], check=True)
