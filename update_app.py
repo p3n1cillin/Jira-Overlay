@@ -60,6 +60,7 @@ def main():
     changed = False
     stopped = False
     target = None
+    version = None
     try:
         target_text = args.target
         if args.choose_target or not target_text:
@@ -78,7 +79,7 @@ def main():
             payload = None
         elif args.payload:
             payload = Path(args.payload).resolve()
-            updates.verify_payload(payload)
+            version = updates.verify_payload(payload)["version"]
             action = None  # the in-app update button already obtained consent
         else:
             # One-time migration for older GitHub ZIP installations: use the
@@ -112,6 +113,8 @@ def main():
                 else:
                     updates.install_payload(target, payload)
                 changed = True
+        if version:
+            updates.record_update(target, version, "completed", "Application update completed.")
         restart_apps(target)
         return 0
     except Exception as exc:
@@ -120,6 +123,8 @@ def main():
         if target is not None:
             try:
                 (target / "app_update_error.log").write_text(detail + "\n", encoding="utf-8")
+                if version:
+                    updates.record_update(target, version, "failed", detail, notified=True)
             except OSError:
                 pass
         messagebox.showerror("Jira Overlay update", detail + "\n\nIf an interrupted update needs recovery, run update.bat --rollback. Your personal data has not been replaced.", parent=window)

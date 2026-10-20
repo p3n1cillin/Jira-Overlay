@@ -153,7 +153,32 @@ def main(installer):
                 assert (root / name).read_bytes() == data
         # Upgrade without the override: an explicitly disabled startup choice
         # must remain disabled even if the previous installer task was checked.
-        execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "upgrade.log")])
+        # Exercise the production unattended supervisor from the installed
+        # PRIVATE Python. The caller must exit, releasing its runtime DLLs;
+        # only external Windows PowerShell remains during replacement.
+        supervisor = subprocess.run([str(root / "runtime/python.exe"), "-c",
+            "import json,sys;import app_updates;from native_update import launch;"
+            "root,installer,version,digest=sys.argv[1:];"
+            "app_updates.record_update(root,version,'downloading');"
+            "p=launch(root,installer,{'version':version,'installer':{'sha256':digest}},relaunch=False);"
+            "print(p.pid,flush=True)", str(root), str(installer), app_updates.VERSION,
+            hashlib.sha256(installer.read_bytes()).hexdigest()], capture_output=True, text=True, timeout=30)
+        assert supervisor.returncode == 0, supervisor.stderr
+        pid = int(supervisor.stdout.strip())
+        kernel = ctypes.windll.kernel32
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.OpenProcess(0x100000, False, pid)
+        if handle:
+            try:
+                assert kernel.WaitForSingleObject(handle, 180000) == 0, "Unattended installer timed out"
+            finally:
+                kernel.CloseHandle(handle)
+        state = app_updates.update_state(root)
+        assert state.get("phase") == "completed", state
+        assert state.get("version") == app_updates.VERSION
         check_install(root)
         assert (root / "triage_review.py").is_file()
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER,

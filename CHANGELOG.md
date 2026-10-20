@@ -4,6 +4,16 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.20.5]
+
+### Automatic updates
+- Published installs automatically download and verify newer stable releases, save/close both apps, install and relaunch. Automatic installation is on by default, with a Settings opt-out; disabling checking disables automatic installation too. Manual updates retain confirmation.
+- Native updates are supervised by an external Windows process, not the private Python runtime being replaced. Setup shows progress, suppresses confirmation prompts and never automatically reboots Windows.
+- Durable update status and a six-hour per-version retry delay prevent repeated failed downloads/installation on every app launch. Manual retries and newer releases remain available.
+- Installer failures attempt to relaunch the retained/rolled-back app; failure reasons/codes are shown once and kept in local diagnostics. ZIP updates also report helper failure without leaving controls stuck busy.
+- Git and organised source trees remain excluded. Credentials, tenant-specific configuration, personal learner data, existing startup preference and older ZIP updater compatibility are preserved.
+- Added supervisor/checksum/failure/relaunch/opt-out regression tests and a native CI upgrade launched from the private interpreter, which exits before its own runtime is replaced.
+
 ## [2026.10.20.4]
 
 ### Installer recovery

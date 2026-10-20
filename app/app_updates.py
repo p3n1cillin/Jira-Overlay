@@ -10,6 +10,7 @@ import contextlib
 import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -33,10 +34,58 @@ MANIFEST = "release-manifest.json"
 MUTEXES = ("JiraOverlaySingleInstance", "JiraTriageLearner")
 _HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
           "objects.githubusercontent.com", "github-releases.githubusercontent.com"}
+UPDATE_STATE = "app_update_status.json"
+AUTO_RETRY_SECONDS = 6 * 60 * 60
 
 
 class UpdateError(Exception):
     pass
+
+
+def source_checkout(root):
+    root = Path(root)
+    return (root / ".git").exists() or (root / "app" / "app_release.py").is_file()
+
+
+def update_state(root):
+    """Read bounded, non-secret lifecycle diagnostics, not the Jira config."""
+    try:
+        path = _inside_file(Path(root).resolve(), UPDATE_STATE)
+        if path.stat().st_size > 16384:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(value, dict):
+            return {}
+        version_key(value.get("version"))
+        attempted = value.get("attemptedAt")
+        if isinstance(attempted, bool) or not isinstance(attempted, (int, float)) or not math.isfinite(attempted):
+            return {}
+        return value
+    except (OSError, ValueError, UpdateError):
+        return {}
+
+
+def record_update(root, version, phase, detail="", *, notified=False, log=""):
+    root = Path(root).resolve()
+    version_key(version)
+    previous = update_state(root)
+    attempted = previous.get("attemptedAt", time.time()) if previous.get("version") == version and phase != "downloading" else time.time()
+    value = {"schema": 1, "version": version, "attemptedAt": attempted,
+             "phase": phase, "detail": str(detail)[:1500], "notified": notified, "log": str(log)[:1500]}
+    _atomic(_inside_file(root, UPDATE_STATE), json.dumps(value).encode("utf-8"))
+    return value
+
+
+def automatic_update_due(root, version, now=None):
+    if source_checkout(root):
+        return False
+    previous = update_state(root)
+    if previous.get("version") != version or previous.get("phase") == "cancelled":
+        return True
+    # One attempt after clock rollback repairs the timestamp rather than
+    # postponing all future updates until an erroneous future date.
+    now = time.time() if now is None else now
+    return now < previous["attemptedAt"] or now - previous["attemptedAt"] >= AUTO_RETRY_SECONDS
 
 
 def version_key(value):
@@ -149,7 +198,7 @@ def _manifest(value, expected_version=None, repository=REPOSITORY):
     if expected_version and value["version"] != expected_version:
         raise UpdateError("Package and advertised version differ")
     files = value.get("files")
-    required = {"app_release.py", "app_updates.py", "app_startup.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
+    required = {"app_release.py", "app_updates.py", "app_startup.py", "native_update.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
                 "triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
                 "setup.py", "requirements.txt", "setup.bat", "setup.ps1", "launch.bat", "update.bat", "release_tools.py", "source_layout.py"}
     if not isinstance(files, dict) or not required <= files.keys() or len(files) > 100:

@@ -47,6 +47,7 @@ from source_layout import activate
 activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
 import app_startup
+import native_update
 from app_release import VERSION as APP_VERSION
 from triage_support import status_view
 
@@ -445,6 +446,9 @@ def unprotect_secret(encoded: str) -> Optional[str]:
 
 def normalise_config(cfg: dict) -> dict:
     """Make a config safe to use, whatever is actually in the file."""
+    for key in ("checkForUpdates", "autoInstallUpdates"):
+        if key in cfg and not isinstance(cfg[key], bool):
+            cfg[key] = False  # malformed opt-outs must never enable installation
     for key, (cast, default, low, high) in _NUMERIC_SETTINGS.items():
         if key not in cfg:
             continue
@@ -517,7 +521,7 @@ _OVERLAY_KEYS = {
     "serviceDeskId", "serviceDeskName", "projectKey",
     "alertQueue", "alertQueues", "trayBadgeQueue", "hiddenQueues",
     "skipKeywords", "maxQueueSize", "refreshSeconds", "alertQueuesAsked",
-    "notificationsEnabled", "soundEnabled", "checkForUpdates",
+    "notificationsEnabled", "soundEnabled", "checkForUpdates", "autoInstallUpdates",
     "alpha", "overlayWidth", "alwaysVisible",
     "slaField", "slaEnabled",
     "reportUsers", "reportRange", "reportBasis",
@@ -2165,6 +2169,7 @@ class JiraOverlay:
         self._fetch()
         self.root.after(30_000, self._update_relative_time)
         self._update_timer = self.root.after(15_000, lambda: self._check_updates(False))
+        self.root.after(2_000, self._report_previous_update)
 
     # Updates use a separate, unauthenticated GitHub connection, never Jira's Session.
     def _check_updates(self, manual=True):
@@ -2207,25 +2212,55 @@ class JiraOverlay:
         self._update_timer = self.root.after(6*60*60*1000, lambda: self._check_updates(False))
         if manual:
             messagebox.showinfo("Application updates", text, parent=self.root)
+        elif release and self.config.get("checkForUpdates", True) and self.config.get("autoInstallUpdates", True):
+            root = os.path.dirname(os.path.abspath(__file__))
+            if updates.source_checkout(root):
+                self._set_update_status(text + "; Git/source checkout: update using Git.")
+            elif updates.automatic_update_due(root, release["version"]):
+                self._install_update(automatic=True)
+            else:
+                previous = updates.update_state(root)
+                self._set_update_status(text + "; automatic retry is delayed after the last attempt. " + previous.get("detail", ""))
         elif release and self._update_notice != release["version"]:
             self._update_notice = release["version"]
             if self.config.get("notificationsEnabled", True):
                 send_toast("Jira Overlay update", text + ". Open Settings to update.")
 
-    def _install_update(self):
+    def _report_previous_update(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        previous = updates.update_state(root)
+        if previous.get("phase") == "failed" and not previous.get("notified"):
+            try:
+                updates.record_update(root, previous["version"], "failed", previous.get("detail", "Update failed"),
+                    notified=True, log=previous.get("log", ""))
+            except (OSError, updates.UpdateError):
+                pass
+            self._update_failed(previous.get("detail", "Update failed"), record=False)
+
+    def _install_update(self, automatic=False):
         release = self._update_release
         if not release or self._update_busy:
             return
         root = os.path.dirname(os.path.abspath(__file__))
-        if os.path.exists(os.path.join(root, ".git")):
-            messagebox.showinfo("Git checkout", "Close both apps and use git pull --ff-only to update this checkout. Automatic updates never overwrite Git working files.", parent=self.root)
+        if automatic and not (self.config.get("checkForUpdates", True) and self.config.get("autoInstallUpdates", True)):
+            return
+        if updates.source_checkout(root):
+            if not automatic:
+                messagebox.showinfo("Git checkout", "Close both apps and use git pull --ff-only to update this checkout. Automatic updates never overwrite Git working files.", parent=self.root)
             return
         native = updates.native_install(root)
         if native and not release.get("installer"):
-            messagebox.showinfo("Application update", "This release has no Windows installer. Please use the release page; your installation has not changed.", parent=self.root)
+            self._set_update_status("This release has no Windows installer; use the release page. No files changed.")
+            if not automatic:
+                messagebox.showinfo("Application update", self._update_status, parent=self.root)
             return
         detail = "The Windows installer will upgrade the application and its private runtime." if native else "Old code is backed up for rollback."
-        if not messagebox.askyesno("Update and restart", f"Install version {release['version']} from {updates.REPOSITORY}?\n\nBoth apps will save, close and restart. Credentials, settings and learner data will be preserved. " + detail, parent=self.root):
+        if not automatic and not messagebox.askyesno("Update and restart", f"Install version {release['version']} from {updates.REPOSITORY}?\n\nBoth apps will save, close and restart. Credentials, settings and learner data will be preserved. " + detail, parent=self.root):
+            return
+        try:
+            updates.record_update(root, release["version"], "downloading")
+        except (OSError, updates.UpdateError) as exc:
+            self._update_failed("[JIRA-U101] Cannot record the update safely: " + str(exc), record=False)
             return
         self._update_busy = True
         self._set_update_status("Downloading and verifying the complete package…")
@@ -2234,38 +2269,80 @@ class JiraOverlay:
             try:
                 if native:
                     installer = updates.stage_installer(release)
-                    self._post(lambda: self._launch_native_installer(root, installer))
+                    self._post(lambda: self._launch_native_installer(root, installer, release, automatic))
                 else:
                     payload = updates.stage_release(release)
-                    self._post(lambda: self._launch_update_helper(root, payload))
+                    self._post(lambda: self._launch_update_helper(root, payload, automatic))
             except Exception as exc:
                 detail = str(exc)[:250]
                 self._post(lambda: self._update_failed(detail))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _launch_native_installer(self, root, installer):
+    def _automatic_update_cancelled(self, root, automatic):
+        if automatic and not (self.config.get("checkForUpdates", True) and self.config.get("autoInstallUpdates", True)):
+            self._update_busy = False
+            updates.record_update(root, self._update_release["version"], "cancelled", "Automatic updates were disabled during download.")
+            self._set_update_status("Downloaded update not installed: automatic updates are disabled.")
+            return True
+        return False
+
+    def _launch_native_installer(self, root, installer, release=None, automatic=False):
         try:
-            subprocess.Popen([str(installer), "/SILENT", "/NORESTART", "/DIR=" + root],
-                             cwd=os.path.dirname(str(installer)), creationflags=0x08000000)
+            if self._automatic_update_cancelled(root, automatic):
+                return
+            process = native_update.launch(root, installer, release or self._update_release)
             self._set_update_status("Installer started; saving and closing both apps…")
-        except OSError as exc:
+            def monitor():
+                code = process.wait()
+                if code not in (0, 3):
+                    self._post(self._native_update_finished)
+            threading.Thread(target=monitor, daemon=True).start()
+        except Exception as exc:
             self._update_failed(str(exc))
 
-    def _update_failed(self, detail):
+    def _native_update_finished(self):
+        previous = updates.update_state(os.path.dirname(os.path.abspath(__file__)))
+        detail = previous.get("detail") if previous.get("phase") == "failed" else None
+        self._update_failed(detail or "[JIRA-U200] Windows could not complete the update monitor. Check application-control policy or rerun the installer.")
+
+    def _update_failed(self, detail, record=True):
+        if "[JIRA-" not in detail:
+            detail = "[JIRA-U100] " + detail
         self._update_busy = False
-        self._set_update_status("Update failed; installed files were not replaced")
+        self._set_update_status("Update failed: " + detail)
+        if record and self._update_release:
+            try:
+                updates.record_update(os.path.dirname(os.path.abspath(__file__)), self._update_release["version"],
+                    "failed", detail, notified=True,
+                    log=updates.update_state(os.path.dirname(os.path.abspath(__file__))).get("log", ""))
+            except (OSError, updates.UpdateError):
+                pass
         messagebox.showerror("Application update", detail, parent=self.root)
 
-    def _launch_update_helper(self, root, payload):
+    def _launch_update_helper(self, root, payload, automatic=False):
         try:
-            subprocess.Popen([_pythonw_exe(), os.path.join(root, "update_app.py"),
+            if self._automatic_update_cancelled(root, automatic):
+                return
+            process = subprocess.Popen([_pythonw_exe(), os.path.join(root, "update_app.py"),
                               "--target", root, "--payload", str(payload)],
                              cwd=root, creationflags=0x08000000)
             self._set_update_status("Saving and closing both apps for the update…")
+            def monitor():
+                if process.wait() != 0:
+                    self._post(self._zip_update_finished)
+            threading.Thread(target=monitor, daemon=True).start()
             # The helper signals our graceful event only after it has verified
             # staging and acquired the transaction lock. Do not quit early.
-        except OSError as exc:
+        except Exception as exc:
             self._update_failed(str(exc))
+
+    def _zip_update_finished(self):
+        previous = updates.update_state(os.path.dirname(os.path.abspath(__file__)))
+        if previous.get("phase") == "failed" and previous.get("notified"):
+            self._update_busy = False
+            self._set_update_status("Update failed: " + previous.get("detail", "See app_update_error.log"))
+        else:
+            self._update_failed(previous.get("detail") or "[JIRA-U200] Update helper could not complete. See app_update_error.log.")
 
     # ── Main-thread hand-off ──────────────────────────────────────────────────
 
@@ -4173,6 +4250,8 @@ class JiraOverlay:
         section("System")
         s_updates = tk.BooleanVar(value=cfg.get("checkForUpdates", True))
         check(body, "Check for application updates", s_updates)
+        s_auto_updates = tk.BooleanVar(value=cfg.get("autoInstallUpdates", True))
+        check(body, "Install updates automatically and restart", s_auto_updates)
         self._update_status_var = tk.StringVar(value=self._update_status)
         tk.Label(body, textvariable=self._update_status_var, font=_font(8), fg=_C["fg_dim"],
                  bg=BG, wraplength=220, justify="left").pack(anchor="w", padx=16, pady=(4, 4))
@@ -4293,6 +4372,8 @@ class JiraOverlay:
             })
             if "checkForUpdates" in self.config or not s_updates.get():
                 self.config["checkForUpdates"] = s_updates.get()
+            if "autoInstallUpdates" in self.config or not s_auto_updates.get():
+                self.config["autoInstallUpdates"] = s_auto_updates.get()
             # Changing either SLA setting is the user telling us to try
             # again, so drop any "this desk has no such field" latch.
             if (s_sla_on.get() != was_sla_on) or (s_sla.get().strip() != was_sla_field):

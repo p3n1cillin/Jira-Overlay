@@ -77,9 +77,32 @@ Run the newest Setup EXE again: it reuses the installed folder, preserves person
 files, repairs managed files and updates the private runtime. Settings offers
 **Check for updates** and **Update and restart** too. Native installations
 download the complete installer, verify GitHub's SHA-256 digest, and run the same
-upgrade flow. Checks send no Jira credentials or ticket data. Startup preference
-is preserved; automatic checking can be disabled. No background update is applied
-without confirmation. A newer installed version is not silently downgraded.
+upgrade flow. From **2026.10.20.5**, downloading, verification, saving/closing,
+installation and relaunch happen automatically by default, without a confirmation
+prompt. Setup still displays progress, never forces a running learner to exit and
+never reboots Windows automatically. The installer supervisor runs outside the
+private runtime to avoid locking the files being upgraded. On a failed install,
+it attempts to relaunch the retained/rolled-back app and reports the reason.
+
+Checks send no Jira credentials or ticket data. Startup preference is preserved.
+Disable **Install updates automatically and restart** in Settings for notices
+only; disabling **Check for application updates** also disables automatic
+installation. Manual **Update and restart** remains available and asks for
+confirmation. The same failed/interrupted version is not retried automatically
+for six hours, including across app restarts. New releases and manual retry are
+not blocked by that cooldown. A newer installed version is not downgraded, and
+Git/source checkouts are never overwritten automatically.
+
+Older builds need one last installer run (or a confirmed in-app update) to obtain
+2026.10.20.5; subsequent releases can then install automatically. Local
+`app_update_status.json` records only update version, phase, time, error and log
+path—not Jira credentials or ticket data. Installer/monitor logs are kept in the
+verified staging folder in Windows TEMP; failed updates show the diagnostic code
+and log location. `JIRA-U100/U101` indicate download/preflight failure;
+`U200` supervisor/policy failure; `U201` a changed installer checksum; `U202` the
+installer exit status (with its `JIRA-Ixxx` reason where available); `U203` a
+version verification failure; `U204` relaunch failure; `U205` a required Windows
+restart. Do not disable corporate security controls to bypass a policy error.
 
 Legacy source ZIP users can still use their transactional code-only updater and
 `update.bat --rollback`. Native users should rerun the current installer to
@@ -104,7 +127,7 @@ Interactive installation is recommended for migration. For IT deployment under
 the target user's account:
 
 ```powershell
-.\JiraOverlay-2026.10.20.4-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
+.\JiraOverlay-2026.10.20.5-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
 ```
 
 Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"`,

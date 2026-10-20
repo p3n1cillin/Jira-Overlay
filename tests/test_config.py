@@ -142,6 +142,7 @@ ROUND_TRIP = {
     "trayBadgeQueue": "Open", "hiddenQueues": ["Archive"],
     "skipKeywords": ["test", "spam"], "maxQueueSize": 500,
     "refreshSeconds": 15, "notificationsEnabled": True, "soundEnabled": False,
+    "autoInstallUpdates": False,
     "alpha": 0.95, "overlayWidth": 300, "alwaysVisible": False,
     "slaField": "Time to resolution", "slaEnabled": True,
     "completedTodayFilter": 'assignee in ("Sam Carter")',
@@ -198,6 +199,10 @@ drift = sorted(k for k in set(ROUND_TRIP) | set(after)
                if k not in ("token", "tokenProtected")
                and ROUND_TRIP.get(k, "<absent>") != after.get(k, "<absent>"))
 check("saving Settings unchanged rewrites nothing", not drift, str(drift))
+check("the automatic-install opt-out survives a Settings save", after.get("autoInstallUpdates") is False)
+check("malformed update preferences cannot silently enable installation",
+      ov.normalise_config({"checkForUpdates": "false", "autoInstallUpdates": "false"}) ==
+      {"checkForUpdates": False, "autoInstallUpdates": False})
 check("  and the token itself still round-trips to the same value",
       ov.unprotect_secret(after.get("tokenProtected", "")) == ROUND_TRIP["token"])
 

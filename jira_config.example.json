@@ -17,6 +17,7 @@
   "refreshSeconds": 60,
   "notificationsEnabled": true,
   "checkForUpdates": true,
+  "autoInstallUpdates": true,
   "soundEnabled": true,
   "alwaysVisible": false,
   "alpha": 0.93,

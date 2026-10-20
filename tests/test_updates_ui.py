@@ -27,6 +27,11 @@ def drain():
         time.sleep(0.01)
     app.root.update()
 
+
+def fake_popen(args, **kwargs):
+    launched.append(args)
+    return SimpleNamespace(wait=lambda: 0)
+
 try:
     release = {"version": "2099.01.01", "page": "https://github.com/owner/repo/releases/tag/v2099.01.01"}
     with patch.object(ov.updates, "latest_release", return_value=release):
@@ -56,7 +61,7 @@ try:
         app._update_release = release
         with patch.object(ov, "__file__", str(Path(folder)/"jira_overlay.pyw")), \
              patch.object(ov.updates, "stage_release", return_value=Path(folder)/"payload"), \
-             patch.object(ov.subprocess, "Popen", side_effect=lambda args, **kwargs: launched.append(args)):
+             patch.object(ov.subprocess, "Popen", side_effect=fake_popen):
             app._install_update()
             until = time.monotonic()+5
             while not launched and time.monotonic() < until:
@@ -65,11 +70,48 @@ try:
         check("confirmed ZIP updates launch a helper but do not quit before its shutdown request",
               bool(launched) and "--payload" in launched[0] and bool(app.root.winfo_exists()))
         launched.clear()
-        with patch.object(ov.subprocess, "Popen", side_effect=lambda args, **kwargs: launched.append(args)):
+        native_calls = []
+        with patch.object(ov.native_update, "launch", side_effect=lambda *args: native_calls.append(args) or SimpleNamespace(wait=lambda: 0)):
             app._launch_native_installer(folder, Path(folder)/"Setup.exe")
-        check("native updates run the same installer without quitting the learner early",
-              bool(launched) and "/SILENT" in launched[0] and "/DIR=" + folder in launched[0]
+        check("native updates use an external monitor without quitting the learner early",
+              len(native_calls) == 1 and native_calls[0][0] == folder
               and bool(app.root.winfo_exists()))
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        automatic = dict(release, installer={"sha256": "1" * 64})
+        app._update_busy = False
+        app.config.pop("autoInstallUpdates", None)
+        native_calls = []
+        with patch.object(ov, "__file__", str(root / "jira_overlay.pyw")), \
+             patch.object(ov.updates, "native_install", return_value=True), \
+             patch.object(ov.updates, "stage_installer", return_value=root / "Setup.exe"), \
+             patch.object(ov.native_update, "launch", side_effect=lambda *a: native_calls.append(a) or SimpleNamespace(wait=lambda: 0)), \
+             patch.object(ov.messagebox, "askyesno", side_effect=AssertionError("Automatic updates must not ask")):
+            app._update_checked(automatic, None, False)
+            until = time.monotonic() + 5
+            while not native_calls and time.monotonic() < until:
+                app.root.update()
+                time.sleep(.01)
+            check("automatic installation is the default and needs no confirmation", len(native_calls) == 1)
+            app._update_busy = False
+            app._update_checked(automatic, None, False)
+            check("the same automatic attempt is not relaunched in a restart loop", len(native_calls) == 1 and "delayed" in app._update_status)
+            app.config["autoInstallUpdates"] = False
+            updates_before = len(native_calls)
+            app._update_checked(dict(automatic, version="2099.01.02"), None, False)
+            check("opt-out retains update notices without installing", len(native_calls) == updates_before and not app._update_busy)
+        app.config["autoInstallUpdates"] = True
+        app._update_release = automatic
+        with patch.object(ov, "__file__", str(root / "jira_overlay.pyw")):
+            app.config["autoInstallUpdates"] = False
+            cancelled = app._automatic_update_cancelled(folder, True)
+            check("opting out during download prevents execution", cancelled and ov.updates.update_state(root).get("phase") == "cancelled")
+            ov.updates.record_update(root, automatic["version"], "failed", "[JIRA-U202] Example failure")
+            before = len(messages)
+            app._report_previous_update()
+            app._report_previous_update()
+            check("a post-shutdown failure is displayed once after relaunch", len(messages) == before + 1 and "JIRA-U202" in app._update_status)
+        app._update_busy = False
 finally:
     app.root.destroy()
     app._session.close()

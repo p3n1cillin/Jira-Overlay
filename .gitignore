@@ -29,6 +29,7 @@ triage_reviews.json.*
 triage_backups/
 .app-updates/
 app_update_error.log
+app_update_status.json
 dist/
 .jira-overlay-install
 .migration-*/
