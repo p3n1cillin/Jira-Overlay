@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Offline evaluator/tuner for the triage shadow learner (LOCAL ONLY — gitignored).
+Offline evaluator/tuner for the triage shadow learner (private local dataset).
 
   python triage_eval.py build    fetch the last 90 days of real triage
                                  decisions into triage_dataset.jsonl (read-only)

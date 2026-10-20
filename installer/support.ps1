@@ -101,7 +101,7 @@ function Personal-Files([string]$Path) {
     # Exact user-data names, plus their atomic-save backups. Never import code.
     $allowed = @('jira_config.json','triage_state.json','triage_suggestions.json',
         'triage_status.json','triage_reviews.json','triage_history.jsonl',
-        'triage_dataset.jsonl','triage_log.jsonl','triage_learner.log',
+        'triage_dataset.jsonl','triage_log.jsonl','triage_log.jsonl.metrics.json','triage_learner.log',
         'TRIAGE_REPORT.md','TRIAGE_REVIEW_QUEUE.md')
     return @(Get-ChildItem -LiteralPath $Path -File -Force | Where-Object {
         $fileName = $_.Name

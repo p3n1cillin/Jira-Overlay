@@ -85,7 +85,7 @@ def main(installer):
         execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "upgrade.log")])
         check_install(root)
         assert (root / "triage_review.py").is_file()
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             for name in ("JiraOverlay", "JiraTriageLearner"):
                 try:

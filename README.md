@@ -38,7 +38,7 @@ Neither assumes anything about your Jira. Both work out your service desk, queue
 | System tray icon | Badge shows the count for whichever queue you choose; right-click for quick actions |
 | Always-visible mode | Optional dashboard mode that keeps the overlay on screen permanently |
 | Multi-monitor aware | Clamps position to whichever monitor it's on; detects if it's been moved off-screen |
-| Auto-installs dependencies | First run installs `requests`, `Pillow`, `pystray`, and `tzdata` automatically |
+| Self-contained installer | Includes Python, Tk, `requests`, `Pillow`, `pystray` and `tzdata`; source installs retain automatic dependency setup |
 | Windows startup | Optional — toggle in Settings |
 | Fully configurable | Every filter, threshold, SLA field name, and queue is configurable per-user |
 | Single instance | A second launch quietly exits instead of double-polling and double-notifying |
@@ -116,7 +116,7 @@ The workflow can also be dispatched for an existing version tag. Never move an a
 
 ## First-run setup
 
-After `setup.bat` finishes, the app starts and walks you through the rest:
+After installation (or source `setup.bat`), the app starts and walks you through the rest:
 
 1. **Credentials** — a setup dialog asks for:
    - **Jira Domain** e.g. `yourcompany.atlassian.net`
