@@ -147,7 +147,7 @@ check("suggestions older than the staleness window are dropped",
 _status_path = os.path.join(_dir, "status.json")
 _watcher = object.__new__(ov.JiraOverlay)
 
-json.dump({"healthy": True, "refusals": [],
+json.dump({"healthy": True, "updatedAt": ov.datetime.now().isoformat(), "refusals": [],
           "provenance": {"trainedOnDecisions": 3278, "lastTuneDate": "2026-08-18"},
           "accuracy": {"pct": 89.7}}, open(_status_path, "w"))
 loaded = ov.JiraOverlay._load_learner_status(_watcher, path=_status_path)

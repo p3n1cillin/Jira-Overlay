@@ -43,6 +43,9 @@ from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 import tkinter as tk
 from tkinter import messagebox
+import app_updates as updates
+from app_release import VERSION as APP_VERSION
+from triage_support import status_view
 
 # ---------------------------------------------------------------------------
 # Dependency bootstrap — must run before any third-party import
@@ -157,11 +160,7 @@ import pystray
 # Constants
 # ---------------------------------------------------------------------------
 
-# Bump on a meaningful change. There's no build pipeline here to stamp this
-# automatically — it's a single-file script someone may have just copied,
-# not necessarily a git checkout — so this is the plain, low-maintenance
-# answer to "what version is this" for a support conversation.
-APP_VERSION  = "2026.08.26"
+# Both desktop processes share the bundle's release version.
 CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_config.json")
 STARTUP_NAME = "JiraOverlay"
 LEARNER_STARTUP_NAME = "JiraTriageLearner"
@@ -517,7 +516,7 @@ _OVERLAY_KEYS = {
     "serviceDeskId", "serviceDeskName", "projectKey",
     "alertQueue", "alertQueues", "trayBadgeQueue", "hiddenQueues",
     "skipKeywords", "maxQueueSize", "refreshSeconds", "alertQueuesAsked",
-    "notificationsEnabled", "soundEnabled",
+    "notificationsEnabled", "soundEnabled", "checkForUpdates",
     "alpha", "overlayWidth", "alwaysVisible",
     "slaField", "slaEnabled",
     "reportUsers", "reportRange", "reportBasis",
@@ -2162,6 +2161,11 @@ class JiraOverlay:
         # Work handed back from the fetch thread; drained by _pump on the
         # main thread (see _post).
         self._events: queue.Queue = queue.Queue()
+        self._update_release = None
+        self._update_status = "Updates have not been checked yet"
+        self._update_busy = False
+        self._update_notice = None
+        self._update_timer = None
         self._flash_jobs: dict[str, str] = {}   # queue name -> pending after id
         # Drag state
         self._drag_x0 = self._drag_y0 = 0
@@ -2191,6 +2195,91 @@ class JiraOverlay:
         self.root.after(self._PUMP_MS, self._pump)
         self._fetch()
         self.root.after(30_000, self._update_relative_time)
+        self._update_timer = self.root.after(15_000, lambda: self._check_updates(False))
+
+    # Updates use a separate, unauthenticated GitHub connection, never Jira's Session.
+    def _check_updates(self, manual=True):
+        if self._update_busy:
+            return
+        if self._update_timer:
+            self.root.after_cancel(self._update_timer)
+            self._update_timer = None
+        if not manual and not self.config.get("checkForUpdates", True):
+            self._update_timer = self.root.after(6*60*60*1000, lambda: self._check_updates(False))
+            return
+        self._update_busy = True
+        self._set_update_status("Checking for updates…")
+
+        def worker():
+            try:
+                release, error = updates.latest_release(), None
+            except Exception as exc:
+                release, error = None, str(exc)[:180]
+            self._post(lambda: self._update_checked(release, error, manual))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_update_status(self, text):
+        self._update_status = text
+        try:
+            if hasattr(self, "_update_status_var"):
+                self._update_status_var.set(text)
+            if hasattr(self, "_update_install_button"):
+                self._update_install_button.config(state="normal" if self._update_release and not self._update_busy else "disabled")
+        except tk.TclError:
+            pass  # settings closed during the check
+
+    def _update_checked(self, release, error, manual):
+        self._update_busy = False
+        self._update_release = release
+        text = ("Update check unavailable: " + error if error else
+                f"Version {release['version']} is available" if release else
+                f"No newer published release (installed {APP_VERSION})")
+        self._set_update_status(text)
+        self._update_timer = self.root.after(6*60*60*1000, lambda: self._check_updates(False))
+        if manual:
+            messagebox.showinfo("Application updates", text, parent=self.root)
+        elif release and self._update_notice != release["version"]:
+            self._update_notice = release["version"]
+            if self.config.get("notificationsEnabled", True):
+                send_toast("Jira Overlay update", text + ". Open Settings to update.")
+
+    def _install_update(self):
+        release = self._update_release
+        if not release or self._update_busy:
+            return
+        root = os.path.dirname(os.path.abspath(__file__))
+        if os.path.exists(os.path.join(root, ".git")):
+            messagebox.showinfo("Git checkout", "Close both apps and use git pull --ff-only to update this checkout. Automatic updates never overwrite Git working files.", parent=self.root)
+            return
+        if not messagebox.askyesno("Update and restart", f"Install version {release['version']} from {updates.REPOSITORY}?\n\nBoth apps will save, close and restart. Credentials, settings and learner data will be preserved. Old code is backed up for rollback.", parent=self.root):
+            return
+        self._update_busy = True
+        self._set_update_status("Downloading and verifying the complete package…")
+
+        def worker():
+            try:
+                payload = updates.stage_release(release)
+                self._post(lambda: self._launch_update_helper(root, payload))
+            except Exception as exc:
+                detail = str(exc)[:250]
+                self._post(lambda: self._update_failed(detail))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_failed(self, detail):
+        self._update_busy = False
+        self._set_update_status("Update failed; installed files were not replaced")
+        messagebox.showerror("Application update", detail, parent=self.root)
+
+    def _launch_update_helper(self, root, payload):
+        try:
+            subprocess.Popen([_pythonw_exe(), os.path.join(root, "update_app.py"),
+                              "--target", root, "--payload", str(payload)],
+                             cwd=root, creationflags=0x08000000)
+            self._set_update_status("Saving and closing both apps for the update…")
+            # The helper signals our graceful event only after it has verified
+            # staging and acquired the transaction lock. Do not quit early.
+        except OSError as exc:
+            self._update_failed(str(exc))
 
     # ── Main-thread hand-off ──────────────────────────────────────────────────
 
@@ -2247,6 +2336,7 @@ class JiraOverlay:
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
             pystray.MenuItem("Team report", lambda: self._post(self._open_report)),
+            pystray.MenuItem("Check for updates", lambda: self._post(self._check_updates)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",        lambda: self._post(self.root.destroy)),
         )
@@ -3335,7 +3425,7 @@ class JiraOverlay:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else None
+            return status_view(data) if isinstance(data, dict) else None
         except (OSError, ValueError):
             return None
 
@@ -4095,6 +4185,17 @@ class JiraOverlay:
 
         # System
         section("System")
+        s_updates = tk.BooleanVar(value=cfg.get("checkForUpdates", True))
+        check(body, "Check for application updates", s_updates)
+        self._update_status_var = tk.StringVar(value=self._update_status)
+        tk.Label(body, textvariable=self._update_status_var, font=_font(8), fg=_C["fg_dim"],
+                 bg=BG, wraplength=220, justify="left").pack(anchor="w", padx=16, pady=(4, 4))
+        tk.Button(body, text="Check for updates", command=self._check_updates, bg=SEL, fg=FG,
+                  font=_font(9), relief="flat", padx=8, pady=4).pack(anchor="w", padx=16, pady=2)
+        self._update_install_button = tk.Button(body, text="Update and restart", command=self._install_update,
+            state="normal" if self._update_release and not self._update_busy else "disabled",
+            bg=SEL, fg=FG, font=_font(9), relief="flat", padx=8, pady=4)
+        self._update_install_button.pack(anchor="w", padx=16, pady=2)
         s_startup = tk.BooleanVar(value=startup_enabled())
         check(body, "Run on Windows startup", s_startup)
         tk.Label(body, text=f"Jira Overlay {APP_VERSION}", font=_font(8),
@@ -4140,7 +4241,7 @@ class JiraOverlay:
                 refusals = learner.get("refusals")
                 codes = (", ".join(str(c) for c in refusals)
                         if isinstance(refusals, list) else "")
-                headline = f"Jira is refusing requests ({codes or '?'})"
+                headline = learner.get("healthMessage") or f"Jira is refusing requests ({codes or '?'})"
             tk.Label(row, text=headline, font=_font(9, "bold"),
                      fg=_C["fg_bright"] if healthy else _C["alert"],
                      bg=BG).pack(side="left", padx=(5, 0))
@@ -4202,6 +4303,8 @@ class JiraOverlay:
                                          if k.strip()],
                 "maxQueueSize":         max_q,
             })
+            if "checkForUpdates" in self.config or not s_updates.get():
+                self.config["checkForUpdates"] = s_updates.get()
             # Changing either SLA setting is the user telling us to try
             # again, so drop any "this desk has no such field" latch.
             if (s_sla_on.get() != was_sla_on) or (s_sla.get().strip() != was_sla_field):
@@ -4282,6 +4385,9 @@ class JiraOverlay:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    root = os.path.dirname(os.path.abspath(__file__))
+    if updates.recover_pending(root):
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
     if not acquire_single_instance():
         # Another overlay already runs — don't just exit silently; ask it
         # to show itself, so launching again reads as "bring it up".
@@ -4295,6 +4401,7 @@ def main() -> None:
         if not config:
             return
     app = JiraOverlay(config)
+    updates.listen_for_update(root, lambda: app._post(app.root.destroy))
     _start_show_waiter(app)
     app.run()
 

@@ -17,6 +17,7 @@ from _harness import Checker, load_learner          # noqa: E402
 
 tl = load_learner()
 check = Checker("triage learner")
+FIXTURE_CREATED = f"{datetime.now() - timedelta(days=1):%Y-%m-%dT10:00:00.000+0000}"
 
 
 # --- A completely foreign service desk -------------------------------------
@@ -42,7 +43,7 @@ ISSUES, CHANGELOG = [], {}
 def add(key, final, path):
     ISSUES.append({"key": key, "fields": {"status": {"name": final},
                                           "summary": f"ticket {key}"}})
-    CHANGELOG[key] = [{"id": f"c{i}", "created": "2026-07-01T10:00:00.000+0000",
+    CHANGELOG[key] = [{"id": f"c{i}", "created": FIXTURE_CREATED,
                        "author": {"displayName": "Agent"},
                        "items": [{"field": "status", "toString": st}]}
                       for i, st in enumerate(path)]
@@ -388,7 +389,7 @@ _N = 20
 _bf_issues = [{"key": f"BF-{i}", "fields": {"status": {"name": "Done"}}}
              for i in range(_N)]
 _bf_changelog = {
-    f"BF-{i}": [{"id": f"bf{i}", "created": "2026-07-01T10:00:00.000+0000",
+    f"BF-{i}": [{"id": f"bf{i}", "created": FIXTURE_CREATED,
                 "author": {"displayName": "Agent"},
                 "items": [{"field": "status",
                           "toString": "Passed to Networks"}]}]
@@ -444,7 +445,7 @@ class _PoisonJira:
 _pz_issues = [{"key": f"PZ-{i}", "fields": {"status": {"name": "Done"}}}
              for i in range(10)]
 _pz_changelog = {
-    f"PZ-{i}": [{"id": f"pz{i}", "created": "2026-07-01T10:00:00.000+0000",
+    f"PZ-{i}": [{"id": f"pz{i}", "created": FIXTURE_CREATED,
                 "author": {"displayName": "Agent"},
                 "items": [{"field": "status",
                           "toString": "Passed to Networks"}]}]
@@ -1149,7 +1150,7 @@ route_recs = (
     + [{"when": recent(1), "dest": "With DATA"} for _ in range(5)]
 )
 route_validation = {"firmPrecisionCounts": {
-    "With DEV":  [20, 20],   # 100% of 20 - well clear of the 95% bar
+    "With DEV":  [100, 100], # enough evidence for the precision lower bound too
     "With BI":   [20, 20],   # would also clear it, if it weren't dormant
     "With DATA": [20, 10],   # 50% - half of what it claims is wrong
 }}

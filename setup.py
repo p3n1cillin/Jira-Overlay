@@ -6,7 +6,7 @@ One command to get a new machine running:
 
     python setup.py          (or double-click setup.bat)
 
-It checks your Python, installs the three packages the app needs, offers to
+It checks your Python, installs the packages the app needs, offers to
 start it with Windows, and launches it. Credentials are collected by the
 overlay's own setup window the first time it runs.
 
@@ -95,7 +95,10 @@ def check_python() -> bool:
 
 
 def check_files() -> bool:
-    missing = [os.path.basename(p) for p in (OVERLAY, LEARNER)
+    modules = [os.path.join(DIR, name) for name in
+               ("triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
+                "app_release.py", "app_updates.py", "update_app.py")]
+    missing = [os.path.basename(p) for p in (OVERLAY, LEARNER, *modules)
                if not os.path.exists(p)]
     if missing:
         say(f"    Missing from this folder: {', '.join(missing)}")
@@ -193,6 +196,10 @@ def launch() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    if "--dependencies-only" in sys.argv[1:]:
+        # Used by the confirmed updater before it stops the running apps.
+        # Never touches credentials, startup settings, or launches a process.
+        return 0 if check_python() and check_files() and install_dependencies() else 1
     say("=" * 62)
     say("  Jira Overlay - setup")
     say("=" * 62)

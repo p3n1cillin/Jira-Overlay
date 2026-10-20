@@ -15,6 +15,8 @@
   whole installer down before it prints anything.
 #>
 
+param([switch]$Update, [switch]$Rollback)
+
 $ErrorActionPreference = 'Stop'
 $ProjectDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $MinVersion  = [Version]'3.9'
@@ -178,11 +180,18 @@ if ($python) {
 
 Write-Step 2 'Handing over to the application setup'
 $setupPy = Join-Path $ProjectDir 'setup.py'
+if ($Update) { $setupPy = Join-Path $ProjectDir 'update_app.py' }
 if (-not (Test-Path $setupPy)) {
     Write-Bad "setup.py is missing from $ProjectDir"
     Read-Host 'Press Enter to close'
     exit 1
 }
 
-& $python.Exe $setupPy
+if ($Update) {
+    $updateArguments = @($setupPy, '--choose-target')
+    if ($Rollback) { $updateArguments += '--rollback' }
+    & $python.Exe @updateArguments
+} else {
+    & $python.Exe $setupPy
+}
 exit $LASTEXITCODE

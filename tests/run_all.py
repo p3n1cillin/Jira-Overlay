@@ -18,7 +18,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_config.py", "test_overlay.py", "test_report.py",
           "test_notify.py", "test_wiring.py", "test_resilience.py",
           "test_learner.py", "test_hardening.py",
-          "test_setup.py"]
+          "test_setup.py", "test_integrity.py", "test_learning_progress.py", "test_adaptive_routes.py",
+          "test_updates.py", "test_updates_ui.py"]
 
 
 def main() -> int:
@@ -33,7 +34,7 @@ def main() -> int:
         proc = subprocess.run([sys.executable, path], cwd=HERE, env=env,
                               capture_output=True, text=True, timeout=600)
         elapsed = time.perf_counter() - started
-        results.append((name, proc.returncode, elapsed, proc.stdout))
+        results.append((name, proc.returncode, elapsed, proc.stdout + proc.stderr))
 
     failed = [r for r in results if r[1] != 0]
     for name, code, elapsed, out in results:

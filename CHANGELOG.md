@@ -1,8 +1,73 @@
 # Changelog
 
 Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions are dates (`YYYY.MM.DD`) — see `APP_VERSION` in either app, and
+Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
+
+## [2026.10.20.1]
+
+### Added
+- Public, versioned application releases from p3n1cillin/Jira-Overlay with a clean code-only ZIP and SHA-256 checksums.
+- Background update notices, a manual check in Settings/tray and a confirmed update-and-restart flow for ZIP installations.
+- Verified staging, graceful learner shutdown, code backups, automatic rollback on copy failure and interrupted-update recovery.
+- A one-time migration helper (`update.bat`) for older installations, plus rollback support.
+
+### Changed
+- Overlay and learner now share one release version. Git checkouts receive notices but are never overwritten by the updater.
+- This first bundled release also includes the September/October learner, integrity, reporting and review improvements below.
+
+## [2026.10.20]
+
+### Added
+- Bounded, data-learned route-balance ranking candidates, neutral without sufficient evidence and subject to chronological validation.
+- Gradual drift diagnostics comparing a recent week with the preceding disjoint three weeks, by route, request type and confident band.
+- Prioritised, diverse mistake-review samples, private Markdown worksheets and explicit local human verdicts.
+- Regression tests for route-name invariance, pre-learning feedback, accuracy safeguards, drift boundaries and human-review provenance.
+
+### Changed
+- Candidate selection scores the recent training tail rather than letting old successes dominate.
+- Gate adoption also protects overall and confident accuracy from material regression.
+
+## [2026.10.07]
+
+### Fixed
+- Nightly model refits retain mistake weighting and match chronological replay.
+- Time-sensitive learner fixtures use relative dates rather than expiring.
+- Historical suggestions with unrecorded review flags are not counted as confident.
+
+### Added
+- Rolling 7/30-day route performance and evidence-based coverage diagnostics.
+- Automated local mistake analysis, kept separate from human annotations and labels.
+- Refit-equivalence, coverage, and arbitrary service-desk naming regression tests.
+
+### Changed
+- Request-type reporting uses observed portal names rather than a site-specific maintenance bucket.
+- Mistake analysis supports every outcome; offline handoff roles use discovered configuration or explicit record evidence, not English status-name prefixes.
+
+## [2026.09.07]
+
+### Fixed
+- Route-table counters no longer overwrite the overall status accuracy.
+- A missing individual ticket no longer leaves a permanent project-outage
+  warning; successful searches clear prior access warnings.
+- Interrupted routing searches retain their checkpoint and scans paginate
+  beyond 500 tickets. The checkpoint uses scan start time.
+- Cumulative route metrics survive log rotation and restart, including
+  equal-size replacement files and interrupted replacement.
+
+### Added
+- Intake feature snapshots, mistake review with local annotations, separate
+  routine-maintenance metrics, and sample-size-aware confidence guards.
+- Route-threshold experiments with a separate final evaluation window.
+- Last-successful-poll status, stale-heartbeat detection in the overlay,
+  daily verified recovery archives, and recovery instructions.
+- Windows CI and cross-component integrity regression coverage.
+
+### Changed
+- Extracted Jira transport, evaluation, reporting helpers, and backup storage
+  into modules. Offline and live tuning now share the same acceptance gate.
+- Tuning records why a challenger was accepted or rejected and the comparison
+  scores. Offline evaluation defaults to current live history.
 
 ## [2026.08.26]
 

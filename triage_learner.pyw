@@ -51,11 +51,13 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -65,6 +67,13 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+import app_updates as updates
+from app_release import VERSION as APP_VERSION
+from triage_support import (accuracy_counts, wilson_lower, segment_name, rolling_metrics,
+                            coverage_reason, route_balance_factors, performance_drift)
+from triage_evaluation import bind_engine
+from triage_storage import daily_backup
+from triage_jira import make_client
 
 try:
     import requests
@@ -99,7 +108,6 @@ except ImportError as _exc:
 
 # Bump on a meaningful change — see jira_overlay.pyw for why this is a
 # plain constant rather than something derived from git or a build step.
-APP_VERSION  = "2026.08.26"
 _DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE  = os.path.join(_DIR, "jira_config.json")
 STATE_FILE   = os.path.join(_DIR, "triage_state.json")
@@ -121,7 +129,7 @@ BACKFILL_DAYS  = 90          # seed the model from this much history
 BACKFILL_CAP   = 1000        # max historical issues per outcome to learn from
 OVERLAP_SECS   = 600         # re-scan overlap so nothing is missed
 MIN_EXAMPLES   = 8           # per-destination examples needed before predicting
-TUNING_SCHEMA_VERSION = 5    # precision-aware tuning + escalation specialist
+TUNING_SCHEMA_VERSION = 8    # recent-window tuning + learned route balance
 # Cap on remembered transition IDs. Kept as an *ordered* collection so the
 # trim drops the oldest — truncating a set (the old behaviour) kept an
 # arbitrary subset, letting already-learned transitions be re-learned.
@@ -181,6 +189,7 @@ HINT_MIN_SHARE    = 0.80   # share going to one outcome for it to count
 # routing process began (2026-05-14): 84.7% overall; predictions made at
 # >=90% confidence (73.7% of tickets) are right 93.1% of the time.
 TUNING = {
+    "routeBalanceWeight": 0.0,  # neutral unless chronological validation earns a correction
     "summaryWeight": 6,   # summary features count this many times vs body
     "mistakeWeight": 3,   # a wrong prediction learns the correction at this weight
     "confTemp": 4.0,      # tokens per unit of softmax temperature (confidence)
@@ -204,6 +213,7 @@ TUNING = {
 }
 
 BALANCED_TUNED_CONFIG = {
+    "routeBalanceWeight": 0.0,
     "summaryWeight": 6,
     "mistakeWeight": 2,
     "decayFactor": 0.997,
@@ -441,130 +451,7 @@ def unprotect_secret(encoded: str) -> Optional[str]:
 # Jira client (READ-ONLY)
 # ---------------------------------------------------------------------------
 
-class Jira:
-    """Thin read-only wrapper. GET + search only — no mutations, ever."""
-
-    def __init__(self, cfg: dict) -> None:
-        self.domain  = cfg["domain"]
-        self.session = requests.Session()
-        self.session.auth = HTTPBasicAuth(cfg["email"], cfg["token"])
-        self.session.headers["Accept"] = "application/json"
-        # set by the watcher so a long retry backoff doesn't delay Quit
-        self.stop: Optional[threading.Event] = None
-        self._refusals: set[int] = set()   # auth/permission codes already logged
-
-    def _pause(self, seconds: float) -> bool:
-        """Sleep between retries; True if we were asked to stop instead."""
-        if self.stop is not None:
-            return self.stop.wait(seconds)
-        time.sleep(seconds)
-        return False
-
-    def _url(self, path: str) -> str:
-        return f"https://{self.domain}{path}"
-
-    def _send(self, method: str, path: str, *, params: Optional[dict] = None,
-              json_body: Optional[dict] = None, timeout: int = 20):
-        """One request with retry/backoff. Backfill fires thousands of calls,
-        so Jira can rate-limit or reset connections (WinError 10054); without
-        this the whole cycle would abort and no suggestions get written."""
-        url   = self._url(path)
-        delay = 1.0
-        for attempt in range(5):
-            try:
-                r = self.session.request(method, url, params=params,
-                                         json=json_body, timeout=timeout)
-            except (requests.ConnectionError, requests.Timeout):
-                if attempt == 4 or self._pause(delay):
-                    return None
-                delay = min(delay * 2, 20)
-                continue
-            if r.status_code == 429 or r.status_code >= 500:
-                if attempt == 4:
-                    return None
-                ra = r.headers.get("Retry-After", "")
-                if self._pause(float(ra) if ra.isdigit() else delay):
-                    return None
-                delay = min(delay * 2, 20)
-                continue
-            self._note_refusal(r)
-            return r
-        return None
-
-    def _note_refusal(self, response) -> None:
-        """Record the first auth/permission refusal of each kind.
-
-        Otherwise a wrong or expired token just makes every search come back
-        empty, for ever, with nothing written anywhere — the learner appears
-        to run perfectly and simply never produce a suggestion.
-        """
-        status = response.status_code
-        if status not in (401, 403, 404) or status in self._refusals:
-            return
-        self._refusals.add(status)
-        reason = {401: "credentials rejected — check the API token in "
-                       "jira_config.json",
-                  403: "permission denied — this account cannot read that "
-                       "project",
-                  404: "not found — check projectKey in jira_config.json"}[status]
-        _log_error(f"Jira returned {status} for "
-                   f"{response.request.method} {response.request.path_url}: "
-                   f"{reason}")
-
-    def get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
-        r = self._send("GET", path, params=params, timeout=15)
-        return r.json() if (r is not None and r.ok) else None
-
-    def search(self, jql: str, fields: list[str], cap: int = 100) -> list[dict]:
-        """POST /search/jql is Jira's read-only search — no data is modified."""
-        issues: list[dict] = []
-        token: Optional[str] = None
-        while len(issues) < cap:
-            body: dict = {"jql": jql, "fields": fields,
-                          "maxResults": min(100, cap - len(issues))}
-            if token:
-                body["nextPageToken"] = token
-            r = self._send("POST", "/rest/api/3/search/jql",
-                           json_body=body, timeout=20)
-            if r is None or not r.ok:
-                break
-            try:
-                data = r.json()
-            except ValueError:          # a 200 that isn't JSON at all
-                break
-            if not isinstance(data, dict):
-                break
-            # json_objects, not `or []`: an "issues" that is a string would
-            # otherwise be iterated one character at a time.
-            page = json_objects(data.get("issues"))
-            issues.extend(page)
-            token = data.get("nextPageToken")
-            # Stop on an explicit isLast, an empty page, or no next token —
-            # not on isLast merely being ABSENT: a server that paginates
-            # with tokens but omits the flag would otherwise end the search
-            # after one page.
-            if not token or data.get("isLast") is True or not page:
-                break
-        return issues
-
-    def changelog(self, key: str) -> list[dict]:
-        """All changelog histories for an issue (paginated GET)."""
-        out: list[dict] = []
-        start = 0
-        while True:
-            data = self.get(f"/rest/api/3/issue/{key}/changelog",
-                            {"startAt": start, "maxResults": 100})
-            if not isinstance(data, dict):
-                break
-            page = json_objects(data.get("values"))
-            out.extend(page)
-            # Stop on an empty page as well as isLast: a response that keeps
-            # claiming there is more, without returning any, would otherwise
-            # page for ever.
-            if data.get("isLast", True) or not page:
-                break
-            start += len(page)
-        return out
+Jira = make_client(requests, HTTPBasicAuth, json_objects, lambda message: _log_error(message))
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +714,18 @@ class Learner:
                 m[bucket] = {}
         if not isinstance(m.get("exemplars"), list):
             m["exemplars"] = []             # [[title tokens...], dest] memory
+        balance = m.get("routeBalance")
+        if not isinstance(balance, dict):
+            balance = {}
+        m["routeBalance"] = balance
+        for name in ("actual", "predicted"):
+            values = balance.get(name)
+            balance[name] = {k: v for k, v in values.items()
+                             if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0} if isinstance(values, dict) else {}
+        observations = balance.get("observations", 0)
+        if not isinstance(observations, (int, float)) or not math.isfinite(observations) or observations < 0:
+            observations = 0
+        balance["observations"] = observations
         # Absent in models written before lazy decay — 1.0 is exactly right
         # for them, since their stored counts are already true values. A
         # non-positive scale would divide by zero on the next example.
@@ -883,8 +782,21 @@ class Learner:
 
     def learn(self, dest: str, tokens: list[str], req_type: str,
               clone_projects: list[str], reporter: str = "",
-              weight: int = 1, exemplar: Optional[list[str]] = None) -> None:
+              weight: int = 1, exemplar: Optional[list[str]] = None,
+              prediction: Optional[dict] = None) -> None:
         m = self.m
+        # Record a pre-learning prediction, never score after seeing this label.
+        # Replay supplies the prediction it already made to avoid a second fit.
+        if prediction is None:
+            prediction = self.predict_ex(tokens, req_type, reporter, exemplar=exemplar)
+        if prediction.get("dest") is not None:
+            balance = m["routeBalance"]
+            for table in ("actual", "predicted"):
+                for route in list(balance[table]):
+                    balance[table][route] *= 0.995
+            for table, route in (("actual", dest), ("predicted", prediction["dest"])):
+                balance[table][route] = balance[table].get(route, 0) + 1
+            balance["observations"] += 1
         self._mutations += 1
         boost = self._advance_decay()
         w = weight * boost
@@ -1206,6 +1118,13 @@ class Learner:
                 probs[d] = handoff_mass * esc_exps[d] / esc_total_e
             source = "escalation"
 
+        # Correct systematic route-frequency imbalance using past observations
+        # only. No route name or request type receives a hand-written penalty.
+        factors = route_balance_factors(self.m["routeBalance"], TUNING.get("routeBalanceWeight", 0))
+        if factors:
+            adjusted = {dest: probability * factors.get(dest, 1.0) for dest, probability in probs.items()}
+            mass = sum(adjusted.values())
+            probs = {dest: probability / mass for dest, probability in adjusted.items()}
         ranked = sorted(probs, key=probs.get, reverse=True)  # type: ignore[arg-type]
         best, second = ranked[0], ranked[1]
         conf  = int(round(100 * probs[best]))
@@ -1230,6 +1149,8 @@ class Learner:
                     source = "memory"
                     note   = self.plan_for(best) + " (matches a previous ticket)"
 
+        if source != "memory" and abs(factors.get(best, 1.0) - 1.0) > 1e-6:
+            note += "; ranking adjusted using earlier routing outcomes"
         hint_conflict = bool(hint_dest in ready and best != hint_dest)
         if hint_conflict:
             if second != hint_dest:
@@ -1266,7 +1187,7 @@ class Learner:
 # Shadow watcher
 # ---------------------------------------------------------------------------
 
-class ShadowWatcher:
+class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCED_TUNED_CONFIG)):
     # Incremental report-metrics cache (see _live_metrics). Declared at class
     # level so the accessors are safe even before __init__ has run.
     _metrics: Optional[dict] = None
@@ -1475,7 +1396,7 @@ class ShadowWatcher:
 
     def canonical_dest(self, dest: str) -> str:
         """Map labels written by older versions to today's outcome names."""
-        for project_key in self.move_targets:
+        for project_key in getattr(self, "move_targets", []):
             legacy = f"Proclaim bug (moved to {project_key})"
             current = self.moved_label(project_key)
             if dest == legacy and current != legacy:
@@ -1531,6 +1452,10 @@ class ShadowWatcher:
             if unchanged and since < self._IDLE_SAVE_SECS:
                 return
         _atomic_json_write(STATE_FILE, self.state)
+        try:
+            daily_backup(STATE_FILE, HISTORY_FILE, LOG_FILE)
+        except (OSError, ValueError) as exc:
+            _log_error(f"Recovery backup failed: {exc}")
         self._saved_mutations = getattr(learner, "_mutations", 0)
         self._last_state_save = time.time()
 
@@ -1539,11 +1464,22 @@ class ShadowWatcher:
         line = json.dumps(record, ensure_ascii=False) + "\n"
         try:
             if os.path.getsize(LOG_FILE) > LOG_ROTATE_BYTES:
+                # Persist the folded prefix before rotation. Its fingerprint
+                # also makes restart safe if replacement fails or power drops.
+                metrics = self._live_metrics()
+                prefix_size = self._metrics_offset
+                with open(LOG_FILE, "rb") as source:
+                    digest = hashlib.sha256(source.read(prefix_size)).hexdigest()
+                _atomic_json_write(LOG_FILE + ".metrics.json", {
+                    "metrics": metrics, "pending": self._metrics_pending,
+                    "prefixSize": prefix_size, "prefixHash": digest})
                 # One rotating generation: the live log becomes .old (any
                 # previous .old is overwritten). _live_metrics notices the
                 # shrink on its next read and restarts its offset from zero.
                 try:
                     os.replace(LOG_FILE, LOG_FILE + ".old")
+                    self._metrics = None
+                    self._metrics_offset = 0
                 except OSError:
                     pass
         except OSError:
@@ -1565,6 +1501,12 @@ class ShadowWatcher:
     def _append_history(self, det: dict, dest: str, when: str,
                         handle=None) -> None:
         rec = self._history_record(det, dest, when)
+        snapshot = self.state.get("predicted", {}).get(det.get("key"), {}).get("intakeFeatures")
+        if isinstance(snapshot, dict):
+            rec.update(snapshot)
+            rec["featureOrigin"] = "intake"
+        else:
+            rec["featureOrigin"] = "outcome"
         if handle is not None:
             handle.write(json.dumps(rec, ensure_ascii=False) + "\n")
         else:
@@ -1629,6 +1571,10 @@ class ShadowWatcher:
 
     def _features_for(self, det: dict, req_type: str) -> list[str]:
         return features_for(det, req_type)
+
+    def _learning_details(self, det: dict) -> dict:
+        snapshot = self.state.get("predicted", {}).get(det.get("key"), {}).get("intakeFeatures")
+        return dict(det, **snapshot) if isinstance(snapshot, dict) else det
 
     def _transitions(self, key: str) -> tuple[list[dict], list[dict]]:
         """(handoffs into a destination status, transitions into a resolved
@@ -1737,6 +1683,7 @@ class ShadowWatcher:
             try:
                 det = self._issue_details(issue)
                 routed, _ = self._transitions(det["key"])
+                det = self._learning_details(det)
                 for tr in routed:
                     if tr["id"] in seen or tr["when"] < cutoff:
                         continue
@@ -1781,6 +1728,7 @@ class ShadowWatcher:
             try:
                 det = self._issue_details(issue)
                 routed, resolutions = self._transitions(det["key"])
+                det = self._learning_details(det)
                 if routed:      # handed off at some point — learned above
                     continue
                 for tr in resolutions:
@@ -1933,6 +1881,8 @@ class ShadowWatcher:
                                   "review": p["review"],
                                   "source": p["source"], "why": p.get("why", []),
                                   "requestType": req_type,
+                                  "intakeFeatures": {k: det.get(k) for k in
+                                      ("summary", "desc", "labels", "components", "structured", "reporter", "requestType")},
                                   "summary": det["summary"][:120],
                                   "at": f"{self._jira_now():%Y-%m-%d %H:%M}"}
                 changed = True
@@ -1960,6 +1910,8 @@ class ShadowWatcher:
         """SLOW loop: watch how tickets were actually routed, score our
         earlier suggestions against the team's decision, and train the model."""
         since = self._window_jql_time()
+        poll_started = time.time()
+        reads_before = getattr(self.jira, "incomplete_reads", 0)
         predicted: dict = self.state.setdefault("predicted", {})
 
         # 2. Actual routings — resolve predictions and learn
@@ -1978,7 +1930,7 @@ class ShadowWatcher:
         # decisions were lost permanently: never scored, never learned.
         for issue in (self.jira.search(
                 f'project = {self.project} AND status CHANGED TO ({dest_list}) '
-                f'AFTER {since}', self._FIELDS, cap=500) if self.dests else []):
+                f'AFTER {since}', self._FIELDS, cap=None) if self.dests else []):
             # One bad issue must not stall learning for every ticket in this
             # cycle, or worse — since seenTransitions only saves once, at the
             # end, an uncaught exception here re-fetches and re-fails on the
@@ -1986,6 +1938,7 @@ class ShadowWatcher:
             try:
                 det = self._issue_details(issue)
                 routed, _ = self._transitions(det["key"])
+                det = self._learning_details(det)
                 for tr in routed:
                     if tr["id"] in seen:
                         continue
@@ -2009,10 +1962,11 @@ class ShadowWatcher:
         resolved_list = ", ".join(jql_quote(s) for s in sorted(self.resolved))
         for issue in self.jira.search(
                 f'project = {self.project} AND status CHANGED TO '
-                f'({resolved_list}) AFTER {since}', self._FIELDS, cap=500):
+                f'({resolved_list}) AFTER {since}', self._FIELDS, cap=None):
             try:
                 det = self._issue_details(issue)
                 routed, resolutions = self._transitions(det["key"])
+                det = self._learning_details(det)
                 if routed:      # handed off — covered by the pass above
                     continue
                 for tr in resolutions:
@@ -2048,7 +2002,11 @@ class ShadowWatcher:
         cutoff = f"{self._jira_now() - timedelta(days=30):%Y-%m-%d}"
         self.state["predicted"] = {k: v for k, v in predicted.items()
                                    if v.get("at", "9999") >= cutoff}
-        self.state["lastPollEpoch"] = datetime.now().timestamp()
+        complete = getattr(self.jira, "incomplete_reads", 0) == reads_before
+        self.state["pollIncomplete"] = not complete
+        if complete:
+            self.state["lastPollEpoch"] = poll_started
+            self.state["lastSuccessfulPoll"] = poll_started
         self._save_state(force=False)
         self._write_suggestions(self.state["predicted"])
         self.write_report()
@@ -2091,6 +2049,7 @@ class ShadowWatcher:
                 label = self.moved_label(new_project)
                 if orig_summary:
                     det["summary"] = f"{orig_summary} — {det['summary']}"
+                det = self._learning_details(dict(det, key=old_key))
                 req_type = det.get("requestType", "")
                 toks = self._features_for(det, req_type)
                 when = (moves[0]["when"] if moves
@@ -2125,7 +2084,11 @@ class ShadowWatcher:
                     if not line:
                         continue
                     try:
-                        recs.append(json.loads(line))
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            recs.append(row)
+                        else:
+                            bad += 1
                     except json.JSONDecodeError:
                         bad += 1
         except FileNotFoundError:
@@ -2135,288 +2098,6 @@ class ShadowWatcher:
         recs.sort(key=lambda r: r.get("when", ""))
         return recs
 
-    def _replay_history(self, recs: list[dict], cfg: dict,
-                        score_start: Optional[int] = None,
-                        score_end: Optional[int] = None) -> dict:
-        """Chronologically predict-then-learn over the labelled history under
-        `cfg`.
-
-        Return headline accuracy plus balanced/worst-class accuracy so tuning
-        cannot hide weak BI/DEV performance behind high-volume IT/DATA wins.
-        """
-        saved = dict(TUNING)
-        TUNING.update(cfg)
-        try:
-            lr = Learner({}, escalation_dests=self.dests)
-            warm = min(150, len(recs) // 5)
-            start = warm if score_start is None else score_start
-            end = len(recs) if score_end is None else score_end
-            n = ok = firm = firm_ok = 0
-            per: dict[str, list[int]] = {}
-            firm_per: dict[str, list[int]] = {}
-            predicted_per: dict[str, list[int]] = {}
-            firm_predicted_per: dict[str, list[int]] = {}
-            source_per: dict[str, list[int]] = {}
-            for i, r in enumerate(recs):
-                det = {"summary": r["summary"], "desc": r["desc"],
-                       "labels": r["labels"], "components": r["components"],
-                       "structured": r.get("structured", []),
-                       "reporter": r["reporter"], "key": "", "clones": []}
-                req_type = r.get("requestType", r.get("reqType", ""))
-                toks  = features_for(det, req_type)
-                title = tokenize(r["summary"])
-                p = lr.predict_ex(toks, req_type, r["reporter"], exemplar=title)
-                if p["dest"] is not None and start <= i < end:
-                    hit = int(p["dest"] == r["dest"])
-                    n += 1; ok += hit
-                    row = per.setdefault(r["dest"], [0, 0])
-                    row[0] += 1; row[1] += hit
-                    prow = predicted_per.setdefault(p["dest"], [0, 0])
-                    prow[0] += 1; prow[1] += hit
-                    srow = source_per.setdefault(p.get("source", "model"), [0, 0])
-                    srow[0] += 1; srow[1] += hit
-                    if not p["review"]:
-                        firm += 1; firm_ok += hit
-                        frow = firm_per.setdefault(r["dest"], [0, 0])
-                        frow[0] += 1; frow[1] += hit
-                        fprow = firm_predicted_per.setdefault(
-                            p["dest"], [0, 0])
-                        fprow[0] += 1; fprow[1] += hit
-                w = int(cfg.get("mistakeWeight", 1)) if (
-                    p["dest"] is not None and p["dest"] != r["dest"]) else 1
-                lr.learn(r["dest"], toks, req_type, r["cloneProjects"],
-                         r["reporter"], weight=w, exemplar=title)
-            per_acc = {k: v[1] / v[0] for k, v in per.items() if v[0]}
-            firm_per_acc = {k: v[1] / v[0] for k, v in firm_per.items() if v[0]}
-            precision = {k: v[1] / v[0]
-                         for k, v in predicted_per.items() if v[0]}
-            firm_precision = {k: v[1] / v[0]
-                              for k, v in firm_predicted_per.items() if v[0]}
-            labels = set(per) | set(predicted_per)
-            f1 = {}
-            for label in labels:
-                recall = per_acc.get(label, 0.0)
-                prec = precision.get(label, 0.0)
-                f1[label] = (2 * prec * recall / (prec + recall)
-                             if prec + recall else 0.0)
-            source_acc = {k: {"n": v[0], "acc": v[1] / v[0]}
-                          for k, v in source_per.items() if v[0]}
-            return {"acc": ok / n if n else 0.0,
-                    "firmAcc": firm_ok / firm if firm else 0.0,
-                    "firmCov": firm / n if n else 0.0, "n": n,
-                    "balanced": (sum(per_acc.values()) / len(per_acc))
-                    if per_acc else 0.0,
-                    "worst": min(per_acc.values(), default=0.0),
-                    "per": per_acc,
-                    "perCounts": per,
-                    "precision": precision,
-                    "precisionCounts": predicted_per,
-                    "macroPrecision": (sum(precision.get(k, 0.0)
-                                            for k in labels) / len(labels))
-                    if labels else 0.0,
-                    "worstPrecision": min((precision.get(k, 0.0)
-                                           for k in labels), default=0.0),
-                    "f1": f1,
-                    "macroF1": (sum(f1.values()) / len(f1)) if f1 else 0.0,
-                    "worstF1": min(f1.values(), default=0.0),
-                    "firmBalanced": (sum(firm_per_acc.values()) / len(firm_per_acc))
-                    if firm_per_acc else 0.0,
-                    "firmWorst": min(firm_per_acc.values(), default=0.0),
-                    "firmPer": firm_per_acc,
-                    "firmPerCounts": firm_per,
-                    "firmPrecision": firm_precision,
-                    "firmPrecisionCounts": firm_predicted_per,
-                    "firmMacroPrecision": (sum(firm_precision.values())
-                                            / len(firm_precision))
-                    if firm_precision else 0.0,
-                    "firmWorstPrecision": min(firm_precision.values(),
-                                               default=0.0),
-                    "sources": source_acc}
-        finally:
-            TUNING.clear(); TUNING.update(saved)
-
-    # Values the nightly tune is allowed to explore, per knob. Searched by
-    # coordinate descent rather than the old fixed list of 13 hand-written
-    # combinations, which could only ever move one or two knobs at a time.
-    _TUNE_AXES = {
-        "summaryWeight":         [3, 4, 5, 6, 8, 10],
-        "mistakeWeight":         [1, 2, 3, 4],
-        "decayFactor":           [1.0, 0.999, 0.997, 0.995, 0.99],
-        "confTemp":              [2.0, 3.0, 4.0, 6.0, 8.0],
-        "priorWeight":           [0.0, 0.25, 0.5, 0.75, 1.0],
-        "knnThresh":             [0.0, 0.6, 0.7, 0.8, 0.9],
-        "requestTypeHintWeight": [0.0, 1.5, 3.0, 5.0],
-        # Who raised a ticket predicts the receiving team on its own far
-        # better than chance, but contributes a single log term against one
-        # per token. Whether amplifying it actually helps was inconclusive on
-        # a 400-ticket holdout — a real peak, but worth about one ticket — so
-        # it is offered to the tuner at a default of 1.0 (today's behaviour)
-        # rather than hard-coded, and adopted only if the evidence grows.
-        "reporterWeight":        [0.0, 1.0, 2.0, 3.0, 5.0],
-        "escalationSpecialist":  [0, 1],
-        "escalationPriorWeight": [0.0, 0.25, 0.5, 0.75, 1.0],
-        "reviewConf":            [65, 70, 75, 80, 85],
-        "reviewMargin":          [10, 15, 20, 25],
-    }
-    _TUNE_KEEP   = tuple(_TUNE_AXES)
-    _TUNE_BUDGET = 120          # replays per night — ~1.5 min at current size
-    _TUNE_PASSES = 3
-
-    @staticmethod
-    def _tune_score(m: dict) -> tuple:
-        """Rank candidates by macro F1, then recall and precision.
-
-        Balanced recall alone can look excellent while a rare route sprays
-        false positives into common classes. Macro F1 makes both sides count;
-        confident-band precision then decides between otherwise similar
-        candidates.
-        """
-        # Metric fallbacks keep saved/offline replay fixtures from older
-        # schemas comparable while new replays always provide the richer set.
-        return (round(m.get("macroF1", m["balanced"]), 3),
-                round(m["balanced"], 3),
-                round(m.get("macroPrecision", m["balanced"]), 3),
-                round(m.get("worstF1", m["worst"]), 3),
-                round(m["worst"], 3),
-                round(m.get("firmMacroPrecision", m["firmBalanced"]), 3),
-                round(m.get("firmWorstPrecision", m["firmWorst"]), 3),
-                round(m["firmBalanced"], 3),
-                round(m["firmWorst"], 3),
-                round(m["firmAcc"], 3),
-                m["firmCov"],
-                round(m["acc"], 3))
-
-    def _self_tune(self, recs: list[dict]) -> Optional[dict]:
-        """Tune, gate against the incumbent, then report on an untouched tail."""
-        incumbent = {k: TUNING[k] for k in self._TUNE_KEEP}
-        # Validate across roughly three recent 400-ticket windows. A single
-        # 400-ticket tail repeatedly contained no PPS/IPS outcomes, making a
-        # 91% headline say nothing at all about those routes. The wider
-        # chronological span remains untouched during config selection but
-        # is much more likely to include every active outcome.
-        validation_n = max(100, min(1200, len(recs) // 3))
-        split = len(recs) - validation_n
-        tuning_recs = recs[:split]
-
-        cache: dict[tuple, tuple] = {}
-        spent = 0
-
-        def evaluate(cfg: dict, budget: list[int]):
-            """Scored replay of `cfg`, memoised; None once out of budget.
-
-            `budget` is this descent's own remaining allowance, not the
-            shared total — a cache hit costs nothing, but a fresh replay
-            draws only from the caller's share, so one hungry descent can't
-            spend the whole night's budget before the other gets to run.
-            """
-            nonlocal spent
-            sig = tuple(cfg[k] for k in self._TUNE_KEEP)
-            if sig in cache:
-                return cache[sig]
-            if budget[0] <= 0:
-                return None
-            budget[0] -= 1
-            spent += 1
-            m = self._replay_history(tuning_recs, cfg)
-            cache[sig] = (self._tune_score(m), m)
-            return cache[sig]
-
-        def descend(seed: dict, budget: list[int]):
-            """Coordinate descent from `seed`: sweep each knob against the
-            current best, keep any improvement, repeat until a full pass
-            changes nothing."""
-            cur = dict(seed)
-            got = evaluate(cur, budget)
-            if got is None:
-                return None
-            best_score, best_m = got
-            for _ in range(self._TUNE_PASSES):
-                improved = False
-                for axis, values in self._TUNE_AXES.items():
-                    for value in values:
-                        if cur.get(axis) == value:
-                            continue
-                        trial = dict(cur, **{axis: value})
-                        got = evaluate(trial, budget)
-                        if got is None:
-                            break
-                        score, m = got
-                        if score > best_score:
-                            best_score, best_m, cur = score, m, trial
-                            improved = True
-                    if budget[0] <= 0:
-                        break
-                if not improved or budget[0] <= 0:
-                    break
-            return best_score, best_m, cur
-
-        # Greedy descent only ever explores the basin it starts in: once a
-        # knob such as decayFactor settles near last night's value, testing
-        # it alone rarely looks better, even when a very different value
-        # would win once paired with other knobs the search already moved
-        # away from. Descending twice - once warm-started from tonight's
-        # live config, once from the fixed, offline-validated baseline -
-        # and keeping whichever finishes with the better score is what
-        # surfaced decayFactor=1.0 (never forget) as far better for the
-        # low-volume BI class than the 0.999 the live config was stuck on.
-        # A single descent alone can exhaust the whole budget before
-        # converging, so each gets its own guaranteed half rather than
-        # sharing one pool the first descent could spend in full.
-        half = max(1, self._TUNE_BUDGET // 2)
-        runs = [descend(dict(TUNING), [half]),
-                descend(dict(BALANCED_TUNED_CONFIG),
-                        [self._TUNE_BUDGET - half])]
-        runs = [r for r in runs if r is not None]
-        if not runs:
-            return None
-        best_score, best_m, cur = max(runs, key=lambda r: r[0])
-
-        challenger = {k: cur[k] for k in self._TUNE_KEEP}
-
-        # Use the first two recent windows as a champion/challenger gate and
-        # leave the final ~400 decisions untouched. Previously, a candidate
-        # could win on the tuning history, score materially worse on the
-        # holdout, and still be deployed; the holdout was reporting the
-        # regression rather than preventing it.
-        final_n = min(400, max(100, validation_n // 3))
-        final_start = len(recs) - final_n
-        gate_end = max(split, final_start)
-        challenger_gate = self._replay_history(
-            recs, challenger, score_start=split, score_end=gate_end)
-        incumbent_gate = self._replay_history(
-            recs, incumbent, score_start=split, score_end=gate_end)
-        rejected = self._tune_score(challenger_gate) <= \
-            self._tune_score(incumbent_gate)
-        chosen = incumbent if rejected else challenger
-
-        best = {"score": best_score,
-                "cfg": chosen,
-                "train": best_m, "trainN": best_m["n"], "split": split,
-                "evals": spent,
-                "validationWindows": max(1, math.ceil(validation_n / 400)),
-                "challengerRejected": rejected,
-                "challengerCfg": challenger if rejected else None,
-                "gate": incumbent_gate if rejected else challenger_gate,
-                "gateN": (incumbent_gate if rejected else challenger_gate)["n"]}
-        if best is not None:
-            validation = self._replay_history(
-                recs, best["cfg"], score_start=split)
-            final = self._replay_history(
-                recs, best["cfg"], score_start=final_start)
-            best["holdout"] = validation
-            best["holdoutN"] = validation["n"]
-            best["finalHoldout"] = final
-            best["finalHoldoutN"] = final["n"]
-            for key in ("acc", "balanced", "worst", "firmAcc", "firmBalanced",
-                        "firmWorst", "firmCov", "n", "per", "firmPer",
-                        "perCounts", "firmPerCounts", "precision",
-                        "precisionCounts", "macroPrecision", "worstPrecision",
-                        "f1", "macroF1", "worstF1", "firmPrecision",
-                        "firmPrecisionCounts", "firmMacroPrecision",
-                        "firmWorstPrecision", "sources"):
-                if key in validation:
-                    best[key] = validation[key]
-        return best
 
     def _rebuild_model(self, recs: list[dict]) -> None:
         """Re-fit a clean model over the whole history with the current TUNING
@@ -2448,10 +2129,9 @@ class ShadowWatcher:
                     continue
                 req_type = str(r.get("requestType")
                                or r.get("reqType") or "")
-                toks = features_for(det, req_type)
-                lr.learn(dest, toks, req_type,
-                         as_name_list(r.get("cloneProjects")),
-                         det["reporter"], exemplar=tokenize(det["summary"]))
+                example = dict(det, dest=dest, requestType=req_type,
+                               cloneProjects=as_name_list(r.get("cloneProjects")))
+                self._fit_example(lr, example)
             except Exception:                       # noqa: BLE001
                 skipped += 1
         if skipped:
@@ -2496,6 +2176,11 @@ class ShadowWatcher:
                 reasons.append(
                     f"recent confident precision is {precision:.0%} "
                     f"({right}/{pred_n})")
+            lower = wilson_lower(right, pred_n)
+            # Precision still needs to reach 95%; additionally require a
+            # conservative lower bound of 90% before removing human review.
+            if pred_n >= MIN_ROUTE_FIRM_PREDICTIONS and lower < 0.90:
+                reasons.append(f"precision lower bound is {lower:.0%}; more evidence needed")
             policy[dest] = {
                 "forceReview": bool(reasons),
                 "reason": "; ".join(reasons),
@@ -2504,6 +2189,7 @@ class ShadowWatcher:
                 "firmCorrect": right,
                 "firmPrecision": round(precision, 4)
                 if precision is not None else None,
+                "precisionLowerBound": round(lower, 4),
             }
         return policy
 
@@ -2611,6 +2297,11 @@ class ShadowWatcher:
                              "finalHoldoutN": best["finalHoldoutN"],
                              "validationWindows": best["validationWindows"],
                              "challengerRejected": best["challengerRejected"],
+                             "gateReason": best.get("gateReason"),
+                             "incumbentGateScore": best.get("incumbentGateScore"),
+                             "challengerGateScore": best.get("challengerGateScore"),
+                             "segments": best.get("segments", {}),
+                             "featureOrigins": best.get("featureOrigins", {}),
                              "finalAcc": round(
                                  best["finalHoldout"]["acc"], 4),
                              "finalFirmAcc": round(
@@ -2706,6 +2397,12 @@ class ShadowWatcher:
             pred["scored"] = True
         if p_dest is not None:
             correct = (p_dest == dest)
+            if not correct:
+                cases = self.state.setdefault("reviewCases", [])
+                cases.append({"key": det["key"], "summary": det["summary"],
+                              "predicted": p_dest, "actual": dest,
+                              "confidence": pred.get("conf"), "when": tr["when"]})
+                self.state["reviewCases"] = cases[-200:]
             stats["predictions"] += 1
             stats["correct"]     += int(correct)
             confusion = self.state.setdefault("confusion", {})
@@ -2739,9 +2436,23 @@ class ShadowWatcher:
                          "byActual": {}, "byPredicted": {},
                          "confidentByActual": {},
                          "confidentByPredicted": {},
+                         "recentEvents": [], "coverageReasons": {}, "routedKeys": {},
                          "bySource": {}, "withRequestType": 0}
         self._metrics_offset = 0
         self._metrics_pending: dict[str, dict] = {}
+
+        try:
+            with open(LOG_FILE + ".metrics.json", encoding="utf-8") as f:
+                saved = json.load(f)
+            self._metrics = saved["metrics"]
+            self._metrics_pending = saved.get("pending", {})
+            size = saved["prefixSize"]
+            with open(LOG_FILE, "rb") as f:
+                prefix = f.read(size)
+            if len(prefix) == size and hashlib.sha256(prefix).hexdigest() == saved["prefixHash"]:
+                self._metrics_offset = size
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
 
     def _live_metrics(self) -> dict:
         """Coverage and calibration reconstructed from the append-only log.
@@ -2754,6 +2465,11 @@ class ShadowWatcher:
             self._reset_metrics()
         result  = self._metrics
         pending = self._metrics_pending
+        cutoff = f"{datetime.now() - timedelta(days=30):%Y-%m-%d %H:%M:%S}"
+        recent = result.setdefault("recentEvents", [])
+        recent[:] = [r for r in recent if r.get("ts", "") >= cutoff]
+        routed_keys = result.setdefault("routedKeys", {})
+        reasons = result.setdefault("coverageReasons", {})
         try:
             size = os.path.getsize(LOG_FILE)
         except OSError:
@@ -2761,6 +2477,10 @@ class ShadowWatcher:
         if size < self._metrics_offset:      # truncated or replaced — restart
             self._reset_metrics()
             result, pending = self._metrics, self._metrics_pending
+            recent = result.setdefault("recentEvents", [])
+            recent[:] = [r for r in recent if r.get("ts", "") >= cutoff]
+            routed_keys = result.setdefault("routedKeys", {})
+            reasons = result.setdefault("coverageReasons", {})
         if size == self._metrics_offset:
             return result
         try:
@@ -2783,6 +2503,8 @@ class ShadowWatcher:
                 rec = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(rec, dict):
+                continue
             key = rec.get("key", "")
             if rec.get("event") == "would_have_done":
                 pending[key] = rec
@@ -2793,6 +2515,23 @@ class ShadowWatcher:
             if rec.get("event") != "routed":
                 continue
             result["routed"] += 1
+            context = rec if rec.get("review") is not None else pending.get(key, {})
+            reason = coverage_reason(rec, pending.get(key), key in routed_keys)
+            reasons[reason] = reasons.get(reason, 0) + 1
+            stamp = str(rec.get("ts") or "")
+            routed_keys[key] = stamp
+            if len(routed_keys) > 8000:
+                del routed_keys[next(iter(routed_keys))]
+            if stamp >= cutoff:
+                compact = {k: rec.get(k) for k in
+                           ("ts", "predicted", "dest", "predictionCorrect", "requestType")}
+                compact["coverageReason"] = reason
+                compact["ts"] = stamp
+                compact["review"] = context.get("review")
+                compact["dest"] = self.canonical_dest(compact.get("dest") or "unknown")
+                if compact["predicted"] is not None:
+                    compact["predicted"] = self.canonical_dest(compact["predicted"])
+                recent.append(compact)
             if rec.get("requestType"):
                 result["withRequestType"] += 1
             if rec.get("predicted") is None:
@@ -2800,15 +2539,17 @@ class ShadowWatcher:
             result["predicted"] += 1
             hit = int(bool(rec.get("predictionCorrect")))
             result["correct"] += hit
+            seg = result.setdefault("segments", {}).setdefault(
+                segment_name(rec.get("requestType")), [0, 0])
+            seg[0] += 1; seg[1] += hit
             actual = self.canonical_dest(rec.get("dest", "unknown"))
             predicted = self.canonical_dest(rec.get("predicted", "unknown"))
             row = result["byActual"].setdefault(actual, [0, 0])
             row[0] += 1; row[1] += hit
             prow = result["byPredicted"].setdefault(predicted, [0, 0])
             prow[0] += 1; prow[1] += hit
-            context = rec if rec.get("review") is not None \
-                else pending.get(key, {})
-            band = "review" if context.get("review") else "confident"
+            band = "unknown" if context.get("review") is None else "review" if context["review"] else "confident"
+            result.setdefault("unknown", [0, 0])
             result[band][0] += 1; result[band][1] += hit
             if band == "confident":
                 crow = result["confidentByActual"].setdefault(actual, [0, 0])
@@ -2835,6 +2576,7 @@ class ShadowWatcher:
                if pred_n else "no resolved predictions yet")
 
         seen_counts = m.get("seen", {})
+        last_poll = self.state.get("lastSuccessfulPoll")
         lines = [
             "# Triage Shadow Learner — report",
             "",
@@ -2851,15 +2593,19 @@ class ShadowWatcher:
         if refusals:
             codes = ", ".join(str(c) for c in sorted(refusals))
             lines += [f"## ⚠ Jira has been refusing requests ({codes}) "
-                     "since this run started",
+                     "on recent requests",
                      "",
-                     "Figures below stopped updating with real data when "
-                     "this began — check the credentials and permissions "
-                     "in jira_config.json, then restart.",
+                     "Some reads failed. Check access if the warning persists; "
+                     "a successful search clears the warning automatically.",
                      ""]
         lines += [
             "## Model provenance",
             "",
+            "- **Last completed poll:** " + (
+                datetime.fromtimestamp(last_poll).isoformat(timespec="seconds")
+                if isinstance(last_poll, (int, float)) else "not recorded yet"),
+            "- **Polling:** " + ("incomplete; retrying saved checkpoint"
+                                  if self.state.get("pollIncomplete") else "no incomplete scan recorded"),
             f"- **Trained on:** {sum(seen_counts.values())} labelled decisions"
             + (f" since {self.state['processStart']}"
                if self.state.get("processStart") else ""),
@@ -2882,6 +2628,51 @@ class ShadowWatcher:
                          f"{seen_counts.get(dest, 0)} |")
 
         live = self._live_metrics()
+        recent_windows = {str(days): rolling_metrics(live.get("recentEvents", []), days=days)
+                          for days in (7, 30)}
+        trend = performance_drift(live.get("recentEvents", []))
+        lines += ["", "## Recent live performance", "",
+                  "Windows use when a routing was observed; counts are events, not unique tickets.", ""]
+        for days, recent in recent_windows.items():
+            total, right = recent["predicted"], recent["correct"]
+            accuracy = f"{right / total:.1%} ({right}/{total})" if total else "no scored events"
+            lines.append(f"- **Last {days} days:** {accuracy}; intake prediction coverage "
+                         + (f"{recent['coveragePct']:.1f}% ({total}/{recent['routed']})"
+                            if recent["routed"] else "no routing events"))
+            for segment, (n, ok) in recent["segments"].items():
+                lines.append(f"  - {segment}: {ok}/{n} ({ok / n:.1%})")
+        recent = recent_windows["30"]
+        lines += ["", "### Gradual performance drift", "",
+                  "Compares the last 7 days with the preceding, non-overlapping 21 days. "
+                  "Warnings require a material drop and sufficient sample evidence; they are prompts to investigate."]
+        old, new = trend["baseline"], trend["recent"]
+        if old["predictions"] and new["predictions"]:
+            lines.append(f"- Overall: {old['pct']}% ({old['correct']}/{old['predictions']}) "
+                         f"baseline versus {new['pct']}% ({new['correct']}/{new['predictions']}) recently.")
+        if trend["warnings"]:
+            for warning in trend["warnings"]:
+                lines.append(f"- Warning — {warning['kind']}: {warning['label']} dropped "
+                             f"{warning['dropPoints']:.1f} percentage points.")
+        else:
+            lines.append("- No deterioration met the warning criteria; small samples and smaller changes can still warrant review.")
+        if recent["byActual"] or recent["byPredicted"]:
+            lines += ["", "### Last 30 days by route", "",
+                      "| Route | Recall | Precision |", "|---|---:|---:|"]
+            for dest in self.all_dests:
+                actual_n, actual_ok = recent["byActual"].get(dest, [0, 0])
+                suggested_n, suggested_ok = recent["byPredicted"].get(dest, [0, 0])
+                recall = f"{actual_ok}/{actual_n} ({actual_ok / actual_n:.1%})" if actual_n else "—"
+                precision = f"{suggested_ok}/{suggested_n} ({suggested_ok / suggested_n:.1%})" if suggested_n else "—"
+                lines.append(f"| {dest} | {recall} | {precision} |")
+        missing_reasons = {k: n for k, n in recent["coverageReasons"].items() if k != "predicted"}
+        if missing_reasons:
+            lines += ["", "### Unpredicted routing events (last 30 days)", "",
+                      "Categories describe available log evidence; no intake observation does not establish a polling failure."]
+            for reason, n in sorted(missing_reasons.items()):
+                lines.append(f"- {reason.replace('_', ' ')}: {n}")
+            missing_days = [(day, n - scored, n) for day, (n, scored) in recent["dailyCoverage"].items() if n > scored]
+            for day, missing, total in sorted(missing_days, key=lambda r: -r[1])[:3]:
+                lines.append(f"- {day}: {missing}/{total} routing events had no prediction")
         lines += ["", f"## Prediction accuracy: {acc}"]
         if live["routed"]:
             coverage = 100 * live["predicted"] // live["routed"]
@@ -2889,8 +2680,9 @@ class ShadowWatcher:
                          f"({live['predicted']}/{live['routed']} routed tickets "
                          "received an intake suggestion)")
         for key, label in (("confident", "Confident suggestions"),
-                           ("review", "Review-flagged suggestions")):
-            total, right = live[key]
+                           ("review", "Review-flagged suggestions"),
+                           ("unknown", "Suggestions with unknown historical review status")):
+            total, right = live.get(key, [0, 0])
             if total:
                 lines.append(f"- **{label}:** {100 * right // total}% "
                              f"({right}/{total})")
@@ -2908,19 +2700,27 @@ class ShadowWatcher:
                       "|---|---:|---:|---:|"]
             for dest in self.all_dests:
                 actual_n, actual_ok = live["byActual"].get(dest, [0, 0])
-                pred_n, pred_ok = live["byPredicted"].get(dest, [0, 0])
+                route_pred_n, pred_ok = live["byPredicted"].get(dest, [0, 0])
                 firm_n, firm_ok = live["confidentByPredicted"].get(
                     dest, [0, 0])
                 recall = (f"{actual_ok}/{actual_n} ({100 * actual_ok // actual_n}%)"
                           if actual_n else "—")
-                precision = (f"{pred_ok}/{pred_n} ({100 * pred_ok // pred_n}%)"
-                             if pred_n else "—")
+                precision = (f"{pred_ok}/{route_pred_n} ({100 * pred_ok // route_pred_n}%)"
+                             if route_pred_n else "—")
                 firm_precision = (f"{firm_ok}/{firm_n} ({100 * firm_ok // firm_n}%)"
                                   if firm_n else "—")
                 lines.append(f"| {dest} | {recall} | {precision} | "
                              f"{firm_precision} |")
 
         route_safety = getattr(self, "route_safety", {})
+        if live.get("segments"):
+            lines += ["", "### Accuracy by observed request type", ""]
+            for name, (total, right) in live["segments"].items():
+                lines.append(f"- {name}: {right}/{total} ({right / total:.1%})")
+        lines += ["", "### Mistake review", "",
+                  "Run `python triage_review.py` to view recurring confusions and annotate cases.",
+                  "Use `python triage_review.py --export TRIAGE_REVIEW_QUEUE.md` for a prioritised, representative local review queue.",
+                  "New training examples preserve intake features; older examples use outcome-time features."]
         guarded = [(dest, policy) for dest, policy in route_safety.items()
                    if policy.get("forceReview")]
         if guarded:
@@ -3078,7 +2878,11 @@ class ShadowWatcher:
         status = {
             "updatedAt": datetime.now().isoformat(timespec="seconds"),
             "version": APP_VERSION,
-            "healthy": not refusals,
+            "healthy": not refusals and not self.state.get("pollIncomplete", False),
+            "healthMessage": ("Polling is incomplete; retrying from the last checkpoint"
+                              if self.state.get("pollIncomplete") else
+                              "Jira is refusing requests" if refusals else "Healthy"),
+            "lastSuccessfulPoll": self.state.get("lastSuccessfulPoll"),
             "refusals": sorted(refusals),
             "provenance": {
                 "trainedOnDecisions": sum(seen_counts.values()),
@@ -3089,11 +2893,14 @@ class ShadowWatcher:
                 "tuningSchemaVersion": self.state.get("tuningSchemaVersion", 0),
                 "outcomes": self.all_dests,
             },
-            "accuracy": {"predictions": pred_n, "correct": pred_c,
-                        "pct": round(100 * pred_c / pred_n, 1)
-                        if pred_n else None},
+            "accuracy": accuracy_counts(pred_n, pred_c),
             "routeSafety": route_safety,
-            "drift": self.state.get("tuneDrift"),
+            "segments": live.get("segments", {}),
+            "recentPerformance": recent_windows,
+            "performanceDrift": trend,
+            "drift": ({"date": date.today().isoformat(), "detail": "; ".join(
+                f"{w['label']} {w['kind']} dropped {w['dropPoints']:.1f} points"
+                for w in trend["warnings"][:5])} if trend["warnings"] else self.state.get("tuneDrift")),
         }
         try:
             _atomic_json_write(STATUS_FILE, status, fallback_in_place=True)
@@ -3178,6 +2985,8 @@ def _report_fatal(message: str) -> None:
 
 
 def main() -> None:
+    if updates.recover_pending(_DIR):
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
     # single-instance guard. restype/argtypes set explicitly, as the overlay's
     # acquire_single_instance does: without them ctypes truncates the handle
     # to c_int (harmless here, but wrong) and GetLastError is read through an
@@ -3225,7 +3034,13 @@ def main() -> None:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", _quit),
         ))
+    updates.listen_for_update(_DIR, lambda: _quit(icon))
     icon.run()
+    # Do not exit while a daemon writer is still learning or saving. The
+    # updater waits for this process to end before replacing any code.
+    watcher.stop.set()
+    worker.join()
+    watcher._save_state()
 
 
 if __name__ == "__main__":

@@ -21,7 +21,15 @@ triage_history.jsonl
 triage_dataset.jsonl
 triage_learner.log
 TRIAGE_REPORT.md
+TRIAGE_REVIEW_QUEUE.md
+TRIAGE_REVIEW_QUEUE.md.*
 triage_status.json
+triage_reviews.json
+triage_reviews.json.*
+triage_backups/
+.app-updates/
+app_update_error.log
+dist/
 
 # Exported reports may name staff and ticket volumes
 team-report-*.csv

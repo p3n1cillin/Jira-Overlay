@@ -18,7 +18,8 @@ import importlib.util
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from triage_support import threshold_experiment
+from datetime import timedelta
 from typing import Optional
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,9 +44,17 @@ def handoff_dests(records: list[dict], w=None) -> set[str]:
     the triage process started. Taken from the watcher's discovered config."""
     if w is not None:
         return set(w.dests)
-    inferred = {r["dest"] for r in records if r.get("cloneProjects")}
-    return inferred or {r["dest"] for r in records
-                        if str(r.get("dest", "")).startswith("With ")}
+    try:
+        with open(tl.CONFIG_FILE, encoding="utf-8") as f:
+            config = json.load(f)
+        if "triageStatuses" in config:
+            return set(tl.as_name_list(config["triageStatuses"]))
+    except (OSError, ValueError, TypeError):
+        pass
+    # Without discovered configuration, only explicit record evidence is
+    # usable. An outcome's English name does not establish its workflow role.
+    return {r["dest"] for r in records
+            if r.get("cloneProjects") or r.get("isHandoff") is True}
 
 
 # ---------------------------------------------------------------------------
@@ -179,14 +188,16 @@ WARMUP = 150     # don't score the first N (model barely trained)
 
 
 def load_dataset() -> Optional[list[dict]]:
-    """Records from the last `build`, or None with an explanation."""
+    """Use live history by default; TRIAGE_DATASET selects an explicit dataset."""
+    selected = os.environ.get("TRIAGE_DATASET")
+    if not selected and os.path.exists(tl.HISTORY_FILE):
+        return tl.ShadowWatcher._load_history()
     try:
-        with open(DATASET, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+        with open(selected or DATASET, encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+            return sorted(records, key=lambda r: r.get("when", ""))
     except FileNotFoundError:
-        print(f"No dataset yet at {DATASET}\n"
-              "Run this first:   python triage_eval.py build")
-        return None
+        return tl.ShadowWatcher._load_history()
     except json.JSONDecodeError as exc:
         print(f"{DATASET} is corrupt ({exc}). Rebuild it with:   "
               "python triage_eval.py build")
@@ -196,112 +207,22 @@ def load_dataset() -> Optional[list[dict]]:
 def replay(records: list[dict], tuning: dict, warmup: int = WARMUP,
            misses: Optional[list] = None, score_start: Optional[int] = None,
            score_end: Optional[int] = None) -> dict:
-    saved = dict(tl.TUNING)
-    tl.TUNING.update(tuning)
-    try:
-        teams = list(handoff_dests(records))
-        learner = tl.Learner({}, escalation_dests=teams)
-        scored: list[tuple[bool, int, str, str]] = []
-        firm: list[tuple[bool, str, str]] = []
-        review_n = 0               # how many were flagged for human review
-        confusion: dict[str, int] = {}
-        start = warmup if score_start is None else score_start
-        end = len(records) if score_end is None else score_end
-        for i, r in enumerate(records):
-            req_type = r.get("requestType", r.get("reqType", ""))
-            det = {"summary": r["summary"], "desc": r["desc"],
-                   "labels": r["labels"], "components": r["components"],
-                   "structured": r.get("structured", []),
-                   "reporter": r["reporter"], "key": r["key"], "clones": []}
-            toks = tl.features_for(det, req_type)
-            title = tl.tokenize(r["summary"])
-            p = learner.predict_ex(toks, req_type, r["reporter"], exemplar=title)
-            dest, conf = p["dest"], p["conf"]
-            correct = dest == r["dest"] if dest is not None else None
-            if dest is not None and start <= i < end:
-                scored.append((bool(correct), conf, r["dest"], dest))
-                if p["review"]:
-                    review_n += 1
-                else:
-                    firm.append((bool(correct), r["dest"], dest))
-                if not correct:
-                    pair = f"{r['dest']} predicted-as {dest}"
-                    confusion[pair] = confusion.get(pair, 0) + 1
-                    if misses is not None:
-                        misses.append((r["dest"], dest, conf, r["summary"]))
-            w = (int(tl.TUNING["mistakeWeight"])
-                 if correct is False else 1)
-            learner.learn(r["dest"], toks, req_type,
-                          r.get("cloneProjects", []),
-                          r["reporter"], weight=w, exemplar=title)
-    finally:
-        tl.TUNING.clear()
-        tl.TUNING.update(saved)
-
-    n = len(scored)
-    acc = sum(c for c, _, _, _ in scored) / n if n else 0.0
-    hi = [(c, conf) for c, conf, _, _ in scored if conf >= 90]
-    cov90 = len(hi) / n if n else 0.0
-    acc90 = (sum(c for c, _ in hi) / len(hi)) if hi else 0.0
-    per: dict[str, list[int]] = {}
-    predicted_per: dict[str, list[int]] = {}
-    for c, _, actual, predicted in scored:
-        row = per.setdefault(actual, [0, 0])
-        row[0] += 1
-        row[1] += int(c)
-        prow = predicted_per.setdefault(predicted, [0, 0])
-        prow[0] += 1
-        prow[1] += int(c)
-    firm_per: dict[str, list[int]] = {}
-    firm_predicted_per: dict[str, list[int]] = {}
-    for c, actual, predicted in firm:
-        row = firm_per.setdefault(actual, [0, 0])
-        row[0] += 1
-        row[1] += int(c)
-        prow = firm_predicted_per.setdefault(predicted, [0, 0])
-        prow[0] += 1
-        prow[1] += int(c)
-    per_acc = {k: v[1] / v[0] for k, v in per.items()}
-    firm_per_acc = {k: v[1] / v[0] for k, v in firm_per.items()}
-    precision = {k: v[1] / v[0] for k, v in predicted_per.items()}
-    firm_precision = {k: v[1] / v[0]
-                      for k, v in firm_predicted_per.items()}
-    labels = set(per) | set(predicted_per)
-    f1 = {}
-    for label in labels:
-        recall, prec = per_acc.get(label, 0.0), precision.get(label, 0.0)
-        f1[label] = (2 * prec * recall / (prec + recall)
-                     if prec + recall else 0.0)
-    firm_acc = (sum(c for c, _, _ in firm) / len(firm)) if firm else 0.0
-    return {"n": n, "acc": acc, "cov90": cov90, "acc90": acc90,
-            "per": per_acc,
-            "perCounts": per,
-            "precision": precision,
-            "precisionCounts": predicted_per,
-            "macroPrecision": (sum(precision.get(k, 0.0) for k in labels)
-                               / len(labels)) if labels else 0.0,
-            "worstPrecision": min((precision.get(k, 0.0) for k in labels),
-                                  default=0.0),
-            "f1": f1,
-            "macroF1": sum(f1.values()) / len(f1) if f1 else 0.0,
-            "worstF1": min(f1.values(), default=0.0),
-            "balanced": (sum(per_acc.values()) / len(per_acc))
-            if per_acc else 0.0,
-            "worst": min(per_acc.values(), default=0.0),
-            "confusion": confusion,
-            "firmCov": (len(firm) / n) if n else 0.0, "firmAcc": firm_acc,
-            "firmBalanced": (sum(firm_per_acc.values()) / len(firm_per_acc))
-            if firm_per_acc else 0.0,
-            "firmWorst": min(firm_per_acc.values(), default=0.0),
-            "firmPer": firm_per_acc,
-            "firmPerCounts": firm_per,
-            "firmPrecision": firm_precision,
-            "firmPrecisionCounts": firm_predicted_per,
-            "firmMacroPrecision": (sum(firm_precision.values())
-                                   / len(firm_precision))
-            if firm_precision else 0.0,
-            "firmWorstPrecision": min(firm_precision.values(), default=0.0),
-            "reviewCov": (review_n / n) if n else 0.0}
+    watcher = object.__new__(tl.ShadowWatcher)
+    watcher.dests = list(handoff_dests(records))
+    m = watcher._replay_history(records, tuning,
+        score_start=warmup if score_start is None else score_start, score_end=score_end)
+    hi = [p for p in m["samples"] if p["conf"] >= 90]
+    m["cov90"] = len(hi) / m["n"] if m["n"] else 0.0
+    m["acc90"] = sum(p["correct"] for p in hi) / len(hi) if hi else 0.0
+    m["reviewCov"] = 1 - m["firmCov"]
+    m["confusion"] = {}
+    for p in m["samples"]:
+        if not p["correct"]:
+            pair = f"{p['actual']} predicted-as {p['predicted']}"
+            m["confusion"][pair] = m["confusion"].get(pair, 0) + 1
+            if misses is not None:
+                misses.append((p["actual"], p["predicted"], p["conf"], p["summary"]))
+    return m
 
 
 DEFAULT_CFG = {"logOdds": 1, "summaryWeight": 6, "mistakeWeight": 3,
@@ -367,113 +288,43 @@ def analyze(cfg: dict) -> None:
 
 def tune() -> None:
     records = load_dataset()
-    if records is None:
+    if not records or len(records) < 300:
+        print("At least 300 labelled decisions are required.")
         return
+    saved = dict(tl.TUNING)
+    try:
+        if os.path.exists(tl.STATE_FILE):
+            with open(tl.STATE_FILE, encoding="utf-8") as f:
+                tl.TUNING.update(json.load(f).get("tunedConfig", {}))
+        watcher = object.__new__(tl.ShadowWatcher)
+        watcher.dests = list(handoff_dests(records))
+        best = watcher._self_tune(records[-tl.TUNE_WINDOW:])
+        if best:
+            report = {k: best[k] for k in
+                ("cfg", "gateReason", "incumbentGateScore", "challengerGateScore",
+                 "holdoutN", "finalHoldoutN", "acc", "macroF1", "segments", "featureOrigins")}
+            report["finalAccuracy"] = best["finalHoldout"]["acc"]
+            print(json.dumps(report, indent=2))
+    finally:
+        tl.TUNING.clear()
+        tl.TUNING.update(saved)
 
-    # Handoffs may have started only recently: train from the first
-    # handoff onward, else earlier resolutions teach the wrong lesson.
-    handoffs = handoff_dests(records)
-    team = [r["when"] for r in records if r["dest"] in handoffs]
-    if team:
-        start = min(team)
-        before = len(records)
-        records = [r for r in records if r["when"] >= start]
-        print(f"process start detected: {start} "
-              f"(dropped {before - len(records)} pre-process decisions)")
 
-    if len(records) < 200:
-        print(f"only {len(records)} decisions — too few to hold any out; "
-              "run 'build' once the team has triaged more tickets")
+def thresholds():
+    records = load_dataset()
+    if not records or len(records) < 600:
+        print("At least 600 labelled decisions are needed for separate gate and final windows.")
         return
-    warmup = min(WARMUP, len(records) // 5)
-    validation_n = max(100, min(1200, len(records) // 3))
-    split = len(records) - validation_n
-    tuning_records = records[:split]
-    tuning_warmup = min(WARMUP, len(tuning_records) // 5)
-    print(f"replaying {len(records)} decisions; selecting on {split} older "
-          f"decisions and holding out {validation_n} recent decisions\n")
-
-    # Same coordinate-descent search the live learner runs nightly, over the
-    # same axes and the same ranking — so this tool and the learner can never
-    # disagree about which config is best.
-    axes  = tl.ShadowWatcher._TUNE_AXES
-    score = tl.ShadowWatcher._tune_score
-    seen: dict[tuple, tuple] = {}
-    results = []
-
-    def evaluate(cfg: dict, budget: list[int]):
-        sig = tuple(cfg[k] for k in axes)
-        if sig not in seen:
-            if budget[0] <= 0:
-                return None
-            budget[0] -= 1
-            m = replay(tuning_records, cfg, tuning_warmup)
-            seen[sig] = m
-            results.append((dict(cfg), m))
-        return seen[sig]
-
-    def descend(seed: dict, budget: list[int]):
-        cur = dict(seed)
-        got = evaluate(cur, budget)
-        if got is None:
-            return None
-        best = score(got)
-        for _ in range(tl.ShadowWatcher._TUNE_PASSES):
-            improved = False
-            for axis, values in axes.items():
-                for value in values:
-                    if cur.get(axis) == value:
-                        continue
-                    trial = dict(cur, **{axis: value})
-                    got = evaluate(trial, budget)
-                    if got is None:
-                        break
-                    s = score(got)
-                    if s > best:
-                        best, cur, improved = s, trial, True
-                if budget[0] <= 0:
-                    break
-            if not improved or budget[0] <= 0:
-                break
-        return best, cur
-
-    # Two starting points, same as the live learner: greedy descent only
-    # explores the basin it starts in, so run it once from the plain
-    # defaults and once from the offline-validated baseline, and keep
-    # whichever ends up better. A single descent can exhaust the whole
-    # budget before converging, so each gets its own guaranteed half.
-    half = max(1, tl.ShadowWatcher._TUNE_BUDGET // 2)
-    runs = [descend(DEFAULT_CFG, [half]),
-            descend(tl.BALANCED_TUNED_CONFIG,
-                    [tl.ShadowWatcher._TUNE_BUDGET - half])]
-    runs = [r for r in runs if r is not None]
-    best, cur = max(runs, key=lambda r: r[0])
-    print(f"searched {len(seen)} configs by coordinate descent\n")
-
-    # Rank balanced first so small buckets such as BI/DEV cannot be hidden by
-    # high-volume IT/DATA wins; confident-band quality breaks ties.
-    results.sort(key=lambda cm: score(cm[1]), reverse=True)
-    print("top configs  (bal = mean per-route accuracy | worst = weakest route | "
-          "firm = non-review suggestions)")
-    for cfg, m in results[:10]:
-        print(f"  sw={cfg['summaryWeight']:>2} mw={cfg['mistakeWeight']} "
-              f"ct={cfg['confTemp']:>4} kt={cfg['knnThresh']} "
-              f"decay={cfg['decayFactor']} rc={cfg['reviewConf']} "
-              f"rm={cfg['reviewMargin']} | bal={m['balanced']:.1%} "
-              f"worst={m['worst']:.1%} acc={m['acc']:.1%} "
-              f"firm={m['firmAcc']:.1%}/{m['firmCov']:.1%}")
-
-    best_cfg, best = results[0]
-    holdout = replay(records, best_cfg, warmup, score_start=split)
-    print(f"\nBEST: {best_cfg}")
-    print(f"  selected on {best['n']} older decisions")
-    print(f"  recent holdout: acc={holdout['acc']:.1%} "
-          f"bal={holdout['balanced']:.1%} worst={holdout['worst']:.1%} "
-          f"firm={holdout['firmAcc']:.1%}/{holdout['firmCov']:.1%} "
-          f"n={holdout['n']}")
-    for dest in all_dests(records):
-        if dest in holdout["per"]:
-            print(f"  {dest}: {holdout['per'][dest]:.1%}")
+    cfg = dict(tl.TUNING)
+    if os.path.exists(tl.STATE_FILE):
+        with open(tl.STATE_FILE, encoding="utf-8") as f:
+            cfg.update(json.load(f).get("tunedConfig", {}))
+    start = len(records) - min(1200, len(records) // 3)
+    final_start = len(records) - min(400, (len(records) - start) // 3)
+    gate = replay(records, cfg, score_start=start, score_end=final_start)
+    final = replay(records, cfg, score_start=final_start)
+    print("Experimental thresholds; these do not change deployed policy.")
+    print(json.dumps(threshold_experiment(gate["samples"], final["samples"]), indent=2))
 
 
 if __name__ == "__main__":
@@ -484,6 +335,8 @@ if __name__ == "__main__":
         tune()
     elif mode == "review":
         review_bands()
+    elif mode == "thresholds":
+        thresholds()
     elif mode == "analyze":
         analyze({"summaryWeight": 4, "mistakeWeight": 2, "confTemp": 12.0,
                  "reqSmooth": 10, "repSmooth": 20})

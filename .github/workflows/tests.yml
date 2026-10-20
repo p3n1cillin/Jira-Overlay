@@ -1,0 +1,21 @@
+name: Windows regression tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install ruff
+      - run: python -m ruff check .
+      - run: python tests/run_all.py
+      - run: python -m compileall -q triage_support.py triage_evaluation.py triage_storage.py triage_review.py triage_eval.py
+      - run: python release_tools.py --output dist

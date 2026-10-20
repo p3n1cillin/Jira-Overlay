@@ -1,6 +1,6 @@
 """Shared plumbing for the test suite.
 
-The apps are single-file .pyw scripts, so each test loads them the way the
+The apps have .pyw entry points and shared modules, so tests load them the way the
 runtime does rather than importing a package. Every test that touches
 configuration must point CONFIG_FILE at a temporary directory first: a suite
 run once wrote a stub over a live install and destroyed the credentials, so
@@ -26,6 +26,7 @@ except (AttributeError, ValueError):
     pass
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT)
 
 
 def load(script: str, name: str):
@@ -54,6 +55,7 @@ def load_overlay(isolate_config: bool = True):
     ov = load("jira_overlay.pyw", "ov")
     if isolate_config:
         ov.CONFIG_FILE = os.path.join(_isolated_dir(), "jira_config.json")
+        ov.updates.latest_release = lambda: None  # UI tests must never contact GitHub
     return ov
 
 

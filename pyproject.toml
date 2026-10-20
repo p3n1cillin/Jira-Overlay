@@ -1,5 +1,6 @@
 [tool.ruff]
 target-version = "py39"   # matches setup.py's MIN_PYTHON
+extend-include = ["*.pyw"]
 
 [tool.ruff.lint]
 # Default selection (pycodestyle E/W + pyflakes F) is enough for a project

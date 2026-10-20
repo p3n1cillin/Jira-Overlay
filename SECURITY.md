@@ -2,9 +2,15 @@
 
 ## Supported versions
 
-This project doesn't maintain multiple release branches — there's one
-version, and it's whatever's on `main`. Security fixes land there and
-nowhere else, so keeping current means pulling the latest `main`.
+This project supports the latest stable release and current `main`; it does
+not maintain older release branches. Install stable updates from the public
+release channel, or pull current `main` if using a Git checkout.
+
+Updates trust HTTPS and the publisher account at
+`https://github.com/p3n1cillin/Jira-Overlay`. GitHub's SHA-256 asset digest and
+the package manifest protect integrity, not against a compromised publisher
+account. Packages contain code only. The updater does not send Jira credentials
+or ticket data, and never replaces personal configuration or learner files.
 
 ## Reporting a vulnerability
 

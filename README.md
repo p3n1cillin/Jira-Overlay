@@ -59,14 +59,14 @@ That's all. Setup installs Python and everything else if the machine hasn't got 
 
 ## Install
 
-Download the project (**Code → Download ZIP**, then extract — or `git clone`), then:
+Download the latest **JiraOverlay-<version>.zip** from [Releases](https://github.com/p3n1cillin/Jira-Overlay/releases/latest), then extract it into your own stable local folder (not a shared data folder or temporary download directory). Developers can also clone [the repository](https://github.com/p3n1cillin/Jira-Overlay).
 
 ### Double-click **`setup.bat`**
 
 It does the lot:
 
 1. Finds Python, and **installs it** if there isn't one — via winget, or straight from python.org. Per-user, so no admin prompt.
-2. Installs the three packages the app needs
+2. Installs the packages the app needs
 3. Offers to start it with Windows
 4. Launches it
 
@@ -75,6 +75,27 @@ The overlay then asks for your Jira details and finds your service desk. Nothing
 > Setup runs in a console window on purpose. The app itself runs under `pythonw`, which has nowhere to print an error — so anything that can go wrong is made to go wrong during setup, where you can read it.
 
 Afterwards, start it with **`launch.bat`** — or just let it start with Windows.
+
+### Application updates
+
+ZIP installations check the public GitHub repository on startup and every six hours. A new stable release produces a desktop notice (when desktop notifications are enabled). Settings shows the installed bundle version, **Check for updates** and **Update and restart**; the tray also has a manual check. Automatic checks can be turned off in Settings. Checks send no Jira credentials, configuration, ticket text or learner data. They are notices only: updates always require your confirmation.
+
+The updater downloads the complete release package, checks GitHub's SHA-256 digest and its internal file manifest, prepares dependencies, then asks both processes to save and close. Only verified application code, bootstrap files and documentation are replaced. `jira_config.json`, models, history, logs, reviews, reports and other personal files are not part of a release. The previous code is backed up under `.app-updates/backups`; a copy failure automatically restores it, and an interrupted transaction is recovered at the next launch. To explicitly roll back application code, run `update.bat --rollback` and select your installed folder. Model/data formats must remain backward compatible within this update channel; rolling back code does not rewind learning data.
+
+Updates trust HTTPS and the configured GitHub publisher. Checksums protect package integrity; they are not an independent publisher signature. An unreachable GitHub API, missing package/digest, partial download or verification failure leaves the installed code alone. Never distribute your working folder, credentials or learner files to another user. Each user runs setup with their own Jira account and token.
+
+**One-time upgrade for users of the old repository or an older ZIP:** download the new release, extract it into a separate folder, close both old tray icons, run the new folder's `update.bat`, and select the existing installed folder. It preserves that user's configuration and learning data. Future releases can then be installed from Settings. Do not replace the whole existing folder or copy someone else's configuration into it.
+
+**Git clones:** receive update notices but the updater refuses to overwrite a checkout. Close both apps, commit/stash any code edits as appropriate, and use `git pull --ff-only`, then run `setup.bat` if dependencies changed. When migrating from the old repository, change the checkout's remote to `https://github.com/p3n1cillin/Jira-Overlay.git` first. The project history is preserved.
+
+### Publishing a release
+
+1. Update `VERSION` in `app_release.py` and add the matching section in `CHANGELOG.md`. Both desktop processes use this single version. Use `YYYY.MM.DD` or `YYYY.MM.DD.N` for same-day releases.
+2. Run `python tests/run_all.py`, `python -m ruff check .` and `python release_tools.py --output dist`.
+3. Commit and push code only, then create and push the matching tag, e.g. `git tag v2026.10.20.1` and `git push origin v2026.10.20.1`.
+4. The release workflow tests Windows/Python 3.9 and 3.14 again, builds the allowlisted ZIP and publishes it with a checksum and release notes only if both test jobs pass. Users receive their next check's notice; they can also subscribe to GitHub release notifications.
+
+The workflow can also be dispatched for an existing version tag. Never move an already-published tag or replace its assets: issue a new version instead. Fork maintainers should change `REPOSITORY` in `app_release.py` before publishing their own update channel. Release publishing includes only the explicit `RELEASE_FILES` allowlist, never arbitrary workspace contents.
 
 | File | Purpose |
 |---|---|
@@ -234,18 +255,28 @@ Every discovered value is an override. Add any of these to `jira_config.json`:
 
 ### What it produces
 
-- **`TRIAGE_REPORT.md`** — provenance (what it's trained on, when it last tuned), accuracy, per-outcome breakdown, confusion pairs, and the keywords driving each outcome
+- **`TRIAGE_REPORT.md`** — provenance, cumulative and rolling 7/30-day accuracy, prediction coverage diagnostics, per-outcome and observed request-type breakdowns, confusion pairs, and outcome keywords. Rolling counts are routing events, not unique tickets.
 - **`triage_status.json`** — the same health/provenance/accuracy signal as flat JSON, for anything that wants to alert on it without parsing markdown
 - **`triage_suggestions.json`** — picked up by the overlay and shown next to incoming tickets
 - **`triage_history.jsonl`** — labelled decisions it re-tunes itself against nightly
 
 All of that is built from your real ticket text, so **every learner data file is gitignored**. Only the code is shared.
 
+Run `python triage_review.py --analyse --since YYYY-MM-DD` to save local evidence-based analyses of mistakes across all outcomes. Optional `--predicted "Your outcome name"` limits the analysis to one route. Counts come from your own observed history; no team names, portal categories, or routing rules are built in. Automated notes remain pending human review and never change training labels or tickets. Use `--case "CASE_ID" --note "Your explanation"` to record a human annotation.
+
+Nightly refitting uses the same chronological predict-then-learn step as replay, including extra weight for mistakes, so the deployed model matches the method evaluated by tuning.
+
+The tuner fits each candidate on the chronological training prefix but ranks it on the most recent 1,200 scored decisions (or the available smaller window). Candidates must improve a separate chronological gate without losing more than 0.5 percentage points of overall or confident accuracy. The final tail remains reporting-only. A bounded route-balance adjustment can compensate for outcomes the model systematically overpredicts or underpredicts; it learns only from earlier pre-learning predictions and observed destinations, starts neutral on small/new desks, and is enabled only if validation supports it. These adjustments are ranking signals, not guarantees that displayed confidence is a calibrated probability.
+
+Gradual-drift diagnostics compare the last 7 days with the preceding, non-overlapping 21 days, including confident suggestions, route precision and observed request types. Warnings require enough samples, at least a 3-point deterioration and conservative sample evidence. They prompt investigation, do not change routing rules, and never mark a healthy connection as failed.
+
+For a compact review worksheet, run `python triage_review.py --export TRIAGE_REVIEW_QUEUE.md`. It prioritises frequent confusions and samples diverse, higher-confidence mistakes (default two examples per pair; customise with `--per-pair` and `--limit`). The worksheet is private ticket data and its default filename is gitignored. Refresh it with the same command. Record your own assessment using `--case CASE_ID --note "Your explanation" --verdict ambiguous`, `confirmed_routing`, or `label_issue`. Verdicts stay local and do not automatically correct labels or teach the learner a new rule.
+
 ### How it learns
 
-Naive-Bayes over unigrams + bigrams, with separate channels for reporter and request type, complement log-odds scoring (so vocabulary common to every outcome cancels out), and a nearest-neighbour "ticket memory" for recurring requests. Recency decay lets it follow changes in how your team routes. Every night it replays its own history under a coordinate-descent search over ten hyper-parameters — from two independent starting points, so a knob that only helps in combination with others can't get permanently stuck — and adopts the best, scored on a held-out tail so improvements are real rather than fitted.
+Naive-Bayes over unigrams and bigrams, with separate reporter and request-type channels, complement log-odds scoring, and optional memory for recurring requests. Recency decay lets it follow changes in team routing. Nightly tuning searches from two starting configurations, compares the challenger against the incumbent on a later chronological gate, and reports a separate final window. The shared evaluator includes macro F1, precision, and routine-maintenance/other-ticket breakdowns. A higher training score alone cannot promote a candidate.
 
-Confidence is calibrated: close calls are flagged **review** and show both candidates rather than a confidently wrong single answer. A confident suggestion explains itself — the words in that ticket that most favoured the winning outcome, and who raised it when their own history backs it up — so it's something to check, not just something to trust.
+Confidence is a model score, not a guaranteed probability of correctness. Close calls and routes with insufficient precision evidence are flagged **review**. Suggestions name influential words and, where relevant, the reporter's routing history. Threshold experiments are evaluated separately before any change to deployed policy.
 
 If a night's tune swings sharply from the one before, that's flagged too — but only when the swing is backed by enough examples not to be one ticket's worth of noise on a small destination.
 
@@ -337,13 +368,64 @@ No test framework needed, and the whole suite runs in a few seconds. Each suite 
 | `test_resilience.py` | Window placement across monitors, network retry/backoff, and malformed Jira responses |
 | `test_setup.py` | First run on a machine with no dependencies, a failed install, and startup registration self-healing after a moved install |
 
-Run locally with `python tests/run_all.py` — matrixed across the oldest Python this project supports and the current one is a manual check, not a CI gate; there's no CI here.
+Run locally with `python tests/run_all.py`. GitHub Actions runs the suites on Windows with Python 3.9 and 3.14 for pushes and pull requests. `test_integrity.py` checks report/status/overlay agreement, interrupted polling, archived metrics, confidence evidence, backups, and offline/live replay parity.
 
 The suites never touch a real `jira_config.json`, a real Windows registry key, or a real Notepad window — they use isolated temp files and mocked subprocess calls throughout. That isolation is deliberate: a stub config once overwrote a live install and destroyed the credentials.
 
 ---
 
 ## Changelog
+
+### Learner review and recovery
+
+The learner, offline evaluator, and overlay share helper modules. Keep all
+`triage_*.py` files alongside the two `.pyw` entry points when updating.
+
+- `python triage_review.py` lists unreviewed mistakes, grouped by recurring
+  confusion. To record a human explanation, use
+  `python triage_review.py --case "<printed case ID>" --note "<explanation>"`.
+  Notes stay in `triage_reviews.json`; they do not change Jira or training labels.
+- `python triage_eval.py tune` runs the same replay and acceptance gate as the
+  live learner. It uses live history by default; set `TRIAGE_DATASET` to evaluate
+  a particular exported JSONL dataset instead. It does not deploy changes.
+- `python triage_eval.py thresholds` selects route-specific confidence thresholds
+  on an earlier gate and evaluates them on a separate final window. These are
+  experiments, not automatic changes to deployed policy.
+- Route guards require at least 95% observed confident precision and a one-sided
+  95% Wilson lower bound of at least 90%, as well as recent route activity.
+  This prevents small samples from appearing more reliable than the evidence.
+- New training examples retain the ticket features captured at intake. Older
+  records are identified as outcome-time captures. Replay reports include both
+  provenance counts and separate routine-maintenance/other-ticket results.
+- The status file reports the last completed poll. A partial search retains the
+  prior checkpoint for retry; routing scans paginate without a 500-ticket cap.
+  The overlay marks a heartbeat older than five minutes as stale. Individual
+  missing-ticket responses do not imply a project-wide outage.
+
+On the first state save each day, the learner creates a checksum-verified local
+archive in `triage_backups/YYYY-MM-DD.zip`. It includes state, training history,
+the activity log, and its metrics checkpoint when present; credentials are
+excluded. Archives contain private ticket data and are ignored by Git. Archives
+are retained until you remove or archive them yourself.
+
+To recover:
+
+1. Quit the learner using its tray menu before replacing any data files.
+2. Preserve the current data files in a separate folder before restoring.
+3. Verify the selected archive with
+   `python triage_storage.py triage_backups/YYYY-MM-DD.zip`.
+4. Extract into a separate temporary folder. Copy its state, history, activity
+   log and metrics checkpoint together into the application folder. If that
+   archive has no metrics checkpoint, move the existing
+   `triage_log.jsonl.metrics.json` out of the application folder too.
+5. Keep your existing `jira_config.json`, restart the learner, and check the
+   report's provenance, totals, last completed poll and health. Restoring an
+   older archive rolls back learning to that archive; overlapping Jira reads
+   resume from its saved checkpoint.
+
+Activity log rotation preserves cumulative metrics in
+`triage_log.jsonl.metrics.json`. Its prefix fingerprint prevents double counting
+if replacement fails or the process stops during rotation.
 
 See [CHANGELOG.md](CHANGELOG.md).
 
