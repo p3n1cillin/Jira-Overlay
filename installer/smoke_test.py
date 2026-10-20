@@ -57,6 +57,7 @@ def main(installer):
     from source_layout import activate
     activate(Path(__file__).resolve().parents[1])
     import app_updates
+    import app_startup
     if app_updates.apps_running():
         raise RuntimeError("Refusing smoke test: real companions are running")
     assert ctypes.sizeof(ctypes.c_void_p) == 8
@@ -99,7 +100,8 @@ def main(installer):
                     value = winreg.QueryValueEx(key, name)[0]
                 except FileNotFoundError:
                     continue
-                assert str(root) not in value, "Upgrade re-enabled disabled Windows startup"
+                paths = app_startup.command_paths(value)
+                assert paths is None or paths[1].parent != root.resolve(), "Upgrade re-enabled disabled Windows startup"
         for name, data in personal.items():
             assert hashlib.sha256((root / name).read_bytes()).digest() == hashlib.sha256(data).digest()
         # One registered installation, not duplicate entries per version.
@@ -117,7 +119,8 @@ def main(installer):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             command = winreg.QueryValueEx(key, "JiraOverlay")[0]
-            assert str(root) in command and "jira_overlay.pyw" in command
+            assert app_startup.command_paths(command) == (
+                (root / "runtime/pythonw.exe").resolve(), (root / "jira_overlay.pyw").resolve()), command
             try:
                 winreg.QueryValueEx(key, "JiraTriageLearner")
                 raise AssertionError("An independent learner startup would race first-run setup")
@@ -129,7 +132,8 @@ def main(installer):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             try:
-                assert str(root) not in winreg.QueryValueEx(key, "JiraOverlay")[0]
+                paths = app_startup.command_paths(winreg.QueryValueEx(key, "JiraOverlay")[0])
+                assert paths is None or paths[1].parent != root.resolve()
             except FileNotFoundError:
                 pass
     print("PASS: native fresh/migration, upgrade/repair, uninstall/data retention and reinstall")

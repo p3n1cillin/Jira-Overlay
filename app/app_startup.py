@@ -1,5 +1,6 @@
 """One Windows startup command; the overlay starts its learner after setup."""
 from pathlib import Path
+import re
 
 PRIMARY = "JiraOverlay"
 LEGACY = "JiraTriageLearner"
@@ -26,7 +27,21 @@ def entries(registry, path=REGISTRY_PATH):
 
 def enabled(root, interpreter, registry, path=REGISTRY_PATH):
     value = entries(registry, path).get(PRIMARY)
-    return isinstance(value, str) and value.casefold() == commands(root, interpreter)[PRIMARY].casefold()
+    actual = command_paths(value)
+    return actual == (Path(interpreter).resolve(), (Path(root) / "jira_overlay.pyw").resolve())
+
+
+def command_paths(value):
+    """Compare real files, including Windows short/long path aliases."""
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'\s*"([^"\r\n]+)"\s+"([^"\r\n]+)"\s*', value)
+    if not match:
+        return None
+    try:
+        return tuple(Path(part).resolve() for part in match.groups())
+    except (OSError, ValueError):
+        return None
 
 
 def set_enabled(root, interpreter, enable, registry, path=REGISTRY_PATH):
@@ -44,8 +59,9 @@ def set_enabled(root, interpreter, enable, registry, path=REGISTRY_PATH):
         # Promoting an active installation retires the old, independently
         # launched learner. Disabling only removes commands belonging here.
         for name, value in current.items():
-            owned = isinstance(value, str) and any(
-                f'"{Path(root) / script}"'.casefold() in value.casefold()
+            paths = command_paths(value)
+            owned = paths is not None and any(
+                (Path(root) / script).resolve() == paths[1]
                 for script in ("jira_overlay.pyw", "triage_learner.pyw", "launch_installed.pyw"))
             if (enable and name == LEGACY) or (not enable and owned):
                 try:
