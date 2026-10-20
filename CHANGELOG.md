@@ -4,6 +4,19 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.20.2]
+
+### Added
+- One self-contained Windows Setup EXE for fresh installs, repairs and upgrades; includes a private Python/Tk runtime and locked dependencies (no Python installation or administrator account required).
+- Standard Start menu shortcuts and one uninstaller in Windows Installed apps. Uninstall removes installed program files and owned startup entries, retaining credentials and learner data for reinstallation.
+- Optional verified migration from old ZIP/clone folders, with automatic discovery from Windows startup entries. Originals and their historical backups are never deleted; existing personal datasets are never merged or overwritten.
+- Native installations use the same verified installer for in-app upgrades, including runtime updates. Older ZIP installations retain their code-only updater.
+- Windows installer lifecycle regression tests and automated fresh-install, upgrade, uninstall and reinstall smoke tests.
+
+### Safety
+- Per-user installation only, graceful shutdown without force-killing learners, Git checkout/junction protection, and no service-desk-specific defaults.
+- The executable is currently unsigned; checksums verify downloads but are not a publisher signature.
+
 ## [2026.10.20.1]
 
 ### Added

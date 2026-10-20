@@ -1,0 +1,169 @@
+; Stable AppId: the SAME installer installs fresh and upgrades in place.
+#ifndef AppVersion
+  #error AppVersion must be supplied by build_installer.py
+#endif
+[Setup]
+AppId={{70CD5DF5-2577-42CC-AD73-24419C907568}
+AppName=Jira Overlay
+AppVersion={#AppVersion}
+AppPublisher=Jira Overlay contributors
+AppPublisherURL=https://github.com/p3n1cillin/Jira-Overlay
+AppSupportURL=https://github.com/p3n1cillin/Jira-Overlay/issues
+DefaultDirName={localappdata}\Programs\JiraOverlay
+DefaultGroupName=Jira Overlay
+PrivilegesRequired=lowest
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+DisableProgramGroupPage=yes
+DisableDirPage=yes
+DisableWelcomePage=yes
+DirExistsWarning=no
+UsePreviousAppDir=yes
+UsePreviousTasks=yes
+SetupMutex=Local\JiraOverlaySetup
+OutputDir={#OutputDir}
+OutputBaseFilename=JiraOverlay-{#AppVersion}-Setup
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+CloseApplications=no
+RestartApplications=no
+UninstallDisplayName=Jira Overlay
+UninstallDisplayIcon={app}\runtime\pythonw.exe
+VersionInfoVersion={#AppVersion}
+LicenseFile={#StageDir}\LICENSE
+DisableReadyPage=yes
+Uninstallable=yes
+
+[Tasks]
+Name: startup; Description: "Start Jira Overlay and the learner when I sign in"; Flags: checkedonce
+
+[Files]
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"
+Source: "support.ps1"; Flags: dontcopy
+
+[Icons]
+Name: "{group}\Jira Overlay"; Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Check: MakeShortcuts
+Name: "{group}\Uninstall Jira Overlay"; Filename: "{uninstallexe}"; Check: MakeShortcuts
+
+[Run]
+Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Flags: nowait; Check: LaunchApplication
+
+[Code]
+var
+  LegacyPage: TInputDirWizardPage;
+  ErrorFile, Helper: String;
+  AlreadyInstalled: Boolean;
+
+function ReadResult(var Value: String): Boolean;
+var Data: AnsiString;
+begin
+  Result := LoadStringFromFile(ErrorFile, Data);
+  if Result then Value := UTF8Decode(Data);
+end;
+
+function HasFlag(Name: String): Boolean;
+var I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/' + Name) = 0 then Result := True;
+end;
+
+function MakeShortcuts: Boolean;
+begin Result := not HasFlag('NOSHORTCUTS'); end;
+
+function LaunchApplication: Boolean;
+begin Result := not HasFlag('NOLAUNCH'); end;
+
+function RunHelper(Action, Source, Script: String; Startup: Boolean): Boolean;
+var Args, ErrorText: String; Code: Integer;
+begin
+  DeleteFile(ErrorFile);
+  Args := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script +
+    '" -Action ' + Action + ' -Target "' + ExpandConstant('{app}') +
+    '" -ResultFile "' + ErrorFile + '" -Version "{#AppVersion}"';
+  if Source <> '' then Args := Args + ' -Source "' + Source + '"';
+  if Startup then Args := Args + ' -EnableStartup';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Args, '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  if not Result then begin
+    if not ReadResult(ErrorText) then ErrorText := 'Installer preparation failed. Close both tray icons and retry.';
+    Log(ErrorText);
+  end;
+end;
+
+procedure InitializeWizard;
+var OldPath, RunValue: String;
+begin
+  ExtractTemporaryFile('support.ps1');
+  Helper := ExpandConstant('{tmp}\support.ps1');
+  ErrorFile := ExpandConstant('{tmp}\jira-installer-result.txt');
+  AlreadyInstalled := FileExists(ExpandConstant('{app}\unins000.exe'));
+  LegacyPage := CreateInputDirPage(wpSelectDir, 'Previous ZIP installation (optional)',
+    'Fresh install or upgrade: the same installer handles both.',
+    'If you used a ZIP/clone before, select its folder to COPY your settings and learner data. ' +
+    'The old folder and its backups are kept. Leave blank for a new user. Close both old tray icons first if they do not close automatically.', False, '');
+  LegacyPage.Add('Previous application folder:');
+  if RunHelper('Discover', '', Helper, False) then
+    if ReadResult(OldPath) then LegacyPage.Values[0] := OldPath;
+  LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|' + LegacyPage.Values[0] + '}');
+  if AlreadyInstalled then begin
+    if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
+      and (Pos(Lowercase(ExpandConstant('{app}\jira_overlay.pyw')), Lowercase(RunValue)) > 0) then
+      WizardSelectTasks('startup')
+    else WizardSelectTasks('');
+  end;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = LegacyPage.ID) and
+    (AlreadyInstalled or HasFlag('NOMIGRATE'));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var Source, Detail: String;
+begin
+  Result := '';
+  Source := LegacyPage.Values[0];
+  if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
+  WizardForm.StatusLabel.Caption := 'Saving and closing both companions. Learner tuning can take several minutes...';
+  if not RunHelper('Prepare', Source, Helper, False) then begin
+    if not ReadResult(Detail) then Detail := 'Preparation failed. No application code was replaced.';
+    Result := Detail;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var Source: String;
+begin
+  if CurStep = ssPostInstall then begin
+    Source := LegacyPage.Values[0];
+    if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
+    if not RunHelper('Finish', Source, Helper, WizardIsTaskSelected('startup') and not HasFlag('NOSTARTUP')) then
+      RaiseException('The files were installed but startup registration failed. Run the installer again to repair it.');
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+var Detail: String;
+begin
+  ErrorFile := ExpandConstant('{tmp}\jira-uninstall-result.txt');
+  Result := RunHelper('Stop', '', ExpandConstant('{app}\installer_support.ps1'), False);
+  if not Result then begin
+    if not ReadResult(Detail) then Detail := 'Close both Jira tray icons and retry uninstall.';
+    MsgBox(Detail, mbError, MB_OK);
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    if not RunHelper('RemoveStartup', '', ExpandConstant('{app}\installer_support.ps1'), False) then
+      RaiseException('Cannot remove this installation startup entries. Uninstall cancelled.');
+end;
+
+; No [UninstallDelete] wildcard: Inno removes ONLY files it installed.
+; Settings, credentials, models, history, reports and private backups remain.

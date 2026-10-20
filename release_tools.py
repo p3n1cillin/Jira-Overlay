@@ -19,7 +19,7 @@ def build_release(root, output):
         if path.is_symlink() or path.resolve().parent != root:
             raise ValueError("Refusing to publish linked files")
     # All allowlisted assets are text; normalise checkout line endings so a
-    # Windows build and the Linux publisher produce the same archive bytes.
+    # Windows build and the Linux publisher produce identical file contents.
     contents = {name: (root/name).read_bytes().replace(b"\r\n", b"\n") for name in RELEASE_FILES}
     manifest = {"schema": 1, "version": VERSION, "repository": REPOSITORY,
                 "files": {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}}

@@ -27,6 +27,7 @@ import zipfile
 from app_release import VERSION, REPOSITORY
 
 MAX_DOWNLOAD = 20 * 1024 * 1024
+MAX_INSTALLER = 150 * 1024 * 1024
 MAX_UNPACKED = 40 * 1024 * 1024
 MANIFEST = "release-manifest.json"
 MUTEXES = ("JiraOverlaySingleInstance", "JiraTriageLearner")
@@ -109,8 +110,35 @@ def latest_release(repository=REPOSITORY, current=VERSION):
     if asset.get("browser_download_url") != expected or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(asset.get("digest", ""))):
         raise UpdateError("GitHub did not provide a verifiable package; use the release page")
     page = f"https://github.com/{repository}/releases/tag/{tag}"
-    return {"version": version, "url": expected, "sha256": asset["digest"][7:],
-            "page": page, "repository": repository}
+    result = {"version": version, "url": expected, "sha256": asset["digest"][7:],
+              "page": page, "repository": repository}
+    setup_name = f"JiraOverlay-{version}-Setup.exe"
+    installers = [a for a in release.get("assets", []) if isinstance(a, dict) and a.get("name") == setup_name]
+    if installers:
+        setup_url = f"https://github.com/{repository}/releases/download/{tag}/{setup_name}"
+        if len(installers) != 1 or installers[0].get("browser_download_url") != setup_url or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(installers[0].get("digest", ""))):
+            raise UpdateError("GitHub did not provide a verifiable installer")
+        result["installer"] = {"url": setup_url, "sha256": installers[0]["digest"][7:]}
+    return result
+
+
+def native_install(root):
+    root = Path(root)
+    return (root / "unins000.exe").is_file() and (root / "runtime" / "pythonw.exe").is_file()
+
+
+def stage_installer(release):
+    asset = release.get("installer")
+    if not asset:
+        raise UpdateError("This release has no complete Windows installer; use the release page")
+    data = _fetch(asset["url"], MAX_INSTALLER)
+    if hashlib.sha256(data).hexdigest() != asset["sha256"]:
+        raise UpdateError("Downloaded installer does not match GitHub's SHA-256 digest")
+    folder = Path(tempfile.mkdtemp(prefix="jira-setup-"))
+    target = folder / "JiraOverlay-Setup.exe"
+    target.write_bytes(data)
+    return target
 
 
 def _manifest(value, expected_version=None, repository=REPOSITORY):

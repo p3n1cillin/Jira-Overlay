@@ -1,6 +1,6 @@
 """One version and update source for the complete application bundle."""
 
-VERSION = "2026.10.20.1"
+VERSION = "2026.10.20.2"
 REPOSITORY = "p3n1cillin/Jira-Overlay"
 
 # Explicit publishing allowlist: never archive a working directory wholesale.
@@ -10,5 +10,5 @@ RELEASE_FILES = (
     "triage_evaluation.py", "triage_jira.py", "triage_review.py",
     "triage_storage.py", "triage_support.py", "setup.py", "setup.bat",
     "setup.ps1", "launch.bat", "requirements.txt", "jira_config.example.json",
-    "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md",
+    "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "launch_installed.pyw",
 )

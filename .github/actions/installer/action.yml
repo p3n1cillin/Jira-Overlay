@@ -1,0 +1,24 @@
+name: Build and smoke-test Windows installer
+description: Build a code-only offline installer with a private runtime; no workspace/user-data packaging.
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Inno Setup compiler
+      shell: pwsh
+      run: |
+        $download = Join-Path $env:RUNNER_TEMP 'innosetup-6.6.1.exe'
+        Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_6_1/innosetup-6.6.1.exe' -OutFile $download
+        if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne 'D243CE440C02705530699554FB9612B9B2BD7A2A90629CDB7F41E66F5FAEB91F') { throw 'Compiler SHA-256 mismatch' }
+        $folder = Join-Path $env:RUNNER_TEMP 'Jira-InnoCompiler'
+        $process = Start-Process -FilePath $download -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', ('/DIR="' + $folder + '"')) -WindowStyle Hidden -PassThru -Wait
+        if ($process.ExitCode -ne 0) { throw 'Compiler installation failed' }
+        "JIRA_ISCC=$folder\ISCC.exe" >> $env:GITHUB_ENV
+    - name: Build self-contained installer
+      shell: pwsh
+      run: python installer/build_installer.py --compiler "$env:JIRA_ISCC" --output dist
+    - name: Exercise actual installer and uninstaller
+      shell: pwsh
+      run: |
+        $installer = Get-ChildItem dist/JiraOverlay-*-Setup.exe
+        if (@($installer).Count -ne 1) { throw 'Expected one setup executable' }
+        python installer/smoke_test.py $installer.FullName

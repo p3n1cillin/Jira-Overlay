@@ -19,7 +19,7 @@ SUITES = ["test_config.py", "test_overlay.py", "test_report.py",
           "test_notify.py", "test_wiring.py", "test_resilience.py",
           "test_learner.py", "test_hardening.py",
           "test_setup.py", "test_integrity.py", "test_learning_progress.py", "test_adaptive_routes.py",
-          "test_updates.py", "test_updates_ui.py"]
+          "test_updates.py", "test_updates_ui.py", "test_installer.py"]
 
 
 def main() -> int:

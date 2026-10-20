@@ -1,0 +1,10 @@
+# Complete Windows runtime dependency set, reviewed with this release.
+requests==2.34.2
+Pillow==12.2.0
+pystray==0.19.5
+tzdata==2026.3
+certifi==2026.5.20
+charset-normalizer==3.4.7
+idna==3.18
+urllib3==2.7.0
+six==1.17.0

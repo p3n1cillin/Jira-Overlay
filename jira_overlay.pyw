@@ -2251,19 +2251,36 @@ class JiraOverlay:
         if os.path.exists(os.path.join(root, ".git")):
             messagebox.showinfo("Git checkout", "Close both apps and use git pull --ff-only to update this checkout. Automatic updates never overwrite Git working files.", parent=self.root)
             return
-        if not messagebox.askyesno("Update and restart", f"Install version {release['version']} from {updates.REPOSITORY}?\n\nBoth apps will save, close and restart. Credentials, settings and learner data will be preserved. Old code is backed up for rollback.", parent=self.root):
+        native = updates.native_install(root)
+        if native and not release.get("installer"):
+            messagebox.showinfo("Application update", "This release has no Windows installer. Please use the release page; your installation has not changed.", parent=self.root)
+            return
+        detail = "The Windows installer will upgrade the application and its private runtime." if native else "Old code is backed up for rollback."
+        if not messagebox.askyesno("Update and restart", f"Install version {release['version']} from {updates.REPOSITORY}?\n\nBoth apps will save, close and restart. Credentials, settings and learner data will be preserved. " + detail, parent=self.root):
             return
         self._update_busy = True
         self._set_update_status("Downloading and verifying the complete package…")
 
         def worker():
             try:
-                payload = updates.stage_release(release)
-                self._post(lambda: self._launch_update_helper(root, payload))
+                if native:
+                    installer = updates.stage_installer(release)
+                    self._post(lambda: self._launch_native_installer(root, installer))
+                else:
+                    payload = updates.stage_release(release)
+                    self._post(lambda: self._launch_update_helper(root, payload))
             except Exception as exc:
                 detail = str(exc)[:250]
                 self._post(lambda: self._update_failed(detail))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _launch_native_installer(self, root, installer):
+        try:
+            subprocess.Popen([str(installer), "/SILENT", "/NORESTART", "/DIR=" + root],
+                             cwd=os.path.dirname(str(installer)), creationflags=0x08000000)
+            self._set_update_status("Installer started; saving and closing both apps…")
+        except OSError as exc:
+            self._update_failed(str(exc))
 
     def _update_failed(self, detail):
         self._update_busy = False
