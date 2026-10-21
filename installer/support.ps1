@@ -251,7 +251,7 @@ function Remove-OwnedStartup([string[]]$Roots) {
         if (-not $property) { continue }
         foreach ($root in $Roots) {
             $removed = $false
-            foreach ($script in @('jira_overlay.pyw','triage_learner.pyw')) {
+            foreach ($script in @('jira_overlay.pyw','triage_learner.pyw','launch_installed.pyw')) {
                 if ($property.Value.IndexOf(('"' + (Join-Path $root $script) + '"'), [StringComparison]::OrdinalIgnoreCase) -ge 0) {
                     Remove-ItemProperty -LiteralPath $runKey -Name $name
                     $removed = $true

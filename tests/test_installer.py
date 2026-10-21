@@ -171,6 +171,9 @@ finally:
           $v = Get-ItemProperty -Path $runKey
           if ($v.PSObject.Properties['JiraOverlay']) {{ throw 'Owned startup was not removed' }}
           if (-not $v.PSObject.Properties['JiraTriageLearner']) {{ throw 'Unrelated startup was removed' }}
+          New-ItemProperty -Path $runKey -Name JiraOverlay -Value '\"pythonw\" \"{old}\\launch_installed.pyw\"' | Out-Null
+          Remove-OwnedStartup @('{old}')
+          if ((Get-ItemProperty -Path $runKey).PSObject.Properties['JiraOverlay']) {{ throw 'Managed launcher startup was not removed' }}
         }} finally {{ Remove-Item -LiteralPath $runKey }}
         """)
         check("uninstall removes only startup entries belonging to its own folder", p.returncode == 0)
