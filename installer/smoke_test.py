@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import winreg
 
 
@@ -79,6 +80,49 @@ def check_install(root):
     assert (root / "installer_support.ps1").is_file()
 
 
+def check_recovery(root, updates):
+    """Real guardian + sacrificial IPC fixtures. Never starts a Jira client."""
+    import app_lifecycle as life
+    original = {name: (root / name).read_bytes() for name in ("jira_overlay.pyw", "triage_learner.pyw", "jira_config.json")}
+    fixture = (Path(__file__).resolve().parents[1] / "tests/fixtures/recovery_companion.py").read_bytes()
+    for role in life.ROLES:
+        (root / life.ROLES[role]).write_bytes(fixture)
+        life.set_wanted(root, role, True)
+    (root / "jira_config.json").write_text('{"domain":"example.invalid","email":"fake","token":"FAKE"}')
+    guard = subprocess.Popen([str(root / "runtime/python.exe"), str(root / "app_guard.pyw")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(.2)
+        raise AssertionError("Recovery fixture timed out: " + str({r: life.read(root, r) for r in life.ROLES}))
+
+    try:
+        wait_for(lambda: all(life.read(root, r).get("phase") == "running" for r in life.ROLES))
+        previous = life.read(root, "overlay")["pid"]
+        (root / "crash-overlay").write_text("sacrificial test only")
+        wait_for(lambda: life.read(root, "overlay").get("phase") == "running" and life.read(root, "overlay").get("pid") != previous)
+        (root / "quit-learner").write_text("deliberate test quit")
+        wait_for(lambda: life.read(root, "learner").get("phase") == "exited" and not life.wanted(root, "learner"))
+        time.sleep(7)
+        assert not updates.component_running(updates.MUTEXES[1]), "Recovery overrode deliberate Quit"
+        with updates.stop_apps(root, timeout=30):
+            guard.wait(timeout=10)
+        assert guard.returncode == 0
+    finally:
+        # Even on assertion failure, stop through the production save/close IPC.
+        if guard.poll() is None or updates.apps_running():
+            with updates.stop_apps(root, timeout=30):
+                guard.wait(timeout=10)
+        for name, data in original.items():
+            (root / name).write_bytes(data)
+        for role in life.ROLES:
+            life.set_wanted(root, role, True)
+
+
 def main(installer):
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -142,6 +186,7 @@ def main(installer):
         for name, data in personal.items():
             assert (root / name).read_bytes() == data
             assert (old / name).read_bytes() == data
+        check_recovery(root, app_updates)
         # Simulate older code and a missing managed file, but keep personal data.
         old_release = (root / "app_release.py").read_text().replace(app_updates.VERSION, "2020.01.01")
         (root / "app_release.py").write_text(old_release)
@@ -207,7 +252,7 @@ def main(installer):
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             command = winreg.QueryValueEx(key, "JiraOverlay")[0]
             assert app_startup.command_paths(command) == (
-                (root / "runtime/pythonw.exe").resolve(), (root / "jira_overlay.pyw").resolve()), command
+                (root / "runtime/pythonw.exe").resolve(), (root / "launch_installed.pyw").resolve()), command
             try:
                 winreg.QueryValueEx(key, "JiraTriageLearner")
                 raise AssertionError("An independent learner startup would race first-run setup")

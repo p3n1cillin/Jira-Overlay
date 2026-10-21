@@ -86,7 +86,7 @@ try {
             try {
                 $python = Join-Path $Target 'runtime\pythonw.exe'
                 $launcher = Join-Path $Target 'launch_installed.pyw'
-                Start-Process -FilePath $python -ArgumentList ('"' + $launcher + '"') -WorkingDirectory $Target -WindowStyle Hidden | Out-Null
+                Start-Process -FilePath $python -ArgumentList ('"' + $launcher + '" --resume') -WorkingDirectory $Target -WindowStyle Hidden | Out-Null
             } catch {
                 $detail = '[JIRA-U204] Could not relaunch the application. Open Jira Overlay from Start. ' + $_.Exception.Message
                 try { Save-Result 'failed' $detail } catch { }

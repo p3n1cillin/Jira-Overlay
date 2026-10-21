@@ -30,6 +30,7 @@ triage_backups/
 .app-updates/
 app_update_error.log
 app_update_status.json
+.app-lifecycle/
 dist/
 .jira-overlay-install
 .migration-*/

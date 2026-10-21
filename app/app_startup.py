@@ -8,7 +8,8 @@ REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def commands(root, interpreter):
-    return {PRIMARY: f'"{interpreter}" "{Path(root) / "jira_overlay.pyw"}"'}
+    script = "launch_installed.pyw" if (Path(root) / "app_guard.pyw").is_file() and (Path(root) / "runtime/pythonw.exe").is_file() else "jira_overlay.pyw"
+    return {PRIMARY: f'"{interpreter}" "{Path(root) / script}"'}
 
 
 def entries(registry, path=REGISTRY_PATH):
@@ -28,7 +29,8 @@ def entries(registry, path=REGISTRY_PATH):
 def enabled(root, interpreter, registry, path=REGISTRY_PATH):
     value = entries(registry, path).get(PRIMARY)
     actual = command_paths(value)
-    return actual == (Path(interpreter).resolve(), (Path(root) / "jira_overlay.pyw").resolve())
+    return actual is not None and actual[0] == Path(interpreter).resolve() and actual[1] in {
+        (Path(root) / "jira_overlay.pyw").resolve(), (Path(root) / "launch_installed.pyw").resolve()}
 
 
 def command_paths(value):

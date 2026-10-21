@@ -108,6 +108,35 @@ Legacy source ZIP users can still use their transactional code-only updater and
 `update.bat --rollback`. Native users should rerun the current installer to
 repair the installation; do not apply a code-only rollback to its private runtime.
 
+## Independent launch and recovery
+
+From **2026.10.21**, managed installations use a per-user Windows Task Scheduler
+action to run an application guardian independently of Codex/developer terminals.
+It is demand-only: there is no new logon trigger or stored password. The normal
+Windows Run setting still decides whether the app starts at sign-in. The task
+does not stop on battery power and has no three-day execution timeout.
+
+An unexpectedly exited companion is retried after 5, 15 and 60 seconds, then at
+most once per five minutes during a continuing crash loop. Recovery never kills
+an existing process just because its status is old; long tuning/saves and offline
+Jira retry loops must be allowed to finish. A missing learner is not launched
+before credentials exist. Deliberate **Quit** is remembered separately for each
+companion. Use **Start > Jira Overlay** to start both again. Update relaunch keeps
+deliberate-Quit choices rather than silently overriding them.
+
+Updates and uninstall signal all three processes and wait for the guardian and
+writers to exit before touching their private runtime. Uninstall removes only
+this installation's recovery task. Local `.app-lifecycle/` files retain start/
+exit reasons, timestamps, PIDs, observed child exit codes and bounded fault/stderr
+logs. Lifecycle JSON records do not contain credentials or ticket data. A forced
+process termination may have no final Python exit record; the guardian's observed
+exit code then provides the useful evidence. OS logout/shutdown and security
+policy remain outside the application's control.
+
+If IT policy blocks recovery registration, normal Start-menu launching still
+works and `.app-lifecycle/recovery.json` records that recovery is unavailable
+(`JIRA-R101`). Ask IT to approve the per-user task; do not bypass security policy.
+
 ## One uninstaller
 
 Open **Windows Settings > Apps > Installed apps > Jira Overlay > Uninstall**, or
@@ -127,7 +156,7 @@ Interactive installation is recommended for migration. For IT deployment under
 the target user's account:
 
 ```powershell
-.\JiraOverlay-2026.10.20.5-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
+.\JiraOverlay-2026.10.21-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
 ```
 
 Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"`,

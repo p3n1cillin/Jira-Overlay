@@ -4,6 +4,16 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.21]
+
+### Independent launch and recovery
+- Managed installations launch through a per-user, demand-only Windows task instead of remaining descendants of a developer terminal or Codex session. No password, administrator service or separate logon trigger is used; the existing Windows startup preference remains authoritative.
+- A guardian recovers unexpectedly exited overlay/learner processes with bounded backoff, captures child exit codes and never force-kills a running writer. First-run credentials must exist before the learner is launched.
+- Deliberate Quit is persisted separately for each companion and is not undone by recovery. Normal launching explicitly starts both again; update relaunch preserves those choices.
+- Updates and uninstall request shutdown of the guardian as well as the companions, waiting for active saves and all private-runtime users before replacing/removing files. Uninstall removes its own recovery task, retaining personal data and diagnostics.
+- Bounded local lifecycle/fault/stderr logs record starts, clean exits, update shutdowns and unexpected termination without serialising Jira credentials, ticket data or exception text into lifecycle records.
+- Restricted Task Scheduler policy leaves normal launching available and records `JIRA-R101` rather than making the application unusable.
+
 ## [2026.10.20.5]
 
 ### Automatic updates

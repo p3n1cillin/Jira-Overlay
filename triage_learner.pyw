@@ -70,6 +70,7 @@ from zoneinfo import ZoneInfo
 from source_layout import activate
 activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
+import app_lifecycle as lifecycle
 from app_release import VERSION as APP_VERSION
 from triage_support import (accuracy_counts, wilson_lower, segment_name, rolling_metrics,
                             coverage_reason, route_balance_factors, performance_drift)
@@ -3077,7 +3078,8 @@ def main() -> None:
         if os.path.exists(REPORT_FILE):
             open_in_default_or_notepad(REPORT_FILE)
 
-    def _quit(icon: pystray.Icon) -> None:
+    def _quit(icon: pystray.Icon, reason="user-quit") -> None:
+        lifecycle.reason(reason, quit=reason == "user-quit")
         watcher.stop.set()
         icon.stop()
 
@@ -3089,7 +3091,8 @@ def main() -> None:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", _quit),
         ))
-    updates.listen_for_update(_DIR, lambda: _quit(icon))
+    updates.listen_for_update(_DIR, lambda: _quit(icon, "update"))
+    lifecycle.ready()
     icon.run()
     # Do not exit while a daemon writer is still learning or saving. The
     # updater waits for this process to end before replacing any code.
@@ -3099,4 +3102,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    lifecycle.run(_DIR, "learner", main)

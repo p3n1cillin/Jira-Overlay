@@ -48,6 +48,7 @@ activate(os.path.dirname(os.path.abspath(__file__)))
 import app_updates as updates
 import app_startup
 import native_update
+import app_lifecycle as lifecycle
 from app_release import VERSION as APP_VERSION
 from triage_support import status_view
 
@@ -2146,6 +2147,7 @@ class JiraOverlay:
         self._did_drag = False
 
         self.root = tk.Tk()
+        self.root.protocol("WM_DELETE_WINDOW", self._quit_app)
         # Tk's default handler for an exception raised inside any callback
         # (a button command, a bound event, an after() job) prints to
         # stderr - which pythonw has none of, so it's simply discarded.
@@ -2401,11 +2403,15 @@ class JiraOverlay:
             pystray.MenuItem("Team report", lambda: self._post(self._open_report)),
             pystray.MenuItem("Check for updates", lambda: self._post(self._check_updates)),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit",        lambda: self._post(self.root.destroy)),
+            pystray.MenuItem("Quit",        lambda: self._post(self._quit_app)),
         )
         self._tray = pystray.Icon("JiraOverlay", _make_tray_image(0, False),
                                   "Jira Overlay", menu)
         threading.Thread(target=self._tray.run, daemon=True).start()
+
+    def _quit_app(self):
+        lifecycle.reason("user-quit", quit=True)
+        self.root.destroy()
 
     def _tray_toggle(self) -> None:
         if self._visible:
@@ -2546,7 +2552,7 @@ class JiraOverlay:
                          ).pack(side="left", padx=(0, 2))
         # Quit sits quietly until hovered — a destructive action shouldn't be
         # the loudest thing on screen.
-        self._footer_btn(footer, _icon("close"), self.root.destroy,
+        self._footer_btn(footer, _icon("close"), self._quit_app,
                          hover_color=_C["alert"], tip="Quit").pack(side="left")
         self.lbl_status = tk.Label(footer, text="Connecting…",
                                    font=_font(7),
@@ -4468,14 +4474,21 @@ def main() -> None:
         setup  = SetupWindow()
         config = setup.result
         if not config:
+            lifecycle.reason("setup-cancelled", quit=True)
+            if lifecycle._active:
+                lifecycle.set_wanted(root, "learner", False)
             return
     app = JiraOverlay(config)
-    updates.listen_for_update(root, lambda: app._post(app.root.destroy))
+    lifecycle.ready()
+    def stop_for_update():
+        lifecycle.reason("update")
+        app._post(app.root.destroy)
+    updates.listen_for_update(root, stop_for_update)
     # A fresh user's learner must not start until SetupWindow has saved their
     # credentials. Existing Windows Run entries may also launch it; its named
     # mutex keeps that harmless and avoids duplicate polling.
     learner = os.path.join(root, "triage_learner.pyw")
-    if os.path.isfile(learner):
+    if os.path.isfile(learner) and not lifecycle.supervised(root) and lifecycle.wanted(root, "learner"):
         try:
             subprocess.Popen([_pythonw_exe(), learner], cwd=root, creationflags=0x08000000)
         except OSError as exc:
@@ -4503,7 +4516,7 @@ def _report_fatal(detail: str) -> None:
 
 if __name__ == "__main__":
     try:
-        main()
+        lifecycle.run(os.path.dirname(os.path.abspath(__file__)), "overlay", main)
     except Exception:
         _report_fatal(traceback.format_exc())
         # The real traceback is already in the log and the dialog.

@@ -23,8 +23,7 @@ def restart_apps(root):
     pythonw = executable.with_name("pythonw.exe")
     if not pythonw.exists():
         pythonw = executable
-    for name in ("jira_overlay.pyw", "triage_learner.pyw"):
-        subprocess.Popen([str(pythonw), str(root / name)], cwd=root, creationflags=0x08000000)
+    subprocess.Popen([str(pythonw), str(root / "launch_installed.pyw"), "--resume"], cwd=root, creationflags=0x08000000)
 
 
 def prepare_dependencies(payload, progress):

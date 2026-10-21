@@ -122,7 +122,7 @@ function Request-LegacyQuit([string[]]$Roots, [bool]$DiscoverRunning = $false) {
 }
 
 function Stop-Companions([string[]]$Roots,
-    [string[]]$MutexNames = @('JiraOverlaySingleInstance','JiraTriageLearner')) {
+    [string[]]$MutexNames = @('JiraOverlaySingleInstance','JiraTriageLearner','JiraOverlayGuardian')) {
     $script:FailureCode = 'JIRA-I110'
     Progress 10 'Checking whether the overlay and learner are running...'
     if (-not (Running-Companions $MutexNames)) { return }
@@ -147,7 +147,7 @@ function Stop-Companions([string[]]$Roots,
         if ($handles.Count -eq 0 -and (Running-Companions $MutexNames)) {
             # Windows startup can identify an old running ZIP even when a
             # fresh install was chosen. Never import data from these roots.
-            $discoverRunning = ($MutexNames.Count -eq 2 -and $MutexNames[0] -eq 'JiraOverlaySingleInstance' -and $MutexNames[1] -eq 'JiraTriageLearner')
+            $discoverRunning = (($MutexNames -join '|') -eq 'JiraOverlaySingleInstance|JiraTriageLearner|JiraOverlayGuardian')
             $legacyRoots = @($Roots)
             if ($discoverRunning) { $legacyRoots += @(Legacy-Paths) }
             $requested = @(Request-LegacyQuit $legacyRoots $discoverRunning)
@@ -329,14 +329,33 @@ try {
             if ($EnableStartup) {
                 [void](New-Item -Path $runKey -Force)
                 $python = Join-Path $Target 'runtime\pythonw.exe'
-                New-ItemProperty -LiteralPath $runKey -Name 'JiraOverlay' -Value ('"' + $python + '" "' + (Join-Path $Target 'jira_overlay.pyw') + '"') -PropertyType String -Force | Out-Null
+                New-ItemProperty -LiteralPath $runKey -Name 'JiraOverlay' -Value ('"' + $python + '" "' + (Join-Path $Target 'launch_installed.pyw') + '"') -PropertyType String -Force | Out-Null
                 # The overlay starts the learner only after credentials exist.
                 if ((Get-ItemProperty -LiteralPath $runKey).PSObject.Properties['JiraTriageLearner']) {
                     Remove-ItemProperty -LiteralPath $runKey -Name 'JiraTriageLearner'
                 }
             }
+            $guard = Join-Path $Target 'app_guard.pyw'
+            if (Test-Path -LiteralPath $guard) {
+                $registeredRecovery = $false
+                try {
+                    $output = & (Join-Path $Target 'runtime\python.exe') -B $guard --register 2>&1
+                    $registeredRecovery = $LASTEXITCODE -eq 0
+                } catch { }
+                if (-not $registeredRecovery) {
+                    Write-Output '[JIRA-R101] Independent recovery could not be registered. The app can still run from Start; ask IT if Task Scheduler is restricted.'
+                } else { Write-Output 'Independent per-user recovery registered; Windows startup preference retained.' }
+            }
         }
-        'RemoveStartup' { $script:FailureCode = 'JIRA-I130'; Remove-OwnedStartup @($Target) }
+        'RemoveStartup' {
+            $script:FailureCode = 'JIRA-I130'
+            Remove-OwnedStartup @($Target)
+            $guard = Join-Path $Target 'app_guard.pyw'
+            if (Test-Path -LiteralPath $guard) {
+                $output = & (Join-Path $Target 'runtime\python.exe') -B $guard --unregister 2>&1
+                if ($LASTEXITCODE -ne 0) { throw 'Could not remove this installation recovery task. Ask IT to check Task Scheduler; uninstall was cancelled.' }
+            }
+        }
     }
     exit 0
 } catch {

@@ -31,7 +31,7 @@ MAX_DOWNLOAD = 20 * 1024 * 1024
 MAX_INSTALLER = 150 * 1024 * 1024
 MAX_UNPACKED = 40 * 1024 * 1024
 MANIFEST = "release-manifest.json"
-MUTEXES = ("JiraOverlaySingleInstance", "JiraTriageLearner")
+MUTEXES = ("JiraOverlaySingleInstance", "JiraTriageLearner", "JiraOverlayGuardian")
 _HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
           "objects.githubusercontent.com", "github-releases.githubusercontent.com"}
 UPDATE_STATE = "app_update_status.json"
@@ -198,7 +198,7 @@ def _manifest(value, expected_version=None, repository=REPOSITORY):
     if expected_version and value["version"] != expected_version:
         raise UpdateError("Package and advertised version differ")
     files = value.get("files")
-    required = {"app_release.py", "app_updates.py", "app_startup.py", "native_update.py", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
+    required = {"app_release.py", "app_updates.py", "app_startup.py", "native_update.py", "app_lifecycle.py", "app_guard.pyw", "update_app.py", "jira_overlay.pyw", "triage_learner.pyw",
                 "triage_support.py", "triage_evaluation.py", "triage_jira.py", "triage_storage.py",
                 "setup.py", "requirements.txt", "setup.bat", "setup.ps1", "launch.bat", "update.bat", "release_tools.py", "source_layout.py"}
     if not isinstance(files, dict) or not required <= files.keys() or len(files) > 100:
@@ -443,16 +443,19 @@ def listen_for_update(root, callback):
     threading.Thread(target=wait, daemon=True).start()
 
 
-def apps_running():
+def component_running(name):
     kernel = _kernel()
-    for name in MUTEXES:
-        handle = kernel.OpenMutexW(0x100000, False, name)
-        if handle:
-            kernel.CloseHandle(handle)
-            return True
-        if kernel.GetLastError() != 2:  # ERROR_FILE_NOT_FOUND is the only safe absence
-            raise UpdateError("Cannot verify whether an application is running; close both apps and retry")
+    handle = kernel.OpenMutexW(0x100000, False, name)
+    if handle:
+        kernel.CloseHandle(handle)
+        return True
+    if kernel.GetLastError() != 2:  # ERROR_FILE_NOT_FOUND is the only safe absence
+        raise UpdateError("Cannot verify whether an application is running; close both apps and retry")
     return False
+
+
+def apps_running():
+    return any(component_running(name) for name in MUTEXES)
 
 
 @contextlib.contextmanager

@@ -146,7 +146,8 @@ begin
   LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|' + LegacyPage.Values[0] + '}');
   if AlreadyInstalled then begin
     if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
-      and (Pos(Lowercase(InstallRoot + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) then
+      and ((Pos(Lowercase(InstallRoot + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) or
+           (Pos(Lowercase(InstallRoot + '\launch_installed.pyw'), Lowercase(RunValue)) > 0)) then
       WizardSelectTasks('startup')
     else WizardSelectTasks('!startup');
   end;
