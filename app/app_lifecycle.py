@@ -166,7 +166,9 @@ if ($Mode -eq 'register' -or -not $existing) {
     $task.Settings.DisallowStartIfOnBatteries=$false
     $task.Settings.StopIfGoingOnBatteries=$false
     $task.Settings.ExecutionTimeLimit='PT0S'
-    $task.Settings.MultipleInstances=2
+    # An updater can still be a descendant of the previous scheduler action.
+    # Queue its replacement rather than ignoring it until that job finishes.
+    $task.Settings.MultipleInstances=1
     $task.Settings.RestartCount=3
     $task.Settings.RestartInterval='PT1M'
     $action=$task.Actions.Create(0)

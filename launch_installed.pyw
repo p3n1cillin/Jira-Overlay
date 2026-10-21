@@ -15,7 +15,8 @@ def main():
             for role in lifecycle.ROLES:
                 lifecycle.set_wanted(root, role, True)
         try:
-            lifecycle.configure_task(root, "run")
+            if not updates.component_running(lifecycle.GUARD_MUTEX):
+                lifecycle.configure_task(root, "run")
             kernel = updates._kernel()
             handle = kernel.CreateEventW(None, True, False, "JiraOverlayShowRequest")
             if handle:

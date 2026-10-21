@@ -102,4 +102,5 @@ with tempfile.TemporaryDirectory(prefix="jira-lifecycle-test-") as directory:
         check("uninstall removes only its own demand task", life.read(root, "recovery").get("enabled") is False)
 
 check("recovery has no tenant configuration", "serviceDeskId" not in life.TASK_SCRIPT and "apiToken" not in life.TASK_SCRIPT)
+check("update handoff is queued until the old scheduler job is finished", "MultipleInstances=1" in life.TASK_SCRIPT)
 raise SystemExit(check.done())
