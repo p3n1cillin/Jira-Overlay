@@ -200,6 +200,10 @@ public static class JiraInstaller {
             string root = Canonical(args["Target"]);
             ValidateTarget(root,args.ContainsKey("Version") ? args["Version"] : "",action == "Prepare");
             string source = args.ContainsKey("Source") ? Canonical(args["Source"]) : "";
+            if (action == "Prepare" && source != "" && PersonalFiles(root).Length != 0) {
+                Progress(5,"Existing destination learner retained. Separate ZIP import skipped; no datasets are merged.");
+                source = "";
+            }
             if (source != "") { SafeTree(source,false); if (!File.Exists(Path.Combine(source,Scripts[0])) || !File.Exists(Path.Combine(source,Scripts[1]))) throw new IOException("Select the old folder containing both application scripts."); }
             string[] roots = source == "" ? new[] {root} : new[] {root,source};
             if (action == "Prepare" || action == "Stop") {

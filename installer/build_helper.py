@@ -20,7 +20,8 @@ def sign_if_configured(path):
     """Build-only signing through an explicitly configured certificate store.
 
     No certificates are generated, purchased, trusted or installed here.
-    CI builds may be unsigned for isolated tests, but cannot pass release gates.
+    Signing is optional by explicit project-owner decision. When configured,
+    the release workflow verifies both binaries against that publisher.
     """
     thumbprint = os.environ.get("JIRA_SIGNING_THUMBPRINT", "")
     if not thumbprint:

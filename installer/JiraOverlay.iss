@@ -41,6 +41,7 @@ UninstallLogging=yes
 
 [Tasks]
 Name: startup; Description: "Start Jira Overlay and the learner when I sign in (requires IT approval)"; Flags: unchecked
+Name: importlegacy; Description: "Import settings from a separate old ZIP folder (optional)"; Flags: unchecked; Check: CanImportLegacy
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"
@@ -65,6 +66,7 @@ var
   ShowingPreparation: Boolean;
   StartupSelectionRoot: String;
   RequestedStartup: Boolean;
+  PreparedSource: String;
 
 function ReadResult(var Value: String): Boolean;
 var Data: AnsiString;
@@ -86,6 +88,18 @@ begin Result := not HasFlag('NOSHORTCUTS'); end;
 
 function LaunchApplication: Boolean;
 begin Result := not HasFlag('NOLAUNCH') and not FileExists(ExpandConstant('{app}\.jira-overlay-security-hold')); end;
+
+function HasExistingLearner(Root: String): Boolean;
+begin
+  Result := FileExists(Root + '\jira_config.json') or FileExists(Root + '\triage_state.json')
+    or FileExists(Root + '\triage_history.jsonl') or FileExists(Root + '\triage_dataset.jsonl')
+    or FileExists(Root + '\triage_state.json.bak') or FileExists(Root + '\jira_config.json.bak');
+end;
+
+function CanImportLegacy: Boolean;
+begin
+  Result := not FileExists(WizardDirValue + '\unins000.exe') and not HasExistingLearner(WizardDirValue);
+end;
 
 procedure HelperLog(const S: String; const Error, FirstLine: Boolean);
 var MessageText, Number: String; Separator, Percent: Integer;
@@ -136,7 +150,6 @@ begin
 end;
 
 procedure InitializeWizard;
-var OldPath: String;
 begin
   ExtractTemporaryFile('installer_helper.exe');
   Helper := ExpandConstant('{tmp}\installer_helper.exe');
@@ -144,14 +157,12 @@ begin
   InstallRoot := WizardDirValue;
   AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
   PreparationPage := CreateOutputProgressPage('Preparing installation', 'Checking apps and safely copying any selected personal data');
-  LegacyPage := CreateInputDirPage(wpSelectDir, 'Previous ZIP installation (optional)',
+  LegacyPage := CreateInputDirPage(wpSelectTasks, 'Previous ZIP installation (optional)',
     'Fresh install or upgrade: the same installer handles both.',
     'If you used a ZIP/clone before, select its folder to COPY your settings and learner data. ' +
     'The old folder and its backups are kept. Leave blank for a new user. Setup will ask any running apps to quit automatically.', False, '');
   LegacyPage.Add('Previous application folder:');
-  if RunHelper('Discover', '', Helper, False) then
-    if ReadResult(OldPath) then LegacyPage.Values[0] := OldPath;
-  LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|' + LegacyPage.Values[0] + '}');
+  LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|}');
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -178,7 +189,8 @@ begin
   InstallRoot := WizardDirValue;
   AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
   Result := (PageID = LegacyPage.ID) and
-    (AlreadyInstalled or HasFlag('NOMIGRATE'));
+    (AlreadyInstalled or HasExistingLearner(InstallRoot) or HasFlag('NOMIGRATE') or
+     ((not WizardIsTaskSelected('importlegacy')) and (LegacyPage.Values[0] = '')));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -194,7 +206,8 @@ begin
   if WizardSilent and AlreadyInstalled then RequestedStartup := LiveStartupEnabled(InstallRoot);
   if HasFlag('NOSTARTUP') then RequestedStartup := False;
   Source := LegacyPage.Values[0];
-  if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
+  if HasFlag('NOMIGRATE') or AlreadyInstalled or HasExistingLearner(InstallRoot) then Source := '';
+  PreparedSource := Source;
   PreparationPage.SetText('Checking the previous installation...', 'Running apps will be asked to quit automatically.');
   PreparationPage.SetProgress(0, 100);
   PreparationPage.Show;
@@ -214,8 +227,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var Source, Detail: String;
 begin
   if CurStep = ssPostInstall then begin
-    Source := LegacyPage.Values[0];
-    if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
+    Source := PreparedSource;
     if not RunHelper('Finish', Source, Helper, RequestedStartup) then begin
       if not ReadResult(Detail) then Detail := '[JIRA-I130] Startup registration failed.';
       RaiseException(Detail + ' Program files are installed. Run setup again to repair startup registration.');

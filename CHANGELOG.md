@@ -13,7 +13,8 @@ Security-review build: not released or approved for production deployment.
 - Background checks notify only, including when older settings enabled automatic installation. Explicit update navigation opens the configured release page; downloaded code is never executed by the app.
 - Native installer lifecycle operations use a build-time compiled .NET Framework helper, cooperative IPC and ownership-validated legacy-task retirement. No script-policy override, runtime compilation, remote-memory operation or forced process termination is used. Older apps without shutdown IPC require manual Quit.
 - Fresh installs leave Windows startup and initial launch unchecked. Unchanged startup settings are not repeatedly rewritten. A local security-hold file is preserved and prevents launch.
-- Public release now requires approved publisher signatures on both the lifecycle helper and installer. Signing credentials and Defender incident validation remain prerequisites; checksums alone are not publisher authentication.
+- Existing installations and retained datasets are repaired in place without selecting a previous folder or merging learners. Separate ZIP import is an explicit, unchecked option for empty destinations; no old folder is auto-selected.
+- Signing is optional by project-owner decision. When configured, both the lifecycle helper and installer are signed and verified against the approved identity. Unsigned builds are identified honestly; checksums alone are not publisher authentication. Defender validation and investigation are not replaced by signing.
 
 ## [2026.10.22]
 

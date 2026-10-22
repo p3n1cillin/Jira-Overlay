@@ -118,9 +118,17 @@ Background update checks notify only, including when old configuration opted int
 
 A `.jira-overlay-security-hold` file in the installation directory prevents launch and survives repair/update. Do not remove an incident hold or restart the app until explicitly approved. `.app-lifecycle/` retains private start/exit reasons, PIDs, exit codes and fault/stderr logs. Opening the diagnostic folder does not upload it; review logs before sharing them.
 
-The installer/helper must be signed by the organisation-approved publisher before public release. The current security-review build is not deployed. Existing endpoint alerts require investigation/classification by the security owner; software changes do not retrospectively clear them. Never add blanket Python/folder exclusions, suppress EDR or bypass script policy as remediation.
+Signing is optional by project-owner decision. Unsigned binaries remain subject to normal endpoint/application-control policy. The current security-review build is not deployed. Existing endpoint alerts require investigation/classification by the security owner; software changes do not retrospectively clear them. Never add blanket Python/folder exclusions, suppress EDR or bypass script policy as remediation.
 
 ## One uninstaller
+
+Repairs and upgrades automatically use the registered destination and its existing
+learner. They do not require a previous-folder selection or merge datasets. New
+users also need no folder selection. **Import settings from a separate old ZIP**
+is an optional, unchecked setup task for empty destinations. If personal data is
+already present, it is retained and separate ZIP import is skipped. Do not delete
+model/configuration files to get around a legacy `JIRA-I120` refusal. Old published
+installers cannot be changed in place; cancel them and use a reviewed repair build.
 
 Open **Windows Settings > Apps > Installed apps > Jira Overlay > Uninstall**, or
 use **Start > Jira Overlay > Uninstall Jira Overlay**. Both run the same generated

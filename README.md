@@ -96,7 +96,7 @@ Use **Start → Jira Overlay** only after IT approval. The supervisor recovers u
 
 Managed installs include local lifecycle diagnostics under `.app-lifecycle/`. Settings can open that directory without uploading anything. A `.jira-overlay-security-hold` file prevents launch and is retained during repair/update. Only remove it after explicit security approval. No Defender exclusions, alert suppression or execution-policy changes are part of deployment.
 
-The installer and helper must carry valid, approved publisher signatures before the release workflow will publish them. Checksums and HTTPS still protect integrity, but are not a substitute for signing, incident investigation or endpoint validation. An older signed Python interpreter does not authenticate the scripts it runs. See [installation and recovery details](docs/INSTALLATION.md) and [security policy](SECURITY.md).
+Signing is optional by the project owner's explicit decision. When configured, the release workflow verifies both binaries against that publisher. Unsigned builds remain subject to normal endpoint policy and reputation checks. Checksums and HTTPS protect integrity, but do not substitute for incident investigation or endpoint validation. A signed Python interpreter does not authenticate the scripts it runs. See [installation and recovery details](docs/INSTALLATION.md) and [security policy](SECURITY.md).
 
 The legacy source-only `update.bat` remains an explicitly invoked maintenance tool; it is not run by background application checks. Its PowerShell bootstrap respects normal organisational script policy. Source rollback rewinds code, never learning history or credentials; do not use it to replace a native installation's private runtime.
 

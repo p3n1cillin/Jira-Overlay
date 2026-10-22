@@ -79,6 +79,18 @@ def check_install(root):
     assert (root / "installer_helper.exe").is_file()
 
 
+def uninstall(root):
+    execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+    # Inno's initial uninstaller can return while its temporary child is
+    # still deleting program files. Do not race a reinstall against it.
+    until = time.monotonic() + 30
+    files = ("unins000.exe", "jira_overlay.pyw", "runtime/python.exe")
+    while any((root / name).exists() for name in files):
+        if time.monotonic() >= until:
+            raise AssertionError("Uninstall did not finish removing its program files")
+        time.sleep(.2)
+
+
 def check_recovery(root, updates):
     """Real guardian + sacrificial IPC fixtures. Never starts a Jira client."""
     import app_lifecycle as life
@@ -167,7 +179,7 @@ def main(installer):
         execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "fresh.log")])
         check_install(root)
         assert not (root / "jira_config.json").exists(), "Installer must not ship credentials"
-        execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        uninstall(root)
         # Legacy migration, with deterministic explicit selection in silent mode.
         execute(args + ["/LEGACYDIR=" + str(old), "/LOG=" + str(base / "install.log")])
         check_install(root)
@@ -175,6 +187,14 @@ def main(installer):
             assert (root / name).read_bytes() == data
             assert (old / name).read_bytes() == data
         check_recovery(root, app_updates)
+        # An existing learner wins over an old-folder argument. Repair must
+        # not import/merge a second dataset or require a folder selection.
+        (old / "triage_state.json").write_bytes(b'{"other-model":"must-not-import"}')
+        execute(args + ["/LEGACYDIR=" + str(old), "/LOG=" + str(base / "retain-existing-learner.log")])
+        for name, data in personal.items():
+            assert (root / name).read_bytes() == data, "Repair merged/replaced a retained dataset"
+        assert (old / "triage_state.json").read_bytes() == b'{"other-model":"must-not-import"}'
+        (old / "triage_state.json").write_bytes(personal["triage_state.json"])
         # Settings is authoritative even when the previous installer saved an
         # unchecked task. Conversely, disabling Settings must survive a later
         # upgrade whose previous installer selection was checked.
@@ -204,7 +224,7 @@ def main(installer):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + APP_ID) as key:
             assert Path(winreg.QueryValueEx(key, "InstallLocation")[0]).resolve() == root.resolve()
-        execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        uninstall(root)
         assert not (root / "jira_overlay.pyw").exists()
         assert not (root / "runtime/python.exe").exists()
         for name, data in personal.items():
@@ -226,7 +246,7 @@ def main(installer):
                 pass
         for name, data in personal.items():
             assert (root / name).read_bytes() == data
-        execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        uninstall(root)
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             try:

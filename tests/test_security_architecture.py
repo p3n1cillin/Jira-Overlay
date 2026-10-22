@@ -9,7 +9,7 @@ from _harness import Checker, load, PROJECT
 check=Checker("security architecture")
 launcher=load("launch_installed.pyw","security_launcher")
 with tempfile.TemporaryDirectory() as directory:
-    root=Path(directory)
+    root=Path(directory).resolve()
     (root/"runtime").mkdir()
     (root/"runtime/pythonw.exe").write_bytes(b"fixture; never run")
     (root/"unins000.exe").write_bytes(b"fixture; never run")
@@ -38,6 +38,6 @@ for name in ("app/app_lifecycle.py","app/native_update.py","launch_installed.pyw
 for name in ("setup.bat","update.bat"):
     check(name+" respects the organisation's script policy","ExecutionPolicy" not in (project/name).read_text())
 workflow=(project/".github/workflows/release.yml").read_text()
-check("unsigned helpers/installers cannot pass the public-release gate","Get-AuthenticodeSignature" in workflow and "APPROVED_SIGNER" in workflow and "$files.Count -ne 2" in workflow)
+check("configured signing is verified without pretending unsigned builds are signed","Get-AuthenticodeSignature" in workflow and "APPROVED_SIGNER" in workflow and "$files.Count -ne 2" in workflow and "Unsigned build:" in workflow)
 check("new installations require explicit startup consent",'Flags: unchecked' in (project/"installer/JiraOverlay.iss").read_text())
 raise SystemExit(check.done())

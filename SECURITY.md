@@ -7,13 +7,13 @@ task launching, background executable updates and temporary PowerShell installer
 helpers. Fresh installs default to no Windows startup and no initial launch.
 Existing incident holds must remain in place until explicit approval to resume.
 
-The reviewed installer/helper must be Authenticode-signed by the approved
-publisher before the release workflow permits publication. Configure
+Signing is optional by explicit project-owner decision. To enable signing, configure
 `JIRA_SIGNING_THUMBPRINT`, an absolute `JIRA_SIGNTOOL` path, and an approved HTTPS
 `JIRA_TIMESTAMP_URL` in the build environment. The certificate/private key must
 be provisioned through the organisation's approved signing service or certificate
 store; the project never creates a trusted identity or installs certificates.
-Unsigned isolated CI test builds are not production releases.
+When configured, the release workflow verifies both signatures. Unsigned builds
+remain unsigned and subject to normal endpoint/application-control policy.
 
 Do not assume an endpoint alert is benign from the application's intended use.
 Investigate its full evidence, preserve artifacts and obtain the security owner's
