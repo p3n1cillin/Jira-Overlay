@@ -20,7 +20,8 @@ DisableDirPage=yes
 DisableWelcomePage=yes
 DirExistsWarning=no
 UsePreviousAppDir=yes
-UsePreviousTasks=yes
+; Settings can change startup after installation; use the live Run entry.
+UsePreviousTasks=no
 SetupMutex=Local\JiraOverlaySetup
 OutputDir={#OutputDir}
 OutputBaseFilename=JiraOverlay-{#AppVersion}-Setup
@@ -39,7 +40,7 @@ SetupLogging=yes
 UninstallLogging=yes
 
 [Tasks]
-Name: startup; Description: "Start Jira Overlay and the learner when I sign in"; Flags: checkedonce
+Name: startup; Description: "Start Jira Overlay and the learner when I sign in"
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"

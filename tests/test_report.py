@@ -88,21 +88,23 @@ w.people = [{"name": "Sam Carter", "accountId": "acc-1"},
 w._done = lambda seq, results, total, *_coverage: seen.append(
     ("RESULT", results, total))
 w._work(1, date(2026, 1, 1), date(2026, 1, 31), "resolved")
-q = seen[0]
+# The four-wide pool deliberately makes HTTP request order nondeterministic.
+q = next(s for s in seen if isinstance(s, str) and 'assignee = "acc-1"' in s)
 check("counts only completed work", "statusCategory = Done" in q)
 check("scopes to the project", "project = SD" in q)
 check("start of window inclusive", 'resolved >= "2026-01-01"' in q)
 check("end of window covers the final whole day",
       'resolved < "2026-02-01"' in q, q)
 check("uses accountId when known", 'assignee = "acc-1"' in q)
-check("falls back to display name", 'assignee = "Ada"' in seen[1])
+check("falls back to display name", any(isinstance(s, str) and 'assignee = "Ada"' in s for s in seen))
 res = [x for x in seen if isinstance(x, tuple) and x[0] == "RESULT"][0]
 check("totals across everyone", res[2] == 14, str(res[2]))
 
 # --- basis switch ----------------------------------------------------------
 seen.clear(); w.v_basis.set("updated"); w._seq = 2
 w._work(2, date(2026, 1, 1), date(2026, 1, 2), "updated")
-check("'Last updated' basis changes the field", 'updated >= "2026-01-01"' in seen[0])
+check("'Last updated' basis changes the field",
+      all('updated >= "2026-01-01"' in s for s in seen if isinstance(s, str)))
 
 # --- reportBasis names a JQL field, not a value - jql_quote() can't help --
 # v_basis is seeded straight from config ("reportBasis"), hand-editable
@@ -138,8 +140,9 @@ seen.clear()
 w.people = [{"name": "O" + QUOTE + "Brien", "accountId": ""}]
 w._seq += 1
 w._work(w._seq, date(2026, 1, 1), date(2026, 1, 2), "resolved")
+name_query = next(s for s in seen if isinstance(s, str) and ' AND assignee = ' in s)
 check("the report escapes the name it queries with",
-      SLASH + QUOTE + "Brien" in seen[0], seen[0][-44:])
+      SLASH + QUOTE + "Brien" in name_query, name_query[-44:])
 
 seen.clear()
 w.people = [{"name": "", "accountId": ""}]

@@ -137,6 +137,13 @@ If IT policy blocks recovery registration, normal Start-menu launching still
 works and `.app-lifecycle/recovery.json` records that recovery is unavailable
 (`JIRA-R101`). Ask IT to approve the per-user task; do not bypass security policy.
 
+From **2026.10.22**, Settings shows the live automatic-recovery status, including
+deliberately closed companions, setup waits and restart backoff. **Open local
+diagnostic logs** opens only this installation's `.app-lifecycle/` directory;
+it does not upload anything. Treat fault/stderr files as private when sharing
+diagnostics. Upgrades preserve the current Windows startup preference, including
+changes made in Settings after the last installation.
+
 ## One uninstaller
 
 Open **Windows Settings > Apps > Installed apps > Jira Overlay > Uninstall**, or
@@ -156,7 +163,7 @@ Interactive installation is recommended for migration. For IT deployment under
 the target user's account:
 
 ```powershell
-.\JiraOverlay-2026.10.21-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
+.\JiraOverlay-2026.10.22-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOMIGRATE /NOLAUNCH
 ```
 
 Optional flags: `/NOSTARTUP`, `/NOSHORTCUTS`, `/DIR="dedicated application path"`,

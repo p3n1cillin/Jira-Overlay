@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from _harness import Checker
 import app_lifecycle as life
@@ -32,6 +33,69 @@ with tempfile.TemporaryDirectory(prefix="jira-lifecycle-test-") as directory:
     check("unhandled exceptions leave an exit record without request/secret text",
         '"exceptionType": "RuntimeError"' in log and "FAKE_SECRET" not in log and life.read(root, "learner")["exitCode"] == 1)
     check("native-fault recording files are available", (life.folder(root) / "learner.fault.log").exists())
+    observed = []
+    def became_ready():
+        life.ready()
+        observed.append(life.read(root, "learner"))
+    life.run(root, "learner", became_ready)
+    check("a recovered process clears old failure diagnostics when ready",
+        observed[0]["phase"] == "running" and observed[0]["reason"] == "running" and observed[0]["exitCode"] is None)
+
+    root = base / "health"
+    root.mkdir()
+    no_process = lambda name: False
+    check("unavailable recovery gives a stable actionable code without creating files",
+        "JIRA-R101" in life.recovery_status(root, running=no_process)["message"] and not list(root.iterdir()))
+    life.write(root, "recovery", enabled=True)
+    life.write(root, "guardian", phase="running", pid=123)
+    check("a saved running phase is not mistaken for a live guardian",
+        "not running" in life.recovery_status(root, running=no_process)["message"])
+    (root / "jira_config.json").write_text('{"domain":"example.invalid","email":"fake","token":"fake"}')
+    all_running = lambda name: True
+    check("live recovery reports active independently of saved process IDs",
+        life.recovery_status(root, running=all_running) == {"healthy": True, "message": "Automatic recovery active"})
+    life.set_wanted(root, "learner", False)
+    check("deliberate Quit is distinguished from an unhealthy crash",
+        life.recovery_status(root, running=all_running)["healthy"] and "deliberately closed: learner" in life.recovery_status(root, running=all_running)["message"])
+    life.set_wanted(root, "learner", True)
+    status = life.recovery_status(root, running=lambda name: name != life.updates.MUTEXES[1])
+    check("backoff is visible without killing a slow writer", not status["healthy"] and "restarting with backoff" in status["message"])
+    (root / "jira_config.json").unlink()
+    check("a fresh account explains why its learner has not started",
+        "awaiting setup" in life.recovery_status(root, running=all_running)["message"])
+
+    before = (life.folder(root) / "guardian.json").read_bytes()
+    closed = []
+    kernel = SimpleNamespace(CreateMutexW=lambda *a: 1, GetLastError=lambda: 183,
+        CloseHandle=lambda handle: closed.append(handle))
+    with patch.object(life.updates, "_kernel", return_value=kernel):
+        life.guardian(root)
+    check("a duplicate guardian leaves the live guardian's record untouched",
+        before == (life.folder(root) / "guardian.json").read_bytes() and closed == [1])
+
+    streams = []
+    kernel.GetLastError = lambda: 0
+    def blocked_launch(*args, **kwargs):
+        streams.append(kwargs["stdout"])
+        raise OSError("isolated launch refusal")
+    def exercise_launch(root, stop, *, running, launch):
+        life.ready()
+        observed.append(life.read(root, "guardian"))
+        for _ in range(3):
+            try:
+                launch("overlay")
+            except OSError:
+                pass
+    with patch.object(life.updates, "_kernel", return_value=kernel), \
+         patch.object(life.updates, "listen_for_update"), \
+         patch.object(life.subprocess, "Popen", side_effect=blocked_launch), \
+         patch.object(life, "watch", side_effect=exercise_launch):
+        life.guardian(root)
+    check("failed companion launches close their diagnostic streams", len(streams) == 3 and all(s.closed for s in streams))
+    events = [json.loads(line) for line in (life.folder(root) / "guardian.jsonl").read_text().splitlines()]
+    check("guardian readiness and a single start are recorded accurately",
+        observed[-1]["phase"] == "running" and sum(e["event"] == "started" for e in events) == 1)
+
     budget = life.RestartBudget()
     check("crash loops use bounded backoff", [budget.exited(i, 0) for i in range(4)] == [5, 15, 60, 300])
     check("a stable five-minute run resets the crash budget", budget.exited(1000, 301) == 5)

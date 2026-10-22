@@ -4,6 +4,15 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.22]
+
+### Reliability and diagnostics
+- Upgrades preserve the live Windows startup setting rather than restoring the installer's older selection. Fresh installs still offer startup by default; explicit deployment opt-outs remain respected.
+- Settings shows whether automatic recovery is actually running, a companion is deliberately closed, or restart backoff/setup is pending, with one-click access to the local diagnostic logs. A saved PID alone is never treated as proof of a running guardian.
+- Duplicate guardian launches cannot overwrite the active guardian's diagnostics. Recovered components clear stale exit codes, guardian readiness is recorded correctly, and failed/repeated launches release diagnostic streams without accumulating closed handles.
+- Reporting regression checks locate concurrent queries by identity instead of assuming execution order, eliminating false failures without serialising reporting requests.
+- Added isolated recovery/status/UI tests and native enabled/disabled-startup repair/upgrade coverage. No routing thresholds, learned models, tenant defaults or personal data formats changed.
+
 ## [2026.10.21]
 
 ### Independent launch and recovery

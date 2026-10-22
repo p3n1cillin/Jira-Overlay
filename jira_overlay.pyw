@@ -3481,6 +3481,17 @@ class JiraOverlay:
             self.completed_today = 0
             self.sla_compliance  = None
 
+    def _open_diagnostics(self) -> None:
+        """Open only this installation's validated local log directory."""
+        try:
+            path = lifecycle.folder(os.path.dirname(os.path.abspath(__file__)), create=False)
+            if not path.is_dir():
+                messagebox.showinfo("Diagnostic logs", "No lifecycle logs have been recorded yet.", parent=self.root)
+                return
+            os.startfile(str(path))
+        except (OSError, updates.UpdateError):
+            messagebox.showerror("Diagnostic logs", "Windows could not open this installation's local diagnostic folder.", parent=self.root)
+
     def _load_learner_status(self, path: Optional[str] = None) -> Optional[dict]:
         """Health/provenance written by the (optional) local triage learner.
 
@@ -4271,6 +4282,15 @@ class JiraOverlay:
         check(body, "Run on Windows startup", s_startup)
         tk.Label(body, text=f"Jira Overlay {APP_VERSION}", font=_font(8),
                  fg=_C["fg_dim"], bg=BG).pack(anchor="w", padx=16, pady=(4, 0))
+        install_root = os.path.dirname(os.path.abspath(__file__))
+        if updates.native_install(install_root):
+            recovery = lifecycle.recovery_status(install_root)
+            tk.Label(body, text=recovery["message"], font=_font(8),
+                     fg=_C["fg_dim"] if recovery["healthy"] else _C["warn"],
+                     bg=BG, wraplength=220, justify="left").pack(anchor="w", padx=16, pady=(4, 2))
+            tk.Button(body, text="Open local diagnostic logs", command=self._open_diagnostics,
+                      bg=SEL, fg=FG, font=_font(9), relief="flat", padx=8, pady=4
+                      ).pack(anchor="w", padx=16, pady=2)
         tk.Frame(body, bg=BG, height=4).pack()
         # No leading icon: the key emoji here couldn't take the app's text
         # colour (it's a fixed-colour glyph, not a font-drawn one), so it

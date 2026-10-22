@@ -102,6 +102,10 @@ def check_recovery(root, updates):
 
     try:
         wait_for(lambda: all(life.read(root, r).get("phase") == "running" for r in life.ROLES))
+        original_guard = life.read(root, "guardian")
+        assert original_guard.get("phase") == "running", original_guard
+        execute([root / "runtime/python.exe", "-B", root / "app_guard.pyw"])
+        assert life.read(root, "guardian") == original_guard, "Duplicate guardian overwrote the active lifecycle"
         previous = life.read(root, "overlay")["pid"]
         (root / "crash-overlay").write_text("sacrificial test only")
         wait_for(lambda: life.read(root, "overlay").get("phase") == "running" and life.read(root, "overlay").get("pid") != previous)
@@ -187,6 +191,13 @@ def main(installer):
             assert (root / name).read_bytes() == data
             assert (old / name).read_bytes() == data
         check_recovery(root, app_updates)
+        # Settings is authoritative even when the previous installer saved an
+        # unchecked task. Conversely, disabling Settings must survive a later
+        # upgrade whose previous installer selection was checked.
+        app_startup.set_enabled(root, root / "runtime/pythonw.exe", True, winreg)
+        execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "enabled-startup-repair.log")])
+        assert app_startup.enabled(root, root / "runtime/pythonw.exe", winreg), "Repair lost the live enabled startup preference"
+        app_startup.set_enabled(root, root / "runtime/pythonw.exe", False, winreg)
         # Simulate older code and a missing managed file, but keep personal data.
         old_release = (root / "app_release.py").read_text().replace(app_updates.VERSION, "2020.01.01")
         (root / "app_release.py").write_text(old_release)

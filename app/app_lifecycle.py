@@ -87,7 +87,7 @@ def reason(value, *, quit=False):
 
 def ready():
     if _active:
-        write(*_active, phase="running")
+        write(*_active, phase="running", reason="running", exitCode=None)
 
 
 def supervised(root):
@@ -100,7 +100,7 @@ def run(root, role, main):
     _active, _reason = (root, role), "normal-exit"
     fault = None
     try:
-        write(root, role, wanted=True, phase="starting", pid=os.getpid(), startedAt=time.time(), reason="starting")
+        write(root, role, wanted=True, phase="starting", pid=os.getpid(), startedAt=time.time(), reason="starting", exitCode=None)
         event(root, role, "started")
         path = updates._inside_file(folder(root), role + ".fault.log")
         if path.exists() and path.stat().st_size > 1024 * 1024:
@@ -207,6 +207,25 @@ def configured(root):
         return False
 
 
+def recovery_status(root, *, running=None):
+    """Read-only operational status, independent of a stale saved PID/phase."""
+    running = running or updates.component_running
+    if read(root, "recovery").get("enabled") is not True:
+        return {"healthy": False, "message": "Automatic recovery unavailable [JIRA-R101]. Open Jira Overlay from Start; ask IT if tasks are restricted."}
+    if not running(GUARD_MUTEX):
+        return {"healthy": False, "message": "Automatic recovery is not running. Open Jira Overlay from Start to resume."}
+    paused, waiting = [], []
+    for role in ROLES:
+        if not wanted(root, role):
+            paused.append(role)
+        elif role == "learner" and not configured(root):
+            waiting.append("learner awaiting setup")
+        elif not running(updates.MUTEXES[0 if role == "overlay" else 1]):
+            waiting.append(role + " restarting with backoff")
+    details = (["deliberately closed: " + ", ".join(paused)] if paused else []) + waiting
+    return {"healthy": not waiting, "message": "Automatic recovery active" + ("; " + "; ".join(details) if details else "")}
+
+
 class RestartBudget:
     """Bounded recovery, including exit-code zero without an explicit Quit."""
     def __init__(self):
@@ -225,7 +244,7 @@ def watch(root, stop, *, running, launch, clock=time.monotonic, wait=None):
     """Policy loop, injectable for offline tests. Never force-kills a writer."""
     children, budgets = {}, {role: RestartBudget() for role in ROLES}
     wait = wait or (lambda: time.sleep(1))
-    event(root, "guardian", "started")
+    ready()
     while True:
         now = clock()
         for role, (process, started) in list(children.items()):
@@ -287,15 +306,22 @@ def guardian(root):
         if path.exists() and path.stat().st_size > 1024 * 1024:
             os.replace(path, updates._inside_file(folder(root), role + ".stderr.log.1"))
         stream = path.open("ab")
-        streams.append(stream)
         environment = dict(os.environ, JIRA_OVERLAY_SUPERVISED_ROOT=str(root))
-        process = subprocess.Popen([str(root / "runtime" / "pythonw.exe"), "-X", "faulthandler", str(root / ROLES[role])],
-            cwd=root, env=environment, stdout=stream, stderr=subprocess.STDOUT, creationflags=0x08000000)
+        try:
+            process = subprocess.Popen([str(root / "runtime" / "pythonw.exe"), "-X", "faulthandler", str(root / ROLES[role])],
+                cwd=root, env=environment, stdout=stream, stderr=subprocess.STDOUT, creationflags=0x08000000)
+        except BaseException:
+            stream.close()
+            raise
+        streams[:] = [previous for previous in streams if not previous.closed]
+        streams.append(stream)
         process._lifecycle_stream = stream
         return process
 
     try:
-        watch(root, stop, running=lambda role: updates.component_running(updates.MUTEXES[0 if role == "overlay" else 1]), launch=launch)
+        # A racing duplicate must not overwrite the live guardian's records.
+        run(root, "guardian", lambda: watch(root, stop,
+            running=lambda role: updates.component_running(updates.MUTEXES[0 if role == "overlay" else 1]), launch=launch))
     finally:
         for stream in streams:
             stream.close()

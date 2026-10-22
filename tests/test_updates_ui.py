@@ -41,6 +41,30 @@ try:
     check("background results populate the update label and enable the install control",
           "2099.01.01" in app._update_status_var.get() and str(app._update_install_button["state"]) == "normal")
     with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        opened = []
+        def widget_text(widget):
+            texts = [str(widget.cget("text"))] if "text" in widget.keys() else []
+            return texts + [text for child in widget.winfo_children() for text in widget_text(child)]
+        with patch.object(ov, "__file__", str(root / "jira_overlay.pyw")), \
+             patch.object(ov.updates, "native_install", return_value=True), \
+             patch.object(ov.lifecycle, "recovery_status", return_value={"healthy": False, "message": "Automatic recovery unavailable [JIRA-R101]"}), \
+             patch.object(ov.os, "startfile", side_effect=opened.append):
+            app._build_settings_panel()
+            check("Settings surfaces recovery availability and the local diagnostics control",
+                any("JIRA-R101" in text for text in widget_text(app.root)) and "Open local diagnostic logs" in widget_text(app.root))
+            app._open_diagnostics()
+            check("opening absent diagnostics does not create files", not opened and not list(root.iterdir()))
+            logs = ov.lifecycle.folder(root)
+            app._open_diagnostics()
+            check("diagnostics opens only the validated local install folder", opened == [str(logs)])
+        with patch.object(ov, "__file__", str(root / "jira_overlay.pyw")), \
+             patch.object(ov.os, "startfile", side_effect=OSError("isolated Windows failure")):
+            before = len(messages)
+            app._open_diagnostics()
+            check("Explorer failures produce an actionable message rather than crashing Settings",
+                len(messages) == before + 1 and "could not open" in str(messages[-1]))
+    with tempfile.TemporaryDirectory() as folder:
         (Path(folder)/".git").mkdir()
         with patch.object(ov, "__file__", str(Path(folder)/"jira_overlay.pyw")), \
              patch.object(ov.updates, "stage_release", side_effect=AssertionError("Must not replace Git files")):

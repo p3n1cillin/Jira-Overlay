@@ -15,7 +15,7 @@ def main():
     if args.register or args.unregister:
         app_lifecycle.configure_task(root, "remove" if args.unregister else "register")
     else:
-        app_lifecycle.run(root, "guardian", lambda: app_lifecycle.guardian(root))
+        app_lifecycle.guardian(root)
 
 
 if __name__ == "__main__":
