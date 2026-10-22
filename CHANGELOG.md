@@ -4,6 +4,17 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
+## [2026.10.22.1]
+
+Security-review build: not released or approved for production deployment.
+
+### Security architecture
+- Retired scheduled-task registration/execution and temporary PowerShell updater helpers. User-session recovery is launched normally from Windows, with no task/service persistence.
+- Background checks notify only, including when older settings enabled automatic installation. Explicit update navigation opens the configured release page; downloaded code is never executed by the app.
+- Native installer lifecycle operations use a build-time compiled .NET Framework helper, cooperative IPC and ownership-validated legacy-task retirement. No script-policy override, runtime compilation, remote-memory operation or forced process termination is used. Older apps without shutdown IPC require manual Quit.
+- Fresh installs leave Windows startup and initial launch unchecked. Unchanged startup settings are not repeatedly rewritten. A local security-hold file is preserved and prevents launch.
+- Public release now requires approved publisher signatures on both the lifecycle helper and installer. Signing credentials and Defender incident validation remain prerequisites; checksums alone are not publisher authentication.
+
 ## [2026.10.22]
 
 ### Reliability and diagnostics

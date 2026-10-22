@@ -1,4 +1,4 @@
-"""Managed per-user guardian; no Jira access or credentials in scheduled tasks."""
+"""User-launched supervisor. Never creates a scheduled task or service."""
 import argparse
 from pathlib import Path
 from source_layout import activate
@@ -12,8 +12,10 @@ def main():
     parser.add_argument("--unregister", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
+    if (root / ".jira-overlay-security-hold").exists():
+        raise SystemExit("Jira Overlay is held closed pending IT security approval.")
     if args.register or args.unregister:
-        app_lifecycle.configure_task(root, "remove" if args.unregister else "register")
+        parser.error("Scheduled recovery was retired. Use the reviewed installer for legacy-task cleanup.")
     else:
         app_lifecycle.guardian(root)
 

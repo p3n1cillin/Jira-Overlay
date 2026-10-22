@@ -108,41 +108,17 @@ Legacy source ZIP users can still use their transactional code-only updater and
 `update.bat --rollback`. Native users should rerun the current installer to
 repair the installation; do not apply a code-only rollback to its private runtime.
 
-## Independent launch and recovery
+## User-session recovery and security approval
 
-From **2026.10.21**, managed installations use a per-user Windows Task Scheduler
-action to run an application guardian independently of Codex/developer terminals.
-It is demand-only: there is no new logon trigger or stored password. The normal
-Windows Run setting still decides whether the app starts at sign-in. The task
-does not stop on battery power and has no three-day execution timeout.
+The security-review build 2026.10.22.1 retires scheduled recovery tasks. Windows Start launches an ordinary guardian process, which recovers unexpectedly exited companions using bounded backoff and local diagnostics. No task, service or script host is created. Recovery lasts only while that user-launched supervisor remains alive; it is not independent of logout or the parent process. Deliberate Quit stays closed. A new manual Start launch deliberately resumes both companions.
 
-An unexpectedly exited companion is retried after 5, 15 and 60 seconds, then at
-most once per five minutes during a continuing crash loop. Recovery never kills
-an existing process just because its status is old; long tuning/saves and offline
-Jira retry loops must be allowed to finish. A missing learner is not launched
-before credentials exist. Deliberate **Quit** is remembered separately for each
-companion. Use **Start > Jira Overlay** to start both again. Update relaunch keeps
-deliberate-Quit choices rather than silently overriding them.
+New installs leave Windows startup and initial launch unchecked. Enabling startup requires explicit user/IT consent and creates an ordinary Run entry; that persistence remains visible to Defender. No zero-alert guarantee is made. Saving an unchanged startup preference does not rewrite it. A prior owned recovery task is removed only by the native installer's migration logic after validating its executable, script and working directory. Its definition is retained locally for review. No unrelated task is changed.
 
-Updates and uninstall signal all three processes and wait for the guardian and
-writers to exit before touching their private runtime. Uninstall removes only
-this installation's recovery task. Local `.app-lifecycle/` files retain start/
-exit reasons, timestamps, PIDs, observed child exit codes and bounded fault/stderr
-logs. Lifecycle JSON records do not contain credentials or ticket data. A forced
-process termination may have no final Python exit record; the guardian's observed
-exit code then provides the useful evidence. OS logout/shutdown and security
-policy remain outside the application's control.
+Background update checks notify only, including when old configuration opted into automatic installation. The app does not execute downloads. Use Settings to open the configured release page, then run the approved installer manually. The native helper is compiled at build time and provides path validation, progress, graceful shutdown, migration and data retention without PowerShell scripts or policy overrides. Pre-IPC legacy apps require manual Quit; they are never force-killed.
 
-If IT policy blocks recovery registration, normal Start-menu launching still
-works and `.app-lifecycle/recovery.json` records that recovery is unavailable
-(`JIRA-R101`). Ask IT to approve the per-user task; do not bypass security policy.
+A `.jira-overlay-security-hold` file in the installation directory prevents launch and survives repair/update. Do not remove an incident hold or restart the app until explicitly approved. `.app-lifecycle/` retains private start/exit reasons, PIDs, exit codes and fault/stderr logs. Opening the diagnostic folder does not upload it; review logs before sharing them.
 
-From **2026.10.22**, Settings shows the live automatic-recovery status, including
-deliberately closed companions, setup waits and restart backoff. **Open local
-diagnostic logs** opens only this installation's `.app-lifecycle/` directory;
-it does not upload anything. Treat fault/stderr files as private when sharing
-diagnostics. Upgrades preserve the current Windows startup preference, including
-changes made in Settings after the last installation.
+The installer/helper must be signed by the organisation-approved publisher before public release. The current security-review build is not deployed. Existing endpoint alerts require investigation/classification by the security owner; software changes do not retrospectively clear them. Never add blanket Python/folder exclusions, suppress EDR or bypass script policy as remediation.
 
 ## One uninstaller
 

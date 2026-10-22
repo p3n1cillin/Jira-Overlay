@@ -145,9 +145,8 @@ def configure_startup() -> None:
     Idempotent by VALUE, not just by name: this folder can be moved (it
     lives under Temp) and Python can be upgraded to a new install path, and
     either leaves a stale command line sitting in the registry pointing
-    nowhere real. A stale-but-present entry means the user already opted
-    in once, so a mismatch is corrected silently; only a first-time install
-    (nothing registered at all) asks.
+    nowhere real. Creating or changing an entry requires fresh consent.
+    An already-correct entry is left untouched.
     """
     import winreg
     wanted = {name: f'"{pythonw()}" "{script}"'
@@ -157,8 +156,8 @@ def configure_startup() -> None:
     if all(current.get(name) == cmd for name, cmd in wanted.items()) and app_startup.LEGACY not in current:
         say("    Already set to start with Windows.")
         return
-    if not current and not ask_yes_no(
-            "    Start automatically when you log in?"):
+    if not ask_yes_no(
+            "    Enable Windows startup for this folder (requires IT approval)?", default=False):
         say("    Skipped - you can turn this on later in Settings.")
         return
     try:
@@ -218,7 +217,7 @@ def main() -> int:
         say("  Setup complete - existing configuration kept.")
     say("=" * 62)
 
-    if ask_yes_no("\nStart it now?"):
+    if ask_yes_no("\nStart it now (after IT approval)?", default=False):
         launch()
         say("\nStarted. Look for the icons in your system tray:")
         say("  * blue circle   the overlay (ticket count)")

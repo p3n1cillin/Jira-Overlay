@@ -1,5 +1,26 @@
 # Security Policy
 
+## Security-review build and deployment hold
+
+Version 2026.10.22.1 is an unreleased security-review build. It removes scheduled
+task launching, background executable updates and temporary PowerShell installer
+helpers. Fresh installs default to no Windows startup and no initial launch.
+Existing incident holds must remain in place until explicit approval to resume.
+
+The reviewed installer/helper must be Authenticode-signed by the approved
+publisher before the release workflow permits publication. Configure
+`JIRA_SIGNING_THUMBPRINT`, an absolute `JIRA_SIGNTOOL` path, and an approved HTTPS
+`JIRA_TIMESTAMP_URL` in the build environment. The certificate/private key must
+be provisioned through the organisation's approved signing service or certificate
+store; the project never creates a trusted identity or installs certificates.
+Unsigned isolated CI test builds are not production releases.
+
+Do not assume an endpoint alert is benign from the application's intended use.
+Investigate its full evidence, preserve artifacts and obtain the security owner's
+classification. No blanket Defender exclusions, alert suppression, policy
+overrides or zero-alert promises are part of this project. A valid signature on
+the Python interpreter is not a signature on application scripts or behaviour.
+
 ## Supported versions
 
 This project supports the latest stable release and current `main`; it does

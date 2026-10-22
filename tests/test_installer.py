@@ -1,10 +1,4 @@
-"""Installer privacy, verified legacy migration and owned-startup cleanup.
-
-Runs against isolated files/registry values; never stops the user's live apps.
-The actual EXE install/upgrade/uninstall is also exercised in Windows CI.
-"""
-from __future__ import annotations
-
+"""Native helper tests using isolated files and unique IPC names only."""
 import hashlib
 import json
 import os
@@ -12,174 +6,96 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from unittest.mock import patch
-
 from _harness import Checker, PROJECT as PROJECT_DIR
 import app_updates as u
 from app_release import VERSION, REPOSITORY
 
-check = Checker("Windows installer")
-PROJECT = Path(PROJECT_DIR)
-support = PROJECT / "installer" / "support.ps1"
+PROJECT=Path(PROJECT_DIR)
+sys.path.insert(0,str(PROJECT/"installer"))
+from build_helper import build_helper
+check=Checker("native installer lifecycle")
 
-
-def ps(code):
-    executable = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    return subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command",
-        ". '" + str(support).replace("'", "''") + "'; " + code],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-
-
-with tempfile.TemporaryDirectory() as directory:
-    root = Path(directory)
-    (root / "runtime").mkdir()
-    (root / "runtime/pythonw.exe").write_bytes(b"test")
-    check("a source ZIP cannot be mistaken for a native install", not u.native_install(root))
-    (root / "unins000.exe").write_bytes(b"test")
-    check("native installs select complete-runtime upgrades", u.native_install(root))
-    body = b"installer-test-not-an-executable"
-    asset_name = f"JiraOverlay-{VERSION}-Setup.exe"
-    base = f"https://github.com/{REPOSITORY}/releases/download/v{VERSION}/"
-    metadata = {"tag_name": "v" + VERSION, "assets": [
-        {"name": f"JiraOverlay-{VERSION}.zip", "digest": "sha256:" + "1"*64,
-         "browser_download_url": base + f"JiraOverlay-{VERSION}.zip"},
-        {"name": asset_name, "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
-         "browser_download_url": base + asset_name}]}
-    with patch.object(u, "_fetch", return_value=json.dumps(metadata).encode()):
-        info = u.latest_release(current="2020.01.01")
-        check("installer URL is bound to the advertised repository/version", info["installer"]["url"] == base + asset_name)
-    with patch.object(u, "_fetch", return_value=body):
-        staged = u.stage_installer(info)
-        check("native setup is authenticated before execution", staged.read_bytes() == body)
+with tempfile.TemporaryDirectory(prefix="jira-native-unit-") as directory:
+    root=Path(directory)
+    body=b"isolated installer fixture; never executed"
+    metadata={"tag_name":"v"+VERSION,"assets":[
+        {"name":f"JiraOverlay-{VERSION}.zip","digest":"sha256:"+"1"*64,"browser_download_url":f"https://github.com/{REPOSITORY}/releases/download/v{VERSION}/JiraOverlay-{VERSION}.zip"},
+        {"name":f"JiraOverlay-{VERSION}-Setup.exe","digest":"sha256:"+hashlib.sha256(body).hexdigest(),"browser_download_url":f"https://github.com/{REPOSITORY}/releases/download/v{VERSION}/JiraOverlay-{VERSION}-Setup.exe"}]}
+    with patch.object(u,"_fetch",return_value=json.dumps(metadata).encode()):
+        info=u.latest_release(current="2020.01.01")
+        check("release metadata binds installers to the advertised repository and version", info["installer"]["url"].endswith(f"/v{VERSION}/JiraOverlay-{VERSION}-Setup.exe"))
+    with patch.object(u,"_fetch",return_value=body):
+        staged=u.stage_installer(info)
+        check("explicit installer staging verifies the published digest",staged.read_bytes()==body)
         staged.unlink()
         staged.parent.rmdir()
         try:
-            u.stage_installer(dict(info, installer=dict(info["installer"], sha256="0"*64)))
-            rejected = False
-        except u.UpdateError:
-            rejected = True
-        check("tampered installers are never staged for execution", rejected)
+            u.stage_installer(dict(info,installer=dict(info["installer"],sha256="0"*64)))
+            rejected=False
+        except u.UpdateError: rejected=True
+        check("tampered downloads are rejected",rejected)
 
-    if os.name == "nt":
-        # Real Windows IPC, but with unique mutex names: NEVER signal/stop the
-        # developer's running overlay or learner. Children exit cooperatively.
-        for mode in ("legacy", "cooperative", "slow"):
-            ipc_root = root / mode
-            ipc_root.mkdir()
-            mutex_name = "Local\\JiraInstallerTest-" + uuid.uuid4().hex
-            event_name = u._event_name(ipc_root, "stop")
-            child_code = r'''
-import ctypes, sys
-k = ctypes.windll.kernel32
-k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-k.CreateMutexW.restype = ctypes.c_void_p
-k.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p]
-k.CreateEventW.restype = ctypes.c_void_p
-k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-k.CloseHandle.argtypes = [ctypes.c_void_p]
-mutex = k.CreateMutexW(None, False, sys.argv[1])
-assert mutex
-event = k.CreateEventW(None, True, False, sys.argv[2]) if sys.argv[3] != 'legacy' else None
-assert sys.argv[3] == 'legacy' or event
-print('READY', flush=True)
+    helper=build_helper(root/"installer_helper.exe")
+    harness=root/"helper_test.exe"
+    compiler=Path(os.environ["SystemRoot"])/"Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    subprocess.run([str(compiler),"/nologo","/target:exe","/platform:x64","/out:"+str(harness),"/reference:"+str(helper),str(PROJECT/"tests/fixtures/installer_helper_test.cs")],check=True)
+    def run(*args):
+        return subprocess.run([str(harness),*map(str,args)],capture_output=True,text=True,timeout=20)
+    old,new=root/"Old ZIP",root/"Application with spaces"
+    old.mkdir()
+    personal={"jira_config.json":b'{"token":"FAKE-private"}',"triage_state.json":b'{"model":"fake"}',"triage_history.jsonl":b'{"decision":"fake"}\n'}
+    for name,data in personal.items(): (old/name).write_bytes(data)
+    (old/"do_not_import.py").write_text("old code")
+    result=run("migrate",old,new)
+    check("native migration succeeds",result.returncode==0,result.stderr)
+    check("credentials and models are copied byte-for-byte and originals retained",all((new/n).read_bytes()==v and (old/n).read_bytes()==v for n,v in personal.items()))
+    check("no executable or arbitrary old files are imported",not(new/"do_not_import.py").exists())
+    check("two models cannot be silently merged",run("migrate",old,new).returncode!=0)
+    check("drive and profile roots are rejected",run("validate",Path.home()).returncode!=0 and run("validate",Path(root.anchor)).returncode!=0)
+    unrelated=root/"Unrelated"
+    unrelated.mkdir()
+    (unrelated/"keep.txt").write_text("private")
+    check("unrelated non-empty destinations are refused",run("validate",unrelated).returncode!=0 and (unrelated/"keep.txt").read_text()=="private")
+    source=root/"Source"
+    (source/".git").mkdir(parents=True)
+    check("Git checkouts are never overwritten",run("validate",source).returncode!=0)
+    (new/"app_release.py").write_text('VERSION = "2099.01.01"')
+    check("downgrades are rejected",run("validate",new,"2020.01.01").returncode!=0)
+    check("startup ownership uses exact quoted application paths",run("ownership",new).returncode==0)
+    for mode in ("cooperative","legacy"):
+        mutex="Local\\JiraHelperUnit-"+uuid.uuid4().hex
+        ipc=root/mode
+        ipc.mkdir()
+        code=r'''
+import ctypes,sys
+k=ctypes.windll.kernel32
+k.CreateMutexW.argtypes=[ctypes.c_void_p,ctypes.c_bool,ctypes.c_wchar_p];k.CreateMutexW.restype=ctypes.c_void_p
+k.CreateEventW.argtypes=[ctypes.c_void_p,ctypes.c_bool,ctypes.c_bool,ctypes.c_wchar_p];k.CreateEventW.restype=ctypes.c_void_p
+k.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32];k.CloseHandle.argtypes=[ctypes.c_void_p]
+m=k.CreateMutexW(None,False,sys.argv[1]);e=k.CreateEventW(None,True,False,sys.argv[2]) if sys.argv[3]=='cooperative' else None
+print('READY',flush=True)
 try:
-    if sys.argv[3] == 'cooperative':
-        assert k.WaitForSingleObject(event, 20000) == 0
-    else:
-        sys.stdin.readline()
+ if e: assert k.WaitForSingleObject(e,20000)==0
+ else: sys.stdin.readline()
 finally:
-    if event: k.CloseHandle(event)
-    k.CloseHandle(mutex)
+ if e:k.CloseHandle(e)
+ k.CloseHandle(m)
 '''
-            child = subprocess.Popen([sys.executable, "-c", child_code, mutex_name, event_name, mode],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                assert child.stdout.readline().strip() == "READY"
-                started = time.monotonic()
-                result = ps(f"$TimeoutSeconds = 1; Stop-Companions @('{ipc_root}') @('{mutex_name}')")
-                elapsed = time.monotonic() - started
-                if mode == "cooperative":
-                    check("real shutdown event closes a supported child", result.returncode == 0)
-                    child.wait(timeout=5)
-                else:
-                    check(mode + " shutdown returns a clear, bounded retry message",
-                        result.returncode != 0 and elapsed < 20 and "BOTH Jira tray icons" in result.stderr,
-                        f"elapsed={elapsed:.1f}s; {result.stderr}" if elapsed >= 20 or "BOTH Jira tray icons" not in result.stderr else "")
-                    check(mode + " running process is never force-killed", child.poll() is None)
-                check(mode + " preflight does not create personal data", not list(ipc_root.iterdir()))
-            finally:
-                child.communicate("\n", timeout=25)
-        absent = "Local\\JiraInstallerAbsent-" + uuid.uuid4().hex
-        result = ps(f"Stop-Companions @('{root}') @('{absent}')")
-        check("fresh install without running companions needs no shutdown event", result.returncode == 0)
-        check("new supported builds need no legacy Windows bridge",
-            "Add-Type" not in support.read_text().split("function Stop-Companions", 1)[1])
-        fixture = (PROJECT / "tests/fixtures/legacy_shutdown_app.py").read_bytes()
-        for script in ("jira_overlay.pyw", "triage_learner.pyw"):
-            old_root = root / ("legacy-" + script)
-            old_root.mkdir()
-            for name in ("jira_overlay.pyw", "triage_learner.pyw"):
-                (old_root / name).write_bytes(fixture)
-            (old_root / "jira_config.json").write_bytes(b'{"test":"not-a-real-credential"}')
-            mutex = "Local\\JiraInstallerTest-" + uuid.uuid4().hex
-            env = dict(os.environ, JIRA_TEST_MUTEX=mutex)
-            child = subprocess.Popen([sys.executable, str(old_root / script)], env=env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                assert child.stdout.readline().strip() == "READY"
-                result = ps(f"$TimeoutSeconds=5; Stop-Companions @('{old_root}') @('{mutex}')")
-                if result.returncode:
-                    print(result.stdout, result.stderr)
-                check(script + " legacy windows quit automatically without killing Python", result.returncode == 0)
-                child.wait(timeout=10)
-                check(script + " reaches normal loop cleanup", (old_root / "closed.txt").exists())
-                check(script + " retains existing config", (old_root / "jira_config.json").read_bytes() == b'{"test":"not-a-real-credential"}')
-            finally:
-                child.communicate("\n", timeout=20)
-        old, new = root / "older build", root / "new build"
-        old.mkdir()
-        (old / "jira_config.json").write_bytes(b'{"tenant":"arbitrary","token":"fake"}')
-        (old / "triage_state.json").write_bytes(b'{"training":"fake"}')
-        (old / "triage_history.jsonl").write_bytes(b'{"ticket":"fake"}\n')
-        (old / "do_not_import.py").write_text("raise Exception('old code')")
-        (old / "unrelated.txt").write_text("not app data")
-        p = ps(f"Migrate-Data '{old}' '{new}'")
-        if p.returncode:
-            print(p.stdout, p.stderr)
-        check("legacy migration succeeds without Python/dependency setup", p.returncode == 0)
-        check("credentials and learner data are copied byte-for-byte", all(
-            (new / name).read_bytes() == (old / name).read_bytes()
-            for name in ("jira_config.json", "triage_state.json", "triage_history.jsonl")))
-        check("migration imports neither executable code nor arbitrary private files",
-              not (new / "do_not_import.py").exists() and not (new / "unrelated.txt").exists())
-        check("the old installation remains recoverable", (old / "jira_config.json").exists())
-        before = (new / "jira_config.json").read_bytes()
-        p = ps(f"Migrate-Data '{old}' '{new}'")
-        check("two learners are never silently merged", p.returncode != 0 and (new / "jira_config.json").read_bytes() == before)
-        p = ps(f"Safe-Tree '{root}'; Canonical '{old}'")
-        check("ordinary paths containing spaces are supported", p.returncode == 0)
-        # Mock runKey in a subprocess; no real Windows startup entries touched.
-        p = ps(f"""
-        $runKey = 'HKCU:\\Software\\JiraOverlay-Installer-Test-' + [Guid]::NewGuid().ToString('N')
-        New-Item -Path $runKey -Force | Out-Null
-        try {{
-          New-ItemProperty -Path $runKey -Name JiraOverlay -Value '\"pythonw\" \"{old}\\jira_overlay.pyw\"' | Out-Null
-          New-ItemProperty -Path $runKey -Name JiraTriageLearner -Value '\"pythonw\" \"C:\\Elsewhere\\triage_learner.pyw\"' | Out-Null
-          Remove-OwnedStartup @('{old}')
-          $v = Get-ItemProperty -Path $runKey
-          if ($v.PSObject.Properties['JiraOverlay']) {{ throw 'Owned startup was not removed' }}
-          if (-not $v.PSObject.Properties['JiraTriageLearner']) {{ throw 'Unrelated startup was removed' }}
-          New-ItemProperty -Path $runKey -Name JiraOverlay -Value '\"pythonw\" \"{old}\\launch_installed.pyw\"' | Out-Null
-          Remove-OwnedStartup @('{old}')
-          if ((Get-ItemProperty -Path $runKey).PSObject.Properties['JiraOverlay']) {{ throw 'Managed launcher startup was not removed' }}
-        }} finally {{ Remove-Item -LiteralPath $runKey }}
-        """)
-        check("uninstall removes only startup entries belonging to its own folder", p.returncode == 0)
-        invalid = ps("$Action='Prepare'; $Target=[Environment]::GetFolderPath('UserProfile'); Invoke-Lifecycle")
-        check("validation failures include a stable reason code", invalid.returncode != 0 and "JIRA-I101" in invalid.stderr)
+        child=subprocess.Popen([sys.executable,"-c",code,mutex,u._event_name(ipc,"stop"),mode],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            ready = child.stdout.readline().strip()
+            assert ready == "READY", (ready,child.stderr.read())
+            result=run("stop",ipc,mutex)
+            if mode=="cooperative":
+                child.wait(timeout=5)
+                check("native shutdown signals an isolated cooperative writer",result.returncode==0)
+            else:
+                check("legacy apps receive a manual-Quit instruction without forced termination",result.returncode!=0 and "BOTH Jira tray icons" in result.stderr and child.poll() is None)
+        finally: child.communicate("\n",timeout=25)
 
-check("installer source has no wildcard data deletion",
-      "[UninstallDelete]" not in (PROJECT / "installer/JiraOverlay.iss").read_text().split("[Code]")[0])
+source=(PROJECT/"installer/lifecycle_helper.cs").read_text()
+check("native helper has no task registration or remote-memory feature",not any(s in source for s in ("RegisterTaskDefinition","VirtualAllocEx","WriteProcessMemory","CreateRemoteThread")))
+check("installer invokes a native helper instead of a PowerShell script","WindowsPowerShell" not in (PROJECT/"installer/JiraOverlay.iss").read_text())
 raise SystemExit(check.done())

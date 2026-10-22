@@ -33,6 +33,9 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      JIRA_SIGNING_THUMBPRINT: ${{ vars.JIRA_SIGNING_THUMBPRINT }}
+      JIRA_SIGNTOOL: ${{ vars.JIRA_SIGNTOOL }}
+      JIRA_TIMESTAMP_URL: ${{ vars.JIRA_TIMESTAMP_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +45,18 @@ jobs:
           python-version: '3.14'
       - run: python release_tools.py --output dist --check-tag "$env:RELEASE_TAG"
       - uses: ./.github/actions/installer
+      - name: Require approved publisher signatures before public release
+        shell: pwsh
+        env:
+          APPROVED_SIGNER: ${{ vars.JIRA_SIGNING_THUMBPRINT }}
+        run: |
+          if ($env:APPROVED_SIGNER -notmatch '^[0-9A-Fa-f]{40}$') { throw 'Release blocked: configure an IT-approved code-signing identity and sign the helper and installer. No unsigned production release is permitted.' }
+          $files = @(Get-ChildItem dist/*-Setup.exe,dist/JiraOverlay-InstallerHelper.exe)
+          if ($files.Count -ne 2) { throw 'Expected exactly one installer and one helper for signature validation' }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $env:APPROVED_SIGNER) { throw ('Release blocked: missing/invalid approved signature on ' + $file.Name) }
+          }
       - name: Publish tested installer and source package
         env:
           GH_TOKEN: ${{ github.token }}

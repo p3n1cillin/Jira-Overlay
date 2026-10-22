@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -77,7 +76,7 @@ def check_install(root):
         "\n spec=importlib.util.spec_from_file_location(name,root/(name+'.pyw'));"
         "module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)", root])
     assert (root / "unins000.exe").is_file(), "Missing uninstaller"
-    assert (root / "installer_support.ps1").is_file()
+    assert (root / "installer_helper.exe").is_file()
 
 
 def check_recovery(root, updates):
@@ -168,21 +167,6 @@ def main(installer):
         execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "fresh.log")])
         check_install(root)
         assert not (root / "jira_config.json").exists(), "Installer must not ship credentials"
-        # Actual EXE asks an old tray-based learner to quit before replacing
-        # its script/private interpreter. This is the user's reported scenario.
-        fixture = (Path(__file__).resolve().parents[1] / "tests/fixtures/legacy_shutdown_app.py").read_bytes()
-        (root / "triage_learner.pyw").write_bytes(fixture)
-        child = subprocess.Popen([str(root / "runtime/python.exe"), str(root / "triage_learner.pyw")],
-            env=dict(os.environ, JIRA_TEST_MUTEX="JiraTriageLearner"), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            assert child.stdout.readline().strip() == "READY"
-            execute(args + ["/NOMIGRATE", "/LOG=" + str(base / "automatic-quit.log")])
-            child.wait(timeout=10)
-            assert (root / "closed.txt").read_text() == "normal loop exit"
-            assert (root / "triage_learner.pyw").read_bytes() != fixture
-        finally:
-            child.communicate("\n", timeout=20)
         execute([root / "unins000.exe", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         # Legacy migration, with deterministic explicit selection in silent mode.
         execute(args + ["/LEGACYDIR=" + str(old), "/LOG=" + str(base / "install.log")])
@@ -210,41 +194,10 @@ def main(installer):
                 assert (root / name).read_bytes() == data
         # Upgrade without the override: an explicitly disabled startup choice
         # must remain disabled even if the previous installer task was checked.
-        # Exercise the production unattended supervisor from the installed
-        # PRIVATE Python. The caller must exit, releasing its runtime DLLs;
-        # only external Windows PowerShell remains during replacement.
-        supervisor = subprocess.run([str(root / "runtime/python.exe"),
-            str(Path(__file__).resolve().parents[1] / "tests/fixtures/automatic_update_app.py"),
-            str(root), str(installer), app_updates.VERSION,
-            hashlib.sha256(installer.read_bytes()).hexdigest()], capture_output=True, text=True, timeout=45)
-        assert supervisor.returncode == 0, supervisor.stderr
-        assert supervisor.stdout.strip().isdigit(), (supervisor.stdout, supervisor.stderr)
-        pid = int(supervisor.stdout.strip())
-        kernel = ctypes.windll.kernel32
-        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = kernel.OpenProcess(0x100000, False, pid)
-        if handle:
-            try:
-                assert kernel.WaitForSingleObject(handle, 180000) == 0, "Unattended installer timed out"
-            finally:
-                kernel.CloseHandle(handle)
-        state = app_updates.update_state(root)
-        assert state.get("phase") == "completed", state
-        assert state.get("version") == app_updates.VERSION
+        execute([arg for arg in args if arg != "/NOSTARTUP"] + ["/NOMIGRATE", "/LOG=" + str(base / "manual-upgrade.log")])
         check_install(root)
         assert (root / "triage_review.py").is_file()
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            for name in ("JiraOverlay", "JiraTriageLearner"):
-                try:
-                    value = winreg.QueryValueEx(key, name)[0]
-                except FileNotFoundError:
-                    continue
-                paths = app_startup.command_paths(value)
-                assert paths is None or paths[1].parent != root.resolve(), "Upgrade re-enabled disabled Windows startup"
+        assert not app_startup.enabled(root, root / "runtime/pythonw.exe", winreg), "Upgrade re-enabled startup"
         for name, data in personal.items():
             assert hashlib.sha256((root / name).read_bytes()).digest() == hashlib.sha256(data).digest()
         # One registered installation, not duplicate entries per version.
@@ -261,9 +214,11 @@ def main(installer):
         check_install(root)
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            command = winreg.QueryValueEx(key, "JiraOverlay")[0]
-            assert app_startup.command_paths(command) == (
-                (root / "runtime/pythonw.exe").resolve(), (root / "launch_installed.pyw").resolve()), command
+            try:
+                command = winreg.QueryValueEx(key, "JiraOverlay")[0]
+            except FileNotFoundError:
+                command = None
+            assert command is None, "Fresh/reinstalled application must require explicit startup consent"
             try:
                 winreg.QueryValueEx(key, "JiraTriageLearner")
                 raise AssertionError("An independent learner startup would race first-run setup")

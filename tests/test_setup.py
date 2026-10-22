@@ -196,8 +196,10 @@ check("declining leaves nothing registered", values == {} and asked == 1)
 stale = {name: '"C:\\Old\\Python\\pythonw.exe" "C:\\Old\\Path\\x.pyw"'
          for name in su.STARTUP_NAMES}
 values, asked = run_configure(stale, True)
-check("a moved install or upgraded Python is corrected without asking",
-      values == wanted and asked == 0, f"asked={asked} values={values}")
+check("changing a moved-install startup command requires fresh consent",
+      values == wanted and asked == 1, f"asked={asked} values={values}")
+values, asked = run_configure(stale, False)
+check("declining a startup change retains the old entry without a rewrite", values == stale and asked == 1)
 
 values, asked = run_configure(dict(wanted), True)
 check("an already-correct registration is left alone and not re-asked",
@@ -205,8 +207,8 @@ check("an already-correct registration is left alone and not re-asked",
 
 partial = {"JiraTriageLearner": next(iter(stale.values()))}
 values, asked = run_configure(partial, True)
-check("a legacy learner-only startup is migrated without re-asking",
-      values == wanted and asked == 0, f"asked={asked} values={values}")
+check("migrating a legacy startup entry requires consent",
+      values == wanted and asked == 1, f"asked={asked} values={values}")
 
 # --- setup scripts must be readable by Windows PowerShell 5.1 --------------
 # 5.1 reads a script without a byte-order mark as ANSI, so a single non-ASCII

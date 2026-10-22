@@ -10,21 +10,20 @@ import app_updates as updates
 
 def main():
     root = Path(__file__).resolve().parent
+    if (root / ".jira-overlay-security-hold").exists():
+        raise SystemExit("Jira Overlay is held closed pending IT security approval.")
     if (root / "app_guard.pyw").is_file() and updates.native_install(root):
         if "--resume" not in sys.argv:
             for role in lifecycle.ROLES:
                 lifecycle.set_wanted(root, role, True)
-        try:
-            if not updates.component_running(lifecycle.GUARD_MUTEX):
-                lifecycle.configure_task(root, "run")
-            kernel = updates._kernel()
-            handle = kernel.CreateEventW(None, True, False, "JiraOverlayShowRequest")
-            if handle:
-                kernel.SetEvent(handle)
-                kernel.CloseHandle(handle)
-            return
-        except (OSError, subprocess.SubprocessError, updates.UpdateError):
-            pass  # Enterprise policy may forbid tasks; normal launching works.
+        if not updates.component_running(lifecycle.GUARD_MUTEX):
+            subprocess.Popen([str(root / "runtime/pythonw.exe"), "-B", str(root / "app_guard.pyw")], cwd=root)
+        kernel = updates._kernel()
+        handle = kernel.CreateEventW(None, True, False, "JiraOverlayShowRequest")
+        if handle:
+            kernel.SetEvent(handle)
+            kernel.CloseHandle(handle)
+        return
     interpreter = root / "runtime" / "pythonw.exe"
     if not interpreter.is_file():
         interpreter = Path(sys.executable).with_name("pythonw.exe")

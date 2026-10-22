@@ -57,7 +57,9 @@ def set_enabled(root, interpreter, enable, registry, path=REGISTRY_PATH):
     current = entries(registry, path)
     with key:
         if enable:
-            registry.SetValueEx(key, PRIMARY, 0, registry.REG_SZ, commands(root, interpreter)[PRIMARY])
+            command = commands(root, interpreter)[PRIMARY]
+            if current.get(PRIMARY) != command:
+                registry.SetValueEx(key, PRIMARY, 0, registry.REG_SZ, command)
         # Promoting an active installation retires the old, independently
         # launched learner. Disabling only removes commands belonging here.
         for name, value in current.items():

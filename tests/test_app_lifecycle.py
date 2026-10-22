@@ -1,6 +1,5 @@
 """Recovery policy, deliberate Quit, safe update waits and private diagnostics."""
 import json
-import os
 from pathlib import Path
 import tempfile
 import threading
@@ -53,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="jira-lifecycle-test-") as directory:
     (root / "jira_config.json").write_text('{"domain":"example.invalid","email":"fake","token":"fake"}')
     all_running = lambda name: True
     check("live recovery reports active independently of saved process IDs",
-        life.recovery_status(root, running=all_running) == {"healthy": True, "message": "Automatic recovery active"})
+        life.recovery_status(root, running=all_running) == {"healthy": True, "message": "User-session recovery active (no scheduled task)"})
     life.set_wanted(root, "learner", False)
     check("deliberate Quit is distinguished from an unhealthy crash",
         life.recovery_status(root, running=all_running)["healthy"] and "deliberately closed: learner" in life.recovery_status(root, running=all_running)["message"])
@@ -151,20 +150,5 @@ with tempfile.TemporaryDirectory(prefix="jira-lifecycle-test-") as directory:
         else:
             check("an intentionally closed learner is never resurrected", [r for r, _ in launches] == ["overlay"])
 
-    # Real registration of a demand-only task in an isolated fake directory.
-    # It has NO trigger and is never run; no user's actual apps are touched.
-    if os.name == "nt":
-        root = base / "isolated task"
-        (root / "runtime").mkdir(parents=True)
-        (root / "runtime/pythonw.exe").write_bytes(b"not executed")
-        (root / "app_guard.pyw").write_text("# not executed")
-        try:
-            life.configure_task(root)
-            check("independent per-user recovery registers without a password or logon trigger", life.read(root, "recovery").get("enabled") is True)
-        finally:
-            life.configure_task(root, "remove")
-        check("uninstall removes only its own demand task", life.read(root, "recovery").get("enabled") is False)
-
-check("recovery has no tenant configuration", "serviceDeskId" not in life.TASK_SCRIPT and "apiToken" not in life.TASK_SCRIPT)
-check("update handoff is queued until the old scheduler job is finished", "MultipleInstances=1" in life.TASK_SCRIPT)
+check("recovery never registers scheduled tasks", not hasattr(life, "TASK_SCRIPT") and not hasattr(life, "configure_task"))
 raise SystemExit(check.done())

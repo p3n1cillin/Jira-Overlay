@@ -40,12 +40,11 @@ SetupLogging=yes
 UninstallLogging=yes
 
 [Tasks]
-Name: startup; Description: "Start Jira Overlay and the learner when I sign in"
+Name: startup; Description: "Start Jira Overlay and the learner when I sign in (requires IT approval)"; Flags: unchecked
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"
-Source: "support.ps1"; Flags: dontcopy
-Source: "legacy_shutdown.cs"; Flags: dontcopy
+Source: "{#StageDir}\installer_helper.exe"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\Jira Overlay"; Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Check: MakeShortcuts
@@ -55,7 +54,7 @@ Name: "{group}\Uninstall Jira Overlay"; Filename: "{uninstallexe}"; Check: MakeS
 Filename: "{app}\.jira-overlay-install"; Section: "Install"; Key: "Application"; String: "JiraOverlay"
 
 [Run]
-Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Flags: nowait; Check: LaunchApplication
+Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Description: "Launch Jira Overlay after IT approval"; Flags: nowait postinstall unchecked skipifsilent; Check: LaunchApplication
 
 [Code]
 var
@@ -86,7 +85,7 @@ function MakeShortcuts: Boolean;
 begin Result := not HasFlag('NOSHORTCUTS'); end;
 
 function LaunchApplication: Boolean;
-begin Result := not HasFlag('NOLAUNCH'); end;
+begin Result := not HasFlag('NOLAUNCH') and not FileExists(ExpandConstant('{app}\.jira-overlay-security-hold')); end;
 
 procedure HelperLog(const S: String; const Error, FirstLine: Boolean);
 var MessageText, Number: String; Separator, Percent: Integer;
@@ -112,17 +111,16 @@ function RunHelper(Action, Source, Script: String; Startup: Boolean): Boolean;
 var Args, ErrorText: String; Code: Integer;
 begin
   DeleteFile(ErrorFile);
-  Args := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script +
-    '" -Action ' + Action + ' -Target "' + InstallRoot +
+  Args := '-Action ' + Action + ' -Target "' + InstallRoot +
     '" -ResultFile "' + ErrorFile + '" -Version "{#AppVersion}"';
   if Source <> '' then Args := Args + ' -Source "' + Source + '"';
   if Startup then Args := Args + ' -EnableStartup';
-  Result := ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+  Result := ExecAndLogOutput(Script,
     Args, '', SW_HIDE, ewWaitUntilTerminated, Code, @HelperLog) and (Code = 0);
   if not Result then begin
     if not ReadResult(ErrorText) then begin
       ErrorText := '[JIRA-I900] Installer helper failed (Windows/helper status ' + IntToStr(Code) + '). See the Setup Log in your Windows TEMP folder. ' +
-        'If PowerShell was blocked by security policy, ask your IT team. No running learner is force-killed.';
+        'If application control blocked the native helper, ask your IT team. No running learner is force-killed.';
       SaveStringToFile(ErrorFile, UTF8Encode(ErrorText), False);
     end;
     Log(ErrorText);
@@ -140,9 +138,8 @@ end;
 procedure InitializeWizard;
 var OldPath: String;
 begin
-  ExtractTemporaryFile('support.ps1');
-  ExtractTemporaryFile('legacy_shutdown.cs');
-  Helper := ExpandConstant('{tmp}\support.ps1');
+  ExtractTemporaryFile('installer_helper.exe');
+  Helper := ExpandConstant('{tmp}\installer_helper.exe');
   ErrorFile := ExpandConstant('{tmp}\jira-installer-result.txt');
   InstallRoot := WizardDirValue;
   AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
@@ -231,7 +228,7 @@ var Detail: String;
 begin
   ErrorFile := ExpandConstant('{tmp}\jira-uninstall-result.txt');
   InstallRoot := ExpandConstant('{app}');
-  Result := RunHelper('Stop', '', ExpandConstant('{app}\installer_support.ps1'), False);
+  Result := RunHelper('Stop', '', ExpandConstant('{app}\installer_helper.exe'), False);
   if not Result then begin
     if not ReadResult(Detail) then Detail := 'Close both Jira tray icons and retry uninstall.';
     MsgBox(Detail, mbError, MB_OK);
@@ -242,7 +239,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var Detail: String;
 begin
   if CurUninstallStep = usUninstall then
-    if not RunHelper('RemoveStartup', '', ExpandConstant('{app}\installer_support.ps1'), False) then begin
+    if not RunHelper('RemoveStartup', '', ExpandConstant('{app}\installer_helper.exe'), False) then begin
       if not ReadResult(Detail) then Detail := '[JIRA-I130] Cannot remove this installation startup entries.';
       RaiseException(Detail + ' Uninstall cancelled; personal data is retained.');
     end;
