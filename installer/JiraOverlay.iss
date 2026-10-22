@@ -64,6 +64,8 @@ var
   AlreadyInstalled: Boolean;
   PreparationPage: TOutputProgressWizardPage;
   ShowingPreparation: Boolean;
+  StartupSelectionRoot: String;
+  RequestedStartup: Boolean;
 
 function ReadResult(var Value: String): Boolean;
 var Data: AnsiString;
@@ -127,8 +129,16 @@ begin
   end;
 end;
 
+function LiveStartupEnabled(Root: String): Boolean;
+var RunValue: String;
+begin
+  Result := RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
+    and ((Pos(Lowercase(Root + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) or
+         (Pos(Lowercase(Root + '\launch_installed.pyw'), Lowercase(RunValue)) > 0));
+end;
+
 procedure InitializeWizard;
-var OldPath, RunValue: String;
+var OldPath: String;
 begin
   ExtractTemporaryFile('support.ps1');
   ExtractTemporaryFile('legacy_shutdown.cs');
@@ -145,17 +155,31 @@ begin
   if RunHelper('Discover', '', Helper, False) then
     if ReadResult(OldPath) then LegacyPage.Values[0] := OldPath;
   LegacyPage.Values[0] := ExpandConstant('{param:LEGACYDIR|' + LegacyPage.Values[0] + '}');
-  if AlreadyInstalled then begin
-    if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
-      and ((Pos(Lowercase(InstallRoot + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) or
-           (Pos(Lowercase(InstallRoot + '\launch_installed.pyw'), Lowercase(RunValue)) > 0)) then
-      WizardSelectTasks('startup')
-    else WizardSelectTasks('!startup');
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+var Root: String;
+begin
+  if CurPageID = wpSelectTasks then begin
+    Root := WizardDirValue;
+    // Task defaults are populated after InitializeWizard. Apply the live
+    // preference only when this destination is first shown, preserving any
+    // subsequent user selection when navigating Back/Next.
+    if StartupSelectionRoot <> Root then begin
+      StartupSelectionRoot := Root;
+      if HasFlag('NOSTARTUP') then WizardSelectTasks('!startup')
+      else if FileExists(Root + '\unins000.exe') then begin
+        if LiveStartupEnabled(Root) then WizardSelectTasks('startup')
+        else WizardSelectTasks('!startup');
+      end;
+    end;
   end;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
+  InstallRoot := WizardDirValue;
+  AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
   Result := (PageID = LegacyPage.ID) and
     (AlreadyInstalled or HasFlag('NOMIGRATE'));
 end;
@@ -164,6 +188,14 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var Source, Detail: String;
 begin
   Result := '';
+  InstallRoot := WizardDirValue;
+  AlreadyInstalled := FileExists(InstallRoot + '\unins000.exe');
+  RequestedStartup := WizardIsTaskSelected('startup');
+  // Silent upgrades have no opportunity to confirm task defaults. Snapshot
+  // the live preference BEFORE code/startup replacement, not Inno's saved
+  // selection from an older installer. Explicit opt-out wins for all modes.
+  if WizardSilent and AlreadyInstalled then RequestedStartup := LiveStartupEnabled(InstallRoot);
+  if HasFlag('NOSTARTUP') then RequestedStartup := False;
   Source := LegacyPage.Values[0];
   if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
   PreparationPage.SetText('Checking the previous installation...', 'Running apps will be asked to quit automatically.');
@@ -187,7 +219,7 @@ begin
   if CurStep = ssPostInstall then begin
     Source := LegacyPage.Values[0];
     if HasFlag('NOMIGRATE') or AlreadyInstalled then Source := '';
-    if not RunHelper('Finish', Source, Helper, WizardIsTaskSelected('startup') and not HasFlag('NOSTARTUP')) then begin
+    if not RunHelper('Finish', Source, Helper, RequestedStartup) then begin
       if not ReadResult(Detail) then Detail := '[JIRA-I130] Startup registration failed.';
       RaiseException(Detail + ' Program files are installed. Run setup again to repair startup registration.');
     end;
