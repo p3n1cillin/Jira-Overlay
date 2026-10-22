@@ -53,7 +53,8 @@ with tempfile.TemporaryDirectory(prefix="jira-native-unit-") as directory:
     check("credentials and models are copied byte-for-byte and originals retained",all((new/n).read_bytes()==v and (old/n).read_bytes()==v for n,v in personal.items()))
     check("no executable or arbitrary old files are imported",not(new/"do_not_import.py").exists())
     check("two models cannot be silently merged",run("migrate",old,new).returncode!=0)
-    check("drive and profile roots are rejected",run("validate",Path.home()).returncode!=0 and run("validate",Path(root.anchor)).returncode!=0)
+    profile,drive = run("validate",Path.home()),run("validate",Path(root.anchor))
+    check("drive and profile roots are rejected before any directory traversal",profile.returncode!=0 and drive.returncode!=0 and "dedicated application folder" in profile.stderr and "dedicated application folder" in drive.stderr)
     unrelated=root/"Unrelated"
     unrelated.mkdir()
     (unrelated/"keep.txt").write_text("private")

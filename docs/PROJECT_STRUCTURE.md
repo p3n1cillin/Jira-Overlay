@@ -48,9 +48,9 @@ refuse to run if a real companion or native installation already exists.
 
 `installer/lifecycle_helper.cs` is compiled by `installer/build_helper.py` using
 the installed .NET Framework compiler on the build machine. There is no client
-runtime compilation or PowerShell installer helper. Approved signing must happen
-before helper bundling and after Setup compilation; public release verifies both
-signatures against the configured publisher. See `SECURITY.md` for signing and
+runtime compilation or PowerShell installer helper. When signing is configured,
+it happens before helper bundling and after Setup compilation; public release
+verifies both signatures against the configured publisher. See `SECURITY.md` for signing and
 incident-hold requirements. Private security evidence under `.security-reports/`
 is ignored and excluded from release packages.
 

@@ -23,7 +23,8 @@ public static class JiraInstaller {
     static readonly string[] Personal = {"jira_config.json", "triage_state.json", "triage_suggestions.json", "triage_status.json", "triage_reviews.json", "triage_history.jsonl", "triage_dataset.jsonl", "triage_log.jsonl", "triage_log.jsonl.metrics.json", "triage_learner.log", "TRIAGE_REPORT.md", "TRIAGE_REVIEW_QUEUE.md"};
     public static string Canonical(string path) {
         if (String.IsNullOrWhiteSpace(path)) throw new ArgumentException("An application path is required.");
-        return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        string full = Path.GetFullPath(path);
+        return Same(full,Path.GetPathRoot(full)) ? full : full.TrimEnd(Path.DirectorySeparatorChar);
     }
     static bool Same(string a, string b) { return String.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
     static bool Exists(string path) { return File.Exists(path) || Directory.Exists(path); }
@@ -171,6 +172,7 @@ public static class JiraInstaller {
     }
     public static void ValidateTarget(string root, string version, bool prepare) {
         FailureCode = "JIRA-I101";
+        root = Canonical(root);
         if (Same(root,Canonical(Path.GetPathRoot(root))) || new[] {Environment.SpecialFolder.UserProfile,Environment.SpecialFolder.LocalApplicationData,Environment.SpecialFolder.Windows}.Any(p => Same(root,Canonical(Environment.GetFolderPath(p)))))
             throw new IOException("Choose a dedicated application folder, not a drive/profile/system root.");
         string ancestor = root;
