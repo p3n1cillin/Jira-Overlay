@@ -6,8 +6,8 @@
       1. finds a usable Python, installing one if there isn't one
       2. hands over to setup.py for packages, startup and first launch
 
-  Run it via setup.bat (double-click) so you don't have to think about
-  PowerShell execution policy.
+  Run it via setup.bat under the organisation's normal PowerShell policy.
+  If scripts are restricted, ask IT to approve deployment. No policy override.
 
   Deliberately ASCII-only. Windows PowerShell 5.1 - still the default
   'powershell' on most machines - reads a script without a byte-order mark

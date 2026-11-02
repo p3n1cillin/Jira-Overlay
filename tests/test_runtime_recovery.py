@@ -163,7 +163,7 @@ class Key:
     def __exit__(self, *a): pass
 class Registry:
     HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ = 1, 1, 2, 1
-    def __init__(self): self.values = {}; self.exists = False
+    def __init__(self): self.values = {}; self.exists = False; self.writes = 0
     def OpenKey(self, *a):
         if not self.exists: raise FileNotFoundError()
         return Key()
@@ -171,13 +171,15 @@ class Registry:
     def QueryValueEx(self, key, name):
         if name not in self.values: raise FileNotFoundError()
         return self.values[name], 1
-    def SetValueEx(self, key, name, r, t, value): self.values[name] = value
+    def SetValueEx(self, key, name, r, t, value): self.values[name] = value; self.writes += 1
     def DeleteValue(self, key, name): del self.values[name]
 registry = Registry()
 root, interpreter = r"C:\Service Desk", r"C:\Runtime\pythonw.exe"
 app_startup.set_enabled(root, interpreter, True, registry)
 check("a fresh Windows account gets one coordinated startup entry",
       app_startup.enabled(root, interpreter, registry) and list(registry.values) == [app_startup.PRIMARY])
+app_startup.set_enabled(root, interpreter, True, registry)
+check("saving an unchanged startup preference does not rewrite the Run value", registry.writes == 1)
 registry.values[app_startup.LEGACY] = '"C:\\Old\\pythonw.exe" "C:\\Old\\triage_learner.pyw"'
 app_startup.set_enabled(root, interpreter, True, registry)
 check("enabling startup retires the legacy independent learner launch", app_startup.LEGACY not in registry.values)

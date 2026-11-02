@@ -3041,6 +3041,9 @@ def _report_fatal(message: str) -> None:
 
 
 def main() -> None:
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".jira-overlay-security-hold")):
+        lifecycle.reason("security-hold", quit=True)
+        return
     if updates.recover_pending(_DIR):
         os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
     # single-instance guard. restype/argtypes set explicitly, as the overlay's

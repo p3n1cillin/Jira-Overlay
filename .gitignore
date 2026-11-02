@@ -31,8 +31,10 @@ triage_backups/
 app_update_error.log
 app_update_status.json
 .app-lifecycle/
+.security-reports/
 dist/
 .jira-overlay-install
+.jira-overlay-security-hold
 .migration-*/
 .ruff_cache/
 .mypy_cache/

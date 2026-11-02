@@ -21,6 +21,7 @@ activate(ROOT)
 from app_release import VERSION
 from app_updates import unpack_package
 from release_tools import build_release
+from build_helper import build_helper, sign_if_configured
 
 
 def copy_tree(source, target):
@@ -73,12 +74,13 @@ def build(compiler, output):
             shutil.copy2(ROOT / "docs" / name, stage / "docs" / name)
         shutil.copy2(ROOT / "README.md", stage / "README.md")
         runtime(stage / "runtime")
-        shutil.copy2(ROOT / "installer" / "support.ps1", stage / "installer_support.ps1")
-        shutil.copy2(ROOT / "installer" / "legacy_shutdown.cs", stage / "legacy_shutdown.cs")
+        helper = build_helper(output / "JiraOverlay-InstallerHelper.exe")
+        shutil.copy2(helper, stage / "installer_helper.exe")
         subprocess.run([str(compiler), "/DAppVersion=" + VERSION,
                         "/DStageDir=" + str(stage), "/DOutputDir=" + str(output),
                         str(ROOT / "installer" / "JiraOverlay.iss")], check=True)
     target = output / f"JiraOverlay-{VERSION}-Setup.exe"
+    sign_if_configured(target)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     target.with_suffix(".exe.sha256").write_text(f"{digest}  {target.name}\n", encoding="utf-8")
     return target

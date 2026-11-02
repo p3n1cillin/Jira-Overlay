@@ -1,18 +1,15 @@
-"""Per-user lifecycle records and an independent Windows recovery task.
+"""Local lifecycle records and ordinary user-session recovery.
 
 Only component names, PIDs, exit codes and times are logged; never Jira data.
-The task is demand-started by the launcher/Windows Run entry, not a logon
-trigger: disabling Windows startup therefore remains effective.
+No scheduled task, service or script host is created or executed.
 """
 from __future__ import annotations
 
 import faulthandler
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
-import tempfile
 import time
 
 from app_release import VERSION
@@ -124,80 +121,6 @@ def run(root, role, main):
         _active = None
 
 
-def task_name(root):
-    digest = hashlib.sha256(str(Path(root).resolve()).casefold().encode()).hexdigest()[:12]
-    return "JiraOverlay-" + digest + "-Recovery"
-
-
-TASK_SCRIPT = r'''
-param([string]$Root, [string]$Name, [ValidateSet('register','run','remove')][string]$Mode)
-$ErrorActionPreference='Stop'
-$service=New-Object -ComObject 'Schedule.Service'
-$service.Connect()
-$folder=$service.GetFolder('\')
-$existing=$null
-try { $existing=$folder.GetTask($Name) } catch {
-    $errorCode=$_.Exception.HResult
-    if ($_.Exception.InnerException) { $errorCode=$_.Exception.InnerException.HResult }
-    if ($errorCode -ne -2147024894) { throw }
-}
-if ($existing) {
-    $action=$existing.Definition.Actions.Item(1)
-    if ($action.WorkingDirectory.TrimEnd('\') -ne $Root.TrimEnd('\') -or
-        $action.Path -ne (Join-Path $Root 'runtime\pythonw.exe') -or
-        ($action.Arguments.IndexOf(('"' + (Join-Path $Root 'app_guard.pyw') + '"'),[StringComparison]::OrdinalIgnoreCase) -lt 0 -and
-         $action.Arguments -ne ('"' + (Join-Path $Root 'launch_installed.pyw') + '"'))) {
-        throw 'Refusing to change an unrelated scheduled task.'
-    }
-}
-if ($Mode -eq 'remove') {
-    if ($existing) { $folder.DeleteTask($Name,0) }
-    exit 0
-}
-if ($Mode -eq 'register' -or -not $existing) {
-    $task=$service.NewTask(0)
-    $task.RegistrationInfo.Description='Jira Overlay per-user recovery. No Jira credentials. Deliberate Quit and update shutdowns are respected.'
-    $task.Principal.UserId=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $task.Principal.LogonType=3
-    $task.Principal.RunLevel=0
-    $task.Settings.Enabled=$true
-    $task.Settings.AllowDemandStart=$true
-    $task.Settings.StartWhenAvailable=$false
-    $task.Settings.DisallowStartIfOnBatteries=$false
-    $task.Settings.StopIfGoingOnBatteries=$false
-    $task.Settings.ExecutionTimeLimit='PT0S'
-    # An updater can still be a descendant of the previous scheduler action.
-    # Queue its replacement rather than ignoring it until that job finishes.
-    $task.Settings.MultipleInstances=1
-    $task.Settings.RestartCount=3
-    $task.Settings.RestartInterval='PT1M'
-    $action=$task.Actions.Create(0)
-    $action.Path=Join-Path $Root 'runtime\pythonw.exe'
-    $action.Arguments='-B "' + (Join-Path $Root 'app_guard.pyw') + '"'
-    $action.WorkingDirectory=$Root
-    $existing=$folder.RegisterTaskDefinition($Name,$task,6,$task.Principal.UserId,$null,3)
-}
-if ($Mode -eq 'run') { $null=$existing.Run($null) }
-'''
-
-
-def configure_task(root, mode="register"):
-    root = Path(root).resolve()
-    executable = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    with tempfile.TemporaryDirectory(prefix="jira-recovery-task-") as directory:
-        script = Path(directory) / "task.ps1"
-        script.write_text(TASK_SCRIPT, encoding="utf-8")
-        result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-File", str(script), "-Root", str(root), "-Name", task_name(root), "-Mode", mode],
-            capture_output=True, text=True, timeout=30, creationflags=0x08000000)
-    if result.returncode:
-        write(root, "recovery", enabled=False, reason="task-registration-failed")
-        event(root, "recovery", "task-registration-failed", exitCode=result.returncode)
-        raise updates.UpdateError("[JIRA-R101] Windows could not configure independent recovery. "
-            "Use the Start menu to launch the app; ask IT if Task Scheduler is restricted.")
-    write(root, "recovery", enabled=mode != "remove", task=task_name(root))
-
-
 def configured(root):
     try:
         value = json.loads((Path(root) / "jira_config.json").read_text(encoding="utf-8"))
@@ -210,10 +133,8 @@ def configured(root):
 def recovery_status(root, *, running=None):
     """Read-only operational status, independent of a stale saved PID/phase."""
     running = running or updates.component_running
-    if read(root, "recovery").get("enabled") is not True:
-        return {"healthy": False, "message": "Automatic recovery unavailable [JIRA-R101]. Open Jira Overlay from Start; ask IT if tasks are restricted."}
     if not running(GUARD_MUTEX):
-        return {"healthy": False, "message": "Automatic recovery is not running. Open Jira Overlay from Start to resume."}
+        return {"healthy": False, "message": "User-session recovery is not running [JIRA-R101]. Start manually only after IT approval."}
     paused, waiting = [], []
     for role in ROLES:
         if not wanted(root, role):
@@ -223,7 +144,7 @@ def recovery_status(root, *, running=None):
         elif not running(updates.MUTEXES[0 if role == "overlay" else 1]):
             waiting.append(role + " restarting with backoff")
     details = (["deliberately closed: " + ", ".join(paused)] if paused else []) + waiting
-    return {"healthy": not waiting, "message": "Automatic recovery active" + ("; " + "; ".join(details) if details else "")}
+    return {"healthy": not waiting, "message": "User-session recovery active (no scheduled task)" + ("; " + "; ".join(details) if details else "")}
 
 
 class RestartBudget:
