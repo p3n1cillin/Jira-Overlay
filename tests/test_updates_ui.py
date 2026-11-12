@@ -118,16 +118,17 @@ class Watcher:
         time.sleep(.03)
         sequence.append("writer-finished")
     def _save_state(self): sequence.append("saved")
-class Icon:
-    def __init__(self,*a,**k): pass
-    def stop(self): sequence.append("tray-stop")
-    def run(self): callbacks[0]()
 kernel=SimpleNamespace(CreateMutexW=lambda *a:1,GetLastError=lambda:0,CloseHandle=lambda *a:None)
-with patch.object(tl,"ShadowWatcher",Watcher), patch.object(tl.pystray,"Icon",Icon), \
-     patch.object(tl.updates,"listen_for_update",side_effect=lambda root,callback:callbacks.append(callback)), \
-     patch.object(tl.updates,"recover_pending",return_value=False), patch.object(tl.ctypes.windll,"kernel32",kernel):
+def fire_update(root,callback):
+    callbacks.append(callback)
+    threading.Timer(.05,lambda: (sequence.append("update-requested"), callback())).start()
+with patch.object(tl,"ShadowWatcher",Watcher), patch.object(tl,"OVERLAY_FOLLOW_SECONDS",.01),      patch.object(tl.updates,"listen_for_update",side_effect=fire_update),      patch.object(tl.lifecycle,"wanted",return_value=True),      patch.object(tl.updates,"recover_pending",return_value=False), patch.object(tl.ctypes.windll,"kernel32",kernel):
     tl.main()
-check("shutdown joins and saves the learner writer",sequence==["tray-stop","writer-finished","saved"])
+check("shutdown joins and saves the learner writer",sequence==["update-requested","writer-finished","saved"])
+sequence=[]
+with patch.object(tl,"ShadowWatcher",Watcher), patch.object(tl,"OVERLAY_FOLLOW_SECONDS",.01),      patch.object(tl.updates,"listen_for_update"),      patch.object(tl.lifecycle,"wanted",side_effect=lambda root,role: role!="overlay"),      patch.object(tl.updates,"recover_pending",return_value=False), patch.object(tl.ctypes.windll,"kernel32",kernel):
+    tl.main()
+check("headless learner quits and saves when the overlay is quit",sequence==["writer-finished","saved"])
 with tempfile.TemporaryDirectory() as directory:
     hold=Path(directory)/".jira-overlay-security-hold"
     hold.write_text("isolated approval hold")

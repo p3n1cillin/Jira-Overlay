@@ -219,10 +219,9 @@ def main() -> int:
 
     if ask_yes_no("\nStart it now (after IT approval)?", default=False):
         launch()
-        say("\nStarted. Look for the icons in your system tray:")
-        say("  * blue circle   the overlay (ticket count)")
-        say("  * purple circle the triage learner - read-only, it only ever")
-        say("                  suggests where a ticket is heading")
+        say("\nStarted. Look for the blue ticket-count icon in your system tray.")
+        say("  The triage learner runs in the background with it - read-only,")
+        say("  it only ever suggests where a ticket is heading.")
     else:
         say("\nStart it any time with launch.bat")
     return 0

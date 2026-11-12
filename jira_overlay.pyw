@@ -2322,6 +2322,8 @@ class JiraOverlay:
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
             pystray.MenuItem("Team report", lambda: self._post(self._open_report)),
+            pystray.MenuItem("Learner report", lambda: self._post(self._open_learner_report),
+                             visible=lambda item: os.path.isfile(self._learner_report_path())),
             pystray.MenuItem("Check for updates", lambda: self._post(self._check_updates)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",        lambda: self._post(self._quit_app)),
@@ -2329,6 +2331,16 @@ class JiraOverlay:
         self._tray = pystray.Icon("JiraOverlay", _make_tray_image(0, False),
                                   "Jira Overlay", menu)
         threading.Thread(target=self._tray.run, daemon=True).start()
+
+    @staticmethod
+    def _learner_report_path() -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "TRIAGE_REPORT.md")
+
+    def _open_learner_report(self) -> None:
+        """The headless triage learner has no tray icon; its report opens here."""
+        path = self._learner_report_path()
+        if os.path.isfile(path):
+            open_in_default_or_notepad(path)
 
     def _quit_app(self):
         lifecycle.reason("user-quit", quit=True)
@@ -4430,9 +4442,11 @@ def main() -> None:
     updates.listen_for_update(root, stop_for_update)
     # A fresh user's learner must not start until SetupWindow has saved their
     # credentials. Existing Windows Run entries may also launch it; its named
-    # mutex keeps that harmless and avoids duplicate polling.
+    # mutex keeps that harmless and avoids duplicate polling. The learner is
+    # headless and quits with the overlay, so launching the overlay always
+    # brings it back rather than honouring that follow-on quit.
     learner = os.path.join(root, "triage_learner.pyw")
-    if os.path.isfile(learner) and not lifecycle.supervised(root) and lifecycle.wanted(root, "learner"):
+    if os.path.isfile(learner) and not lifecycle.supervised(root):
         try:
             subprocess.Popen([_pythonw_exe(), learner], cwd=root, creationflags=0x08000000)
         except OSError as exc:

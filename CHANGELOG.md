@@ -16,6 +16,9 @@ Security-review build: not released or approved for production deployment.
 - Existing installations and retained datasets are repaired in place without selecting a previous folder or merging learners. Separate ZIP import is an explicit, unchecked option for empty destinations; no old folder is auto-selected.
 - Signing is optional by project-owner decision. When configured, both the lifecycle helper and installer are signed and verified against the approved identity. Unsigned builds are identified honestly; checksums alone are not publisher authentication. Defender validation and investigation are not replaced by signing.
 
+### Tray
+- One tray icon. The triage learner no longer adds its own purple icon: it runs in the background, saves and quits when the overlay is quit, and is relaunched with the overlay. Its report opens from the overlay's tray menu (*Learner report*).
+
 ## [2026.10.22]
 
 ### Reliability and diagnostics

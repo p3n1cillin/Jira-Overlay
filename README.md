@@ -234,7 +234,7 @@ Your API token is never stored as plain text. The first time the overlay runs (o
 
 The learner starts with the overlay and sits alongside it, watches how your team triages tickets, and predicts where each **new** ticket is heading. It is **strictly read-only** — the only Jira calls it makes are `GET` and search. It never transitions, comments on, edits, clones or assigns anything. Predictions are suggestions for a human, nothing more.
 
-It starts alongside the overlay and adds a purple tray icon; right-click → *Open report*. Quit it from there if you'd rather not run it.
+It runs in the background with no tray icon of its own: right-click the overlay's tray icon → *Learner report* to read what it has learned. Quitting the overlay quits the learner too, and launching the overlay starts it again.
 
 ### It configures itself
 
@@ -422,7 +422,7 @@ are retained until you remove or archive them yourself.
 
 To recover:
 
-1. Quit the learner using its tray menu before replacing any data files.
+1. Quit the overlay from its tray menu (the learner saves and closes with it) before replacing any data files.
 2. Preserve the current data files in a separate folder before restoring.
 3. Verify the selected archive with
    `python triage_storage.py triage_backups/YYYY-MM-DD.zip`.
