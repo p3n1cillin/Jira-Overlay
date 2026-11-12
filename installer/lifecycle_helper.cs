@@ -155,6 +155,9 @@ public static class JiraInstaller {
         dynamic folder = service.GetFolder("\\");
         dynamic task;
         try { task = folder.GetTask(name); }
+        // A task already retired by an earlier upgrade is absent. The CLR maps
+        // that HRESULT (0x80070002) to FileNotFoundException, not COMException.
+        catch (FileNotFoundException) { return; }
         catch (COMException ex) { if ((uint)ex.ErrorCode == 0x80070002) return; throw; }
         dynamic definition = task.Definition;
         dynamic action = definition.Actions.Item(1);

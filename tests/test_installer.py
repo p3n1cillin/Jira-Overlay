@@ -98,5 +98,7 @@ finally:
 
 source=(PROJECT/"installer/lifecycle_helper.cs").read_text()
 check("native helper has no task registration or remote-memory feature",not any(s in source for s in ("RegisterTaskDefinition","VirtualAllocEx","WriteProcessMemory","CreateRemoteThread")))
+check("an already-retired recovery task (FileNotFoundException) does not fail upgrades",
+      "catch (FileNotFoundException) { return; }" in source.split("folder.GetTask(name)")[1].split("dynamic definition")[0])
 check("installer invokes a native helper instead of a PowerShell script","WindowsPowerShell" not in (PROJECT/"installer/JiraOverlay.iss").read_text())
 raise SystemExit(check.done())
