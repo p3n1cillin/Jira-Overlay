@@ -61,6 +61,44 @@ check("a transient failure does not latch SLA off",
 _sla, q, _ = stats({"slaEnabled": False}, [(37, False)])
 check("completed-today still counts with SLA switched off", len(q) == 1)
 
+# Jira's compliance report fails a ticket if ANY of its SLAs breached, in any
+# cycle. slaBreached() is not a JSM function: Jira accepted it and matched
+# nothing, so the overlay read 100% every day.
+sla, q, _ = stats({"slaField": "Time to first response, Time to Start,Time to resolution"},
+                  [(40, False), (3, False)])
+check("several SLAs: a ticket is missed if any of them breached",
+      sla == 92 and q[1].endswith(' AND ("Time to first response" = everBreached() OR '
+                                  '"Time to Start" = everBreached() OR '
+                                  '"Time to resolution" = everBreached())'))
+check("  and the unsupported slaBreached() is never sent",
+      not any("slaBreached" in jql for jql in q))
+sla, q, _ = stats({"slaField": 'Odd "name'}, [(5, False), (0, False)])
+check("SLA names are quoted safely in JQL", '"Odd \\"name" = everBreached()' in q[1])
+
+# The team doesn't work weekends: Sat/Sun keep showing Friday, Monday takes in
+# anything closed over the weekend, and the figure and its Jira link agree.
+from datetime import date                            # noqa: E402
+window = Overlay._working_day_window
+WEEK = {date(2026, 11, 16): ("updated >= startOfDay(-2)", "today"),            # Mon
+        date(2026, 11, 18): ("updated >= startOfDay()", "today"),              # Wed
+        date(2026, 11, 20): ("updated >= startOfDay()", "today"),              # Fri
+        date(2026, 11, 21): ("updated >= startOfDay(-1) AND updated < startOfDay()", "Fri"),
+        date(2026, 11, 22): ("updated >= startOfDay(-2) AND updated < startOfDay(-1)", "Fri")}
+check("weekends off: Sat/Sun show Friday and Monday includes the weekend",
+      all(window(day, True) == want for day, want in WEEK.items()))
+check("by default (desks that work weekends) every day is just today",
+      all(window(day) == ("updated >= startOfDay()", "today") for day in WEEK))
+o = object.__new__(Overlay)
+o.config = {"projectKey": "SD", "completedTodayFilter": "assignee = x"}
+check("weekend handling is off unless the desk opts in",
+      Overlay._completed_today_jql(o, date(2026, 11, 21)) ==
+      "project = SD AND statusCategory = Done AND updated >= startOfDay() AND assignee = x")
+o.config["weekendsOff"] = True
+check("opted in, completed JQL uses the working-day window",
+      Overlay._completed_today_jql(o, date(2026, 11, 21)) ==
+      "project = SD AND statusCategory = Done AND updated >= startOfDay(-1) "
+      "AND updated < startOfDay() AND assignee = x")
+
 
 # --- Alert queue picker: it must be possible to decline ---------------------
 

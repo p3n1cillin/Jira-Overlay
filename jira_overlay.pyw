@@ -523,7 +523,7 @@ _OVERLAY_KEYS = {
     "skipKeywords", "maxQueueSize", "refreshSeconds", "alertQueuesAsked",
     "notificationsEnabled", "soundEnabled", "checkForUpdates", "autoInstallUpdates",
     "alpha", "overlayWidth", "alwaysVisible",
-    "slaField", "slaEnabled",
+    "slaField", "slaEnabled", "weekendsOff",
     "reportUsers", "reportRange", "reportBasis",
     "completedTodayFilter", "suggestionsFile",
     "lastX", "lastY", "snapCorner",
@@ -2843,11 +2843,38 @@ class JiraOverlay:
                if pk else self._jira_url("/jira/servicedesk"))
         webbrowser.open(url)
 
-    def _completed_today_jql(self) -> str:
+    @staticmethod
+    def _working_day_window(today: Optional[date] = None,
+                            weekends_off: bool = False) -> tuple[str, str]:
+        """(JQL date clause, label) for the completed/SLA figures.
+
+        Opt-in ("weekendsOff") for desks that don't work weekends, where a
+        weekend day holds a handful of tickets at most and one breach reads
+        as 0% or 67%. Saturday and Sunday then keep showing Friday, and
+        Monday takes in anything closed over the weekend. Jira's SLA
+        calendars already pause outside working hours; this only changes
+        which day's tickets are shown. Desks that work weekends see today.
+        """
+        if not weekends_off:
+            return "updated >= startOfDay()", "today"
+        weekday = (today or date.today()).weekday()
+        if weekday == 5:
+            return "updated >= startOfDay(-1) AND updated < startOfDay()", "Fri"
+        if weekday == 6:
+            return "updated >= startOfDay(-2) AND updated < startOfDay(-1)", "Fri"
+        if weekday == 0:
+            return "updated >= startOfDay(-2)", "today"
+        return "updated >= startOfDay()", "today"
+
+    @property
+    def _weekends_off(self) -> bool:
+        return self.config.get("weekendsOff") is True
+
+    def _completed_today_jql(self, today: Optional[date] = None) -> str:
         """JQL behind the 'Completed today' figure and its Jira link."""
         pk    = self.config.get("projectKey", "")
         jql   = (f"project = {pk} AND statusCategory = Done "
-                 "AND updated >= startOfDay()")
+                 f"AND {self._working_day_window(today, self._weekends_off)[0]}")
         extra = self.config.get("completedTodayFilter", "").strip()
         return f"{jql} AND {extra}" if extra else jql
 
@@ -3384,14 +3411,23 @@ class JiraOverlay:
             # Absent means "never configured", so fall back to the usual JSM
             # field name. Present but empty means the user cleared it on
             # purpose, which is one of the ways to turn this off.
-            sla_field = (cfg.get("slaField", "Time to resolution") or "").strip()
-            if (not cfg.get("slaEnabled", True) or not sla_field
+            # Several comma-separated SLA names follow Jira's own compliance
+            # report: a ticket counts as missed if ANY of its SLAs breached.
+            sla_fields = [name.strip() for name in
+                          (cfg.get("slaField", "Time to resolution") or "").split(",")
+                          if name.strip()]
+            if (not cfg.get("slaEnabled", True) or not sla_fields
                     or self._sla_unavailable or total_n == 0):
                 self.sla_compliance = None
                 return
 
+            # everBreached(): any cycle of the SLA was missed, as Jira's report
+            # counts it. (The former slaBreached() is not a JSM function; Jira
+            # accepted it and matched nothing, so every day read 100%.)
+            breach = " OR ".join(f"{jql_quote(name)} = everBreached()"
+                                 for name in sla_fields)
             breached, rejected = self._count_issues(
-                base_jql + f' AND "{sla_field}" = slaBreached()')
+                base_jql + f" AND ({breach})")
             if breached is None:
                 # Only stop asking when Jira rejected the query outright —
                 # that means the field is missing or renamed, which on a desk
@@ -3611,7 +3647,8 @@ class JiraOverlay:
         self._prev_newly   = newly_count
         self._last_refresh = datetime.now()
 
-        self.lbl_done.config(text=f"✓  Completed today — {self.completed_today}")
+        day = self._working_day_window(weekends_off=self._weekends_off)[1]
+        self.lbl_done.config(text=f"✓  Completed {day} — {self.completed_today}")
         if self.sla_compliance is not None:
             pct   = self.sla_compliance
             color = (_C["ok"] if pct >= 95 else
@@ -4170,9 +4207,11 @@ class JiraOverlay:
         section("SLA & completed today")
         s_sla_on = tk.BooleanVar(value=cfg.get("slaEnabled", True))
         check(body, "Show SLA compliance", s_sla_on)
+        s_weekends_off = tk.BooleanVar(value=cfg.get("weekendsOff") is True)
+        check(body, "We don't work weekends (Sat/Sun show Friday)", s_weekends_off)
         sf = tk.Frame(body, bg=BG)
         sf.pack(fill="x", padx=16, pady=(0, 4))
-        tk.Label(sf, text="SLA field name:",
+        tk.Label(sf, text="SLA field names (comma-separated; any breach counts):",
                  font=_font(9), fg=FG, bg=BG).pack(anchor="w")
         s_sla = tk.StringVar(value=cfg.get("slaField", "Time to resolution"))
         sla_entry = tk.Entry(sf, textvariable=s_sla, bg=SEL,
@@ -4329,6 +4368,10 @@ class JiraOverlay:
                                          if k.strip()],
                 "maxQueueSize":         max_q,
             })
+            # Opt-in: only written once someone actually turns it on, so an
+            # unchanged save leaves the file alone.
+            if "weekendsOff" in self.config or s_weekends_off.get():
+                self.config["weekendsOff"] = s_weekends_off.get()
             if "checkForUpdates" in self.config or not s_updates.get():
                 self.config["checkForUpdates"] = s_updates.get()
             if "autoInstallUpdates" in self.config:

@@ -19,6 +19,11 @@ Security-review build: not released or approved for production deployment.
 ### Tray
 - One tray icon. The triage learner no longer adds its own purple icon: it runs in the background, saves and quits when the overlay is quit, and is relaunched with the overlay. Its report opens from the overlay's tray menu (*Learner report*).
 
+### SLA compliance
+- Fixed: the overlay's SLA % never counted a breach. It queried `slaBreached()`, which is not a Jira Service Management function; Jira accepted the query and matched nothing, so every day read 100%. It now uses `everBreached()`.
+- The SLA field setting accepts several comma-separated names, and a ticket counts as missed if any of them breached, the same rule as Jira's SLA compliance report. The default is unchanged (`Time to resolution`), so it works with any service desk.
+- New opt-in setting, *We don't work weekends*: on Saturday and Sunday the completed and SLA figures keep showing Friday (labelled "Fri"), and Monday includes anything closed over the weekend. Off by default for desks that work weekends.
+
 ## [2026.10.22]
 
 ### Reliability and diagnostics
