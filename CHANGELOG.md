@@ -4,9 +4,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 Versions are dates (`YYYY.MM.DD`, optionally `.N` for same-day bundles) — see `app_release.py`, and
 Settings, for what a running install is actually on.
 
-## [2026.10.22.1]
+## [2026.11.24]
 
-Security-review build: not released or approved for production deployment.
+First stable release of the security-hardened build reviewed as 2026.10.22.1, plus the tray, SLA and installer fixes below.
 
 ### Security architecture
 - Retired scheduled-task registration/execution and temporary PowerShell updater helpers. User-session recovery is launched normally from Windows, with no task/service persistence.

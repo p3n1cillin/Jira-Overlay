@@ -110,7 +110,7 @@ repair the installation; do not apply a code-only rollback to its private runtim
 
 ## User-session recovery and security approval
 
-The security-review build 2026.10.22.1 retires scheduled recovery tasks. Windows Start launches an ordinary guardian process, which recovers unexpectedly exited companions using bounded backoff and local diagnostics. No task, service or script host is created. Recovery lasts only while that user-launched supervisor remains alive; it is not independent of logout or the parent process. Deliberate Quit stays closed. A new manual Start launch deliberately resumes both companions.
+From 2026.11.24, Jira Overlay no longer uses scheduled recovery tasks. Windows Start launches an ordinary guardian process, which recovers unexpectedly exited companions using bounded backoff and local diagnostics. No task, service or script host is created. Recovery lasts only while that user-launched supervisor remains alive; it is not independent of logout or the parent process. Deliberate Quit stays closed. A new manual Start launch deliberately resumes both companions.
 
 New installs leave Windows startup and initial launch unchecked. Enabling startup requires explicit user/IT consent and creates an ordinary Run entry; that persistence remains visible to Defender. No zero-alert guarantee is made. Saving an unchanged startup preference does not rewrite it. A prior owned recovery task is removed only by the native installer's migration logic after validating its executable, script and working directory. Its definition is retained locally for review. No unrelated task is changed.
 
