@@ -81,8 +81,6 @@ from triage_jira import make_client
 try:
     import requests
     from requests.auth import HTTPBasicAuth
-    from PIL import Image, ImageDraw
-    import pystray
 except ImportError as _exc:
     # The overlay installs these on its first run; someone starting the
     # learner first would otherwise just get a process that dies instantly
@@ -97,7 +95,7 @@ except ImportError as _exc:
             f"{_exc}\n\nStart the overlay once and it will install what is "
             "needed, or install them by hand:\n\n"
             f'    "{_sys.executable}" -m pip install '
-            "requests Pillow pystray tzdata")
+            "requests tzdata")
         _root.destroy()
     except Exception:
         pass
@@ -3009,16 +3007,10 @@ class ShadowWatcher(bind_engine(Learner, TUNING, features_for, tokenize, BALANCE
 
 
 # ---------------------------------------------------------------------------
-# Tray icon + entry point
+# Entry point (headless: the overlay's tray icon is the only one)
 # ---------------------------------------------------------------------------
 
-def _tray_image() -> Image.Image:
-    img  = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-    d    = ImageDraw.Draw(img)
-    d.ellipse([4, 4, 124, 124], fill=(128, 90, 213))       # purple = learner
-    d.ellipse([40, 40, 88, 88], outline=(255, 255, 255), width=8)
-    d.line([64, 16, 64, 44], fill=(255, 255, 255), width=8)
-    return img
+OVERLAY_FOLLOW_SECONDS = 2
 
 
 def _report_fatal(message: str) -> None:
@@ -3077,29 +3069,17 @@ def main() -> None:
     worker = threading.Thread(target=watcher.run_forever, daemon=True)
     worker.start()
 
-    def _open_report() -> None:
-        if os.path.exists(REPORT_FILE):
-            open_in_default_or_notepad(REPORT_FILE)
-
-    def _quit(icon: pystray.Icon, reason="user-quit") -> None:
-        lifecycle.reason(reason, quit=reason == "user-quit")
-        watcher.stop.set()
-        icon.stop()
-
-    icon = pystray.Icon(
-        "TriageLearner", _tray_image(), "Triage Learner (shadow mode)",
-        pystray.Menu(
-            pystray.MenuItem("Open report", lambda: _open_report(), default=True),
-            pystray.MenuItem("Open log folder", lambda: os.startfile(_DIR)),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", _quit),
-        ))
-    updates.listen_for_update(_DIR, lambda: _quit(icon, "update"))
+    # No tray icon of its own. The learner follows the overlay: when the user
+    # quits the overlay, the learner records the same deliberate quit so the
+    # guardian does not relaunch it, and the next launch restarts both.
+    updates.listen_for_update(_DIR, lambda: (lifecycle.reason("update"), watcher.stop.set()))
     lifecycle.ready()
-    icon.run()
+    while not watcher.stop.wait(OVERLAY_FOLLOW_SECONDS):
+        if not lifecycle.wanted(_DIR, "overlay"):
+            lifecycle.reason("user-quit", quit=True)
+            watcher.stop.set()
     # Do not exit while a daemon writer is still learning or saving. The
     # updater waits for this process to end before replacing any code.
-    watcher.stop.set()
     worker.join()
     watcher._save_state()
 
