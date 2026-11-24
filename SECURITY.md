@@ -1,8 +1,8 @@
 # Security Policy
 
-## Security-review build and deployment hold
+## Security-hardened release and deployment hold
 
-Version 2026.10.22.1 is an unreleased security-review build. It removes scheduled
+Version 2026.11.24 is the security-hardened release. It removes scheduled
 task launching, background executable updates and temporary PowerShell installer
 helpers. Fresh installs default to no Windows startup and no initial launch.
 Existing incident holds must remain in place until explicit approval to resume.
