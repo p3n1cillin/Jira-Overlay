@@ -1,9 +1,9 @@
 name: Rust port
 on:
   push:
-    paths: ['rust/**', '.github/workflows/rust.yml']
+    paths: ['rust/**', 'installer/**', '.github/workflows/rust.yml']
   pull_request:
-    paths: ['rust/**', '.github/workflows/rust.yml']
+    paths: ['rust/**', 'installer/**', '.github/workflows/rust.yml']
 permissions:
   contents: read
 jobs:
@@ -18,3 +18,45 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+  native-installer:
+    needs: check
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'innosetup-6.6.1.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_6_1/innosetup-6.6.1.exe' -OutFile $download
+          if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne 'D243CE440C02705530699554FB9612B9B2BD7A2A90629CDB7F41E66F5FAEB91F') { throw 'Compiler SHA-256 mismatch' }
+          $folder = Join-Path $env:RUNNER_TEMP 'Jira-InnoCompiler'
+          $process = Start-Process -FilePath $download -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', ('/DIR="' + $folder + '"')) -WindowStyle Hidden -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw 'Compiler installation failed' }
+          "JIRA_ISCC=$folder\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Build native installer
+        run: python installer/build_installer_rust.py --compiler "$env:JIRA_ISCC"
+      - name: Download the published Python installer to upgrade from
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2026.11.24 --repo $env:GITHUB_REPOSITORY --pattern 'JiraOverlay-2026.11.24-Setup.exe*' --dir python-release
+          $expected = (Get-Content python-release/JiraOverlay-2026.11.24-Setup.exe.sha256).Split(' ')[0]
+          if ((Get-FileHash python-release/JiraOverlay-2026.11.24-Setup.exe -Algorithm SHA256).Hash -ne $expected) { throw 'Python installer SHA-256 mismatch' }
+      - name: Smoke test (Python upgrade, launch, stop, uninstall, fresh install)
+        shell: pwsh
+        run: |
+          $native = Get-ChildItem dist/native/JiraOverlay-*-Setup.exe
+          python installer/smoke_test_native.py $native.FullName python-release/JiraOverlay-2026.11.24-Setup.exe
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: native-installer
+          path: |
+            dist/native/*-Setup.exe
+            dist/native/*-Setup.exe.sha256
