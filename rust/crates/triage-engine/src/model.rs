@@ -165,8 +165,9 @@ impl Model {
             ),
         );
         let mut balance = Map::new();
-        balance.insert("actual".into(), floats(&self.route_balance.actual));
-        balance.insert("predicted".into(), floats(&self.route_balance.predicted));
+        // Python stores a route's first count as the int 1 until it decays.
+        balance.insert("actual".into(), ints(&self.route_balance.actual));
+        balance.insert("predicted".into(), ints(&self.route_balance.predicted));
         balance.insert("observations".into(), int_or_float(self.route_balance.observations));
         out.insert("routeBalance".into(), Value::Object(balance));
         out.insert("scale".into(), Value::from(self.scale));

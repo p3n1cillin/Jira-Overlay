@@ -16,6 +16,7 @@ regex = "1.13.2"
 serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.11.2"
 triage-engine = { version = "0.1.0", path = "../triage-engine" }
+tempfile = "3.27.0"
 zip = "9.8.2"
 
 [lints]
