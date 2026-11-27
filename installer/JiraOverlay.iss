@@ -31,7 +31,11 @@ WizardStyle=modern
 CloseApplications=no
 RestartApplications=no
 UninstallDisplayName=Jira Overlay
+#ifdef Native
+UninstallDisplayIcon={app}\JiraOverlay.exe
+#else
 UninstallDisplayIcon={app}\runtime\pythonw.exe
+#endif
 VersionInfoVersion={#AppVersion}
 LicenseFile={#StageDir}\LICENSE
 DisableReadyPage=yes
@@ -43,19 +47,44 @@ UninstallLogging=yes
 Name: startup; Description: "Start Jira Overlay and the learner when I sign in (requires IT approval)"; Flags: unchecked
 Name: importlegacy; Description: "Import settings from a separate old ZIP folder (optional)"; Flags: unchecked; Check: CanImportLegacy
 
+#ifdef Native
+[InstallDelete]
+; Upgrading a Python installation in place: retire its private runtime and
+; code. Only program files are listed; settings, models, history, reports and
+; backups are never touched. app_release.py is reinstalled as a version marker.
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\__pycache__"
+Type: files; Name: "{app}\*.pyw"
+Type: files; Name: "{app}\*.py"
+Type: files; Name: "{app}\launch.bat"
+Type: files; Name: "{app}\setup.bat"
+Type: files; Name: "{app}\setup.ps1"
+Type: files; Name: "{app}\update.bat"
+Type: files; Name: "{app}\requirements.txt"
+
+#endif
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "release-manifest.json"
 Source: "{#StageDir}\installer_helper.exe"; Flags: dontcopy
 
 [Icons]
+#ifdef Native
+; The AppUserModelID lets the native build show toasts as "Jira Overlay".
+Name: "{group}\Jira Overlay"; Filename: "{app}\JiraOverlay.exe"; WorkingDir: "{app}"; AppUserModelID: "JiraOverlay"; Check: MakeShortcuts
+#else
 Name: "{group}\Jira Overlay"; Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Check: MakeShortcuts
+#endif
 Name: "{group}\Uninstall Jira Overlay"; Filename: "{uninstallexe}"; Check: MakeShortcuts
 
 [INI]
 Filename: "{app}\.jira-overlay-install"; Section: "Install"; Key: "Application"; String: "JiraOverlay"
 
 [Run]
+#ifdef Native
+Filename: "{app}\JiraOverlay.exe"; WorkingDir: "{app}"; Description: "Launch Jira Overlay after IT approval"; Flags: nowait postinstall unchecked skipifsilent; Check: LaunchApplication
+#else
 Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\launch_installed.pyw"""; WorkingDir: "{app}"; Description: "Launch Jira Overlay after IT approval"; Flags: nowait postinstall unchecked skipifsilent; Check: LaunchApplication
+#endif
 
 [Code]
 var
@@ -129,6 +158,9 @@ begin
     '" -ResultFile "' + ErrorFile + '" -Version "{#AppVersion}"';
   if Source <> '' then Args := Args + ' -Source "' + Source + '"';
   if Startup then Args := Args + ' -EnableStartup';
+#ifdef Native
+  if Action = 'Finish' then Args := Args + ' -Native';
+#endif
   Result := ExecAndLogOutput(Script,
     Args, '', SW_HIDE, ewWaitUntilTerminated, Code, @HelperLog) and (Code = 0);
   if not Result then begin
@@ -146,7 +178,8 @@ var RunValue: String;
 begin
   Result := RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'JiraOverlay', RunValue)
     and ((Pos(Lowercase(Root + '\jira_overlay.pyw'), Lowercase(RunValue)) > 0) or
-         (Pos(Lowercase(Root + '\launch_installed.pyw'), Lowercase(RunValue)) > 0));
+         (Pos(Lowercase(Root + '\launch_installed.pyw'), Lowercase(RunValue)) > 0) or
+         (Pos(Lowercase('"' + Root + '\JiraOverlay.exe"'), Lowercase(RunValue)) > 0));
 end;
 
 procedure InitializeWizard;

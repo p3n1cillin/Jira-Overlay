@@ -19,6 +19,8 @@ public static class JiraInstaller {
     static string FailureCode = "JIRA-I100";
     static readonly string[] Names = {"JiraOverlay", "JiraTriageLearner"};
     static readonly string[] Scripts = {"jira_overlay.pyw", "triage_learner.pyw", "launch_installed.pyw"};
+    // The native (Rust) build: one executable for every role.
+    const string NativeExe = "JiraOverlay.exe";
     static readonly string[] Mutexes = {"JiraOverlaySingleInstance", "JiraTriageLearner", "JiraOverlayGuardian"};
     static readonly string[] Personal = {"jira_config.json", "triage_state.json", "triage_suggestions.json", "triage_status.json", "triage_reviews.json", "triage_history.jsonl", "triage_dataset.jsonl", "triage_log.jsonl", "triage_log.jsonl.metrics.json", "triage_learner.log", "TRIAGE_REPORT.md", "TRIAGE_REVIEW_QUEUE.md"};
     public static string Canonical(string path) {
@@ -118,7 +120,7 @@ public static class JiraInstaller {
         }
     }
     public static bool OwnedCommand(string command, string root) {
-        return command != null && Scripts.Any(script => command.IndexOf("\"" + Path.Combine(root, script) + "\"", StringComparison.OrdinalIgnoreCase) >= 0);
+        return command != null && Scripts.Concat(new[] {NativeExe}).Any(script => command.IndexOf("\"" + Path.Combine(root, script) + "\"", StringComparison.OrdinalIgnoreCase) >= 0);
     }
     public static void RemoveStartup(string[] roots, bool keepPrimary = false) {
         using (var key = Registry.CurrentUser.OpenSubKey(RunKey, true)) {
@@ -187,7 +189,7 @@ public static class JiraInstaller {
             var match = Regex.Match(File.ReadAllText(release),"(?m)^VERSION\\s*=\\s*\"([0-9.]+)\"");
             if (match.Success && new Version(match.Groups[1].Value) > new Version(version)) throw new IOException("Newer build already installed. Downgrade refused.");
         }
-        if (prepare && Directory.Exists(root) && Directory.GetFileSystemEntries(root).Length > 0 && !File.Exists(Path.Combine(root,".jira-overlay-install")) && !(File.Exists(Path.Combine(root,Scripts[0])) && File.Exists(Path.Combine(root,Scripts[1]))) && PersonalFiles(root).Length == 0)
+        if (prepare && Directory.Exists(root) && Directory.GetFileSystemEntries(root).Length > 0 && !File.Exists(Path.Combine(root,".jira-overlay-install")) && !(File.Exists(Path.Combine(root,Scripts[0])) && File.Exists(Path.Combine(root,Scripts[1]))) && !File.Exists(Path.Combine(root,NativeExe)) && PersonalFiles(root).Length == 0)
             throw new IOException("Destination is a non-empty unrelated folder.");
     }
     public static int Main(string[] arguments) {
@@ -197,7 +199,7 @@ public static class JiraInstaller {
             for (int i = 0; i < arguments.Length; i++) {
                 string key = arguments[i].TrimStart('-');
                 if (args.ContainsKey(key)) throw new ArgumentException("Repeated option.");
-                args[key] = key == "EnableStartup" ? "true" : arguments[++i];
+                args[key] = key == "EnableStartup" || key == "Native" ? "true" : arguments[++i];
             }
             resultFile = args.ContainsKey("ResultFile") ? args["ResultFile"] : "";
             string action = args["Action"];
@@ -220,7 +222,9 @@ public static class JiraInstaller {
                 bool enable = action == "Finish" && args.ContainsKey("EnableStartup");
                 RemoveStartup(roots,enable);
                 if (enable) {
-                    string command = "\"" + Path.Combine(root,@"runtime\pythonw.exe") + "\" \"" + Path.Combine(root,"launch_installed.pyw") + "\"";
+                    string command = args.ContainsKey("Native")
+                        ? "\"" + Path.Combine(root,NativeExe) + "\""
+                        : "\"" + Path.Combine(root,@"runtime\pythonw.exe") + "\" \"" + Path.Combine(root,"launch_installed.pyw") + "\"";
                     using (var key = Registry.CurrentUser.CreateSubKey(RunKey)) {
                         if (!Same(key.GetValue("JiraOverlay") as string,command)) key.SetValue("JiraOverlay",command,RegistryValueKind.String);
                     }

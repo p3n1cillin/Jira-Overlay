@@ -12,6 +12,8 @@ public static class HelperTest {
             else if (args[0] == "ownership") {
                 if (!JiraInstaller.OwnedCommand("\"pythonw\" \"" + args[1] + "\\launch_installed.pyw\"",args[1])) return 2;
                 if (JiraInstaller.OwnedCommand("\"pythonw\" \"C:\\OtherApp\\launch_installed.pyw\"",args[1])) return 3;
+                if (!JiraInstaller.OwnedCommand("\"" + args[1] + "\\JiraOverlay.exe\"",args[1])) return 5;
+                if (JiraInstaller.OwnedCommand("\"C:\\OtherApp\\JiraOverlay.exe\"",args[1])) return 6;
             } else return 4;
             return 0;
         } catch(Exception ex) { Console.Error.WriteLine(ex.Message); return 1; }

@@ -10,6 +10,7 @@ pub mod atomic;
 pub mod config;
 pub mod dpapi;
 pub mod errlog;
+pub mod guardian;
 pub mod ipc;
 pub mod jql;
 pub mod lifecycle;

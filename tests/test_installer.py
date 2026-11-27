@@ -65,6 +65,10 @@ with tempfile.TemporaryDirectory(prefix="jira-native-unit-") as directory:
     (new/"app_release.py").write_text('VERSION = "2099.01.01"')
     check("downgrades are rejected",run("validate",new,"2020.01.01").returncode!=0)
     check("startup ownership uses exact quoted application paths",run("ownership",new).returncode==0)
+    native=root/"Native"
+    native.mkdir()
+    (native/"JiraOverlay.exe").write_bytes(b"placeholder; never executed")
+    check("a native (Rust) installation is recognised, not refused as unrelated",run("validate",native).returncode==0)
     for mode in ("cooperative","legacy"):
         mutex="Local\\JiraHelperUnit-"+uuid.uuid4().hex
         ipc=root/mode
