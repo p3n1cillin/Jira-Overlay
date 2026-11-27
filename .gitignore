@@ -58,3 +58,7 @@ __pycache__/
 
 # Screenshots / debug artefacts
 *.png
+
+# Rust port
+rust/target/
+rust/tools/golden-local/

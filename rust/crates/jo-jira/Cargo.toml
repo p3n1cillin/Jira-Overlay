@@ -1,0 +1,17 @@
+[package]
+name = "jo-jira"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+chrono = "0.4.45"
+jo-core = { version = "0.1.0", path = "../jo-core" }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "native-tls"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
