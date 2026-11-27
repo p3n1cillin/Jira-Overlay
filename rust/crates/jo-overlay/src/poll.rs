@@ -25,6 +25,8 @@ const ISSUE_LIMIT: usize = 50;
 const ISSUE_PAGES: usize = 4;
 /// Alert-queue pulls run on this many dedicated clients.
 pub const PULL_WORKERS: usize = 4;
+/// The 5/20-working-day SLA trend is refreshed at most this often.
+pub const TREND_EVERY: Duration = Duration::from_secs(15 * 60);
 
 /// Builds a fresh HTTP transport (one connection pool per client).
 pub type MakeTransport = Arc<dyn Fn() -> Box<dyn Transport> + Send + Sync>;
@@ -72,9 +74,20 @@ impl Shared {
     }
 
     /// Write the overlay's keys (read-merge-write, see `jo_core::config::save`).
+    /// Settings newer than the shared key list are merged in explicitly:
+    /// the shared save would otherwise keep whatever copy is on disk.
     pub fn save(&self) {
         let cfg = self.config();
-        if let Err(err) = config::save(&self.config_path(), &cfg) {
+        let path = self.config_path();
+        let mut result = config::save(&path, &cfg);
+        let extra: Config = crate::settings::EXTRA_KEYS
+            .iter()
+            .filter_map(|k| cfg.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+            .collect();
+        if result.is_ok() && !extra.is_empty() {
+            result = config::save_keys(&path, &extra);
+        }
+        if let Err(err) = result {
             util::log_error(&self.root, &format!("Could not save the configuration: {err}"));
         }
     }
@@ -139,6 +152,11 @@ pub struct Poller {
     /// When completed/SLA stats were last fetched (`None`: never).
     pub last_full_fetch: Option<Instant>,
     pub sla_unavailable: bool,
+    /// Jira rejected the at-risk JQL (e.g. no `remaining()`): off until an
+    /// SLA setting changes.
+    pub at_risk_unavailable: bool,
+    /// When the SLA trend was last fetched (`None`: never / forced).
+    pub last_trend: Option<Instant>,
     emit: Box<dyn Fn(PollEvent) + Send>,
 }
 
@@ -155,6 +173,8 @@ impl Poller {
             retry_after: None,
             last_full_fetch: None,
             sla_unavailable: false,
+            at_risk_unavailable: false,
+            last_trend: None,
             emit,
         }
     }
@@ -292,6 +312,7 @@ impl Poller {
         }
 
         let alert_objs: Vec<&Queue> = every_queue.iter().filter(|q| alert_qs.contains(&q.name)).collect();
+        self.data.alert_queue_ids = alert_objs.iter().map(|q| (q.name.clone(), q.id.clone())).collect();
         // Missing means Jira really doesn't have it — never the user's filters.
         self.data.alert_queues_missing = if every_queue.is_empty() {
             Vec::new()
@@ -343,6 +364,8 @@ impl Poller {
             let out = stats::completion_stats(&cfg, stats::today(), &mut self.sla_unavailable, &|q| jira.count(q));
             self.data.completed_today = out.completed_today;
             self.data.sla_compliance = out.sla_compliance;
+            self.fetch_at_risk(&cfg);
+            self.fetch_trend(&cfg);
             self.last_full_fetch = Some(Instant::now());
         }
 
@@ -350,6 +373,66 @@ impl Poller {
         self.data.conn_error = false;
         self.error_count = 0;
         Ok(())
+    }
+
+    /// Slow path: open tickets whose SLA is about to breach. One search
+    /// request (keys for the "newly at risk" toast); a count only when
+    /// there is more than one page. A transient failure keeps the last
+    /// reading; a rejected query switches the warning off for the session.
+    fn fetch_at_risk(&mut self, cfg: &Config) {
+        let jql = match stats::sla_at_risk_jql(cfg) {
+            Some(jql) if !self.at_risk_unavailable && !self.sla_unavailable => jql,
+            _ => {
+                self.data.at_risk = None;
+                return;
+            }
+        };
+        let body = json!({"jql": jql, "fields": ["summary"], "maxResults": stats::AT_RISK_PAGE});
+        let timeout = Duration::from_secs(10);
+        match self.jira.send(Method::Post, jo_jira::SEARCH_PATHS[0], &[], Some(&body), timeout, Retry::Once) {
+            Ok(r) if r.ok() => {
+                if let Some((mut risk, more)) = r.json().as_ref().and_then(stats::parse_at_risk) {
+                    if more && let Some(n) = self.jira.count(&jql).0 {
+                        risk.count = n.max(risk.count);
+                    }
+                    self.data.at_risk = Some(risk);
+                }
+            }
+            Ok(r) if r.status == 400 => {
+                self.at_risk_unavailable = true;
+                self.data.at_risk = None;
+                let detail = String::from_utf8_lossy(&r.body);
+                util::log_error(
+                    &self.shared.root,
+                    &format!(
+                        "Jira rejected the SLA at-risk query (HTTP 400); the warning is off until SLA settings change.
+JQL: {jql}
+{}",
+                        util::take_chars(&detail, 400)
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Slow path, cached: 5/20-working-day SLA % (at most four counts per
+    /// refresh, at most every 15 minutes).
+    fn fetch_trend(&mut self, cfg: &Config) {
+        if !stats::sla_wanted(cfg) || config::get_str(cfg, "projectKey", "").is_empty() {
+            self.data.sla_trend = None;
+            return;
+        }
+        if self.last_trend.is_some_and(|t| t.elapsed() < TREND_EVERY) {
+            return;
+        }
+        let jira = &self.jira;
+        let trend = stats::sla_trend(cfg, stats::today(), &mut self.sla_unavailable, &|q| jira.count(q));
+        // A failed refresh keeps the previous figures rather than blanking them.
+        if trend.is_some_and(|t| t.five.is_some() || t.twenty.is_some()) || self.data.sla_trend.is_none() {
+            self.data.sla_trend = trend;
+        }
+        self.last_trend = Some(Instant::now());
     }
 
     /// Pull each busy queue on a fixed pool of dedicated clients, at most
@@ -416,6 +499,15 @@ impl Poller {
         }
     }
 
+    /// Settings changed: stats (trend included) refresh on the next poll and
+    /// an SLA change drops the "Jira rejected it" latches.
+    fn settings_saved(&mut self, reset_sla: bool) {
+        self.sla_unavailable &= !reset_sla;
+        self.at_risk_unavailable &= !reset_sla;
+        self.last_full_fetch = None;
+        self.last_trend = None;
+    }
+
     /// Run until [`PollCmd::Quit`] or the UI goes away.
     pub fn run(mut self, commands: Receiver<PollCmd>) {
         loop {
@@ -429,7 +521,7 @@ impl Poller {
                 match commands.try_recv() {
                     Ok(PollCmd::Refresh) => {}
                     Ok(PollCmd::SettingsSaved { reset_sla }) => {
-                        self.sla_unavailable &= !reset_sla;
+                        self.settings_saved(reset_sla);
                         settings_changed = true;
                     }
                     Ok(PollCmd::Quit) | Err(TryRecvError::Disconnected) => return,
@@ -445,7 +537,7 @@ impl Poller {
             };
             match commands.recv_timeout(delay) {
                 Ok(PollCmd::Refresh) | Err(RecvTimeoutError::Timeout) => {}
-                Ok(PollCmd::SettingsSaved { reset_sla }) => self.sla_unavailable &= !reset_sla,
+                Ok(PollCmd::SettingsSaved { reset_sla }) => self.settings_saved(reset_sla),
                 Ok(PollCmd::Quit) | Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -540,7 +632,7 @@ pub fn spawn(poller: Poller) -> Sender<PollCmd> {
 mod tests {
     use super::*;
     use crate::testing::{FakeJira, ok_json};
-    use jo_jira::Response;
+    use jo_jira::{Request, Response};
     use std::sync::Barrier;
 
     fn base() -> Config {
@@ -799,7 +891,7 @@ mod tests {
         let mut cfg = base();
         cfg.insert("alertQueues".into(), json!(["Q"]));
         let mut r = rig(cfg, &fake);
-        let kept = vec![Issue { key: "SD-1".into(), summary: None, queue: "Q".into() }];
+        let kept = vec![Issue::new("SD-1", None, "Q")];
         r.poller.data.new_issues = kept.clone();
         r.poller.fetch_cycle();
         assert_eq!(r.poller.data.new_issues, kept);
@@ -979,6 +1071,149 @@ mod tests {
         assert_eq!(counted(), 1);
         r.poller.fetch_cycle();
         assert_eq!(counted(), 1, "stats wait for refreshSeconds");
+    }
+
+    /// Queue list + one alert queue, counts, and an at-risk search page.
+    fn slow_path_jira(at_risk: Value) -> FakeJira {
+        FakeJira::new(move |req| {
+            if req.url.ends_with("approximate-count") {
+                ok_json(json!({"count": 9}))
+            } else if req.url.ends_with("/search/jql") {
+                ok_json(at_risk.clone())
+            } else if req.url.contains("/issue") {
+                ok_json(json!({"values": [{"issueKey": "SD-1"}]}))
+            } else {
+                ok_json(json!({"values": [{"name": "Open", "id": 4, "issueCount": 1}]}))
+            }
+        })
+    }
+
+    fn alerting() -> Config {
+        let mut cfg = base();
+        cfg.insert("alertQueues".into(), json!(["Open"]));
+        cfg.insert("alertQueuesAsked".into(), json!(true));
+        cfg
+    }
+
+    #[test]
+    fn at_risk_and_trend_ride_the_slow_path_only() {
+        let fake = slow_path_jira(json!({"issues": [{"key": "SD-7", "fields": {"summary": "VPN"}}], "isLast": true}));
+        let mut r = rig(alerting(), &fake);
+        r.poller.fetch_cycle();
+        assert!(fake.requests().iter().all(|q| !q.url.contains("/search/")), "the 5 s poll gains nothing");
+        assert!(r.poller.data.at_risk.is_none() && r.poller.data.sla_trend.is_none());
+        assert_eq!(r.poller.data.alert_queue_ids["Open"], "4");
+
+        r.poller.last_full_fetch = None;
+        let before = fake.requests().len();
+        r.poller.fetch_cycle();
+        let slow: Vec<Request> = fake.requests()[before..].to_vec();
+        let searches: Vec<&Request> = slow.iter().filter(|q| q.url.ends_with("/search/jql")).collect();
+        assert_eq!(searches.len(), 1, "one at-risk search; no count while the page is complete");
+        let body = searches[0].body.as_ref().unwrap();
+        assert_eq!(body["jql"], stats::sla_at_risk_jql(&alerting()).unwrap());
+        assert_eq!(body["fields"], json!(["summary"]), "only the summary is fetched");
+        let counts = slow.iter().filter(|q| q.url.ends_with("approximate-count")).count();
+        assert_eq!(counts, 2 + 4, "completed + SLA, then the four trend counts");
+        let risk = r.poller.data.at_risk.clone().unwrap();
+        assert_eq!((risk.count, risk.tickets[0].0.as_str()), (1, "SD-7"));
+        assert!(r.poller.data.sla_trend.is_some());
+
+        // The next slow refresh within 15 minutes reuses the trend.
+        r.poller.last_full_fetch = None;
+        let before = fake.requests().len();
+        r.poller.fetch_cycle();
+        let counts = fake.requests()[before..].iter().filter(|q| q.url.ends_with("approximate-count")).count();
+        assert_eq!(counts, 2, "trend cached");
+        r.poller.last_trend = Some(Instant::now() - TREND_EVERY);
+        r.poller.last_full_fetch = None;
+        let before = fake.requests().len();
+        r.poller.fetch_cycle();
+        let counts = fake.requests()[before..].iter().filter(|q| q.url.ends_with("approximate-count")).count();
+        assert_eq!(counts, 6, "refreshed after 15 minutes");
+    }
+
+    #[test]
+    fn at_risk_counts_beyond_one_page() {
+        let fake = slow_path_jira(json!({"issues": [{"key": "SD-1"}], "nextPageToken": "next", "isLast": false}));
+        let mut r = rig(alerting(), &fake);
+        r.poller.last_full_fetch = None;
+        r.poller.fetch_cycle();
+        assert_eq!(r.poller.data.at_risk.as_ref().unwrap().count, 9, "the total comes from a count");
+    }
+
+    #[test]
+    fn a_rejected_at_risk_query_switches_the_warning_off() {
+        let fake = FakeJira::new(|req| {
+            if req.url.ends_with("/search/jql") {
+                Ok(Response {
+                    status: 400,
+                    retry_after: None,
+                    body: br#"{"errorMessages":["remaining() unknown"]}"#.to_vec(),
+                })
+            } else if req.url.ends_with("approximate-count") {
+                ok_json(json!({"count": 3}))
+            } else {
+                ok_json(json!({"values": []}))
+            }
+        });
+        let mut r = rig(base(), &fake);
+        r.poller.last_full_fetch = None;
+        r.poller.fetch_cycle();
+        assert!(r.poller.at_risk_unavailable && r.poller.data.at_risk.is_none());
+        assert!(r.poller.data.error_msg.is_none(), "never an error for the whole overlay");
+        let log = std::fs::read_to_string(r._dir.path().join(util::ERROR_LOG)).unwrap();
+        assert!(log.contains("remaining() unknown") && log.contains("= running()"), "{log}");
+        r.poller.last_full_fetch = None;
+        let before = fake.requests().len();
+        r.poller.fetch_cycle();
+        assert!(!fake.requests()[before..].iter().any(|q| q.url.ends_with("/search/jql")), "not asked again");
+        r.poller.settings_saved(true);
+        assert!(!r.poller.at_risk_unavailable && r.poller.last_full_fetch.is_none() && r.poller.last_trend.is_none());
+
+        // A transient failure keeps the last reading.
+        let fake = FakeJira::new(|req| {
+            if req.url.ends_with("/search/jql") {
+                Ok(Response { status: 503, ..Default::default() })
+            } else {
+                ok_json(json!({"values": [], "count": 1}))
+            }
+        });
+        let mut r = rig(base(), &fake);
+        let kept = crate::model::AtRisk { count: 2, tickets: vec![("SD-1".into(), None), ("SD-2".into(), None)] };
+        r.poller.data.at_risk = Some(kept.clone());
+        r.poller.last_full_fetch = None;
+        r.poller.fetch_cycle();
+        assert_eq!(r.poller.data.at_risk, Some(kept));
+        assert!(!r.poller.at_risk_unavailable);
+
+        // Switched off: nothing asked, nothing shown.
+        let mut cfg = base();
+        cfg.insert("slaAtRiskMinutes".into(), json!(0));
+        let fake = slow_path_jira(json!({"issues": []}));
+        let mut r = rig(cfg, &fake);
+        r.poller.data.at_risk = Some(crate::model::AtRisk::default());
+        r.poller.last_full_fetch = None;
+        r.poller.fetch_cycle();
+        assert!(r.poller.data.at_risk.is_none());
+        assert!(!fake.requests().iter().any(|q| q.url.ends_with("/search/jql")));
+    }
+
+    #[test]
+    fn newer_settings_persist_through_the_shared_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Shared::new(dir.path(), base());
+        shared.update(|c| c.insert("theme".into(), json!("Light")));
+        shared.save();
+        shared.update(|c| c.insert("theme".into(), json!("Dark")));
+        shared.update(|c| c.insert("slaAtRiskMinutes".into(), json!(15)));
+        shared.save();
+        let saved = config::load(&shared.config_path()).unwrap();
+        assert_eq!(saved["theme"], "Dark", "a second change is written, not the first copy on disk");
+        assert_eq!(saved["slaAtRiskMinutes"], 15);
+        assert_eq!(saved["token"], "t");
+        let raw = std::fs::read_to_string(shared.config_path()).unwrap();
+        assert!(!raw.contains("\"token\""), "the token still never lands in plain text");
     }
 
     #[test]

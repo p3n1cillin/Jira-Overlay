@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::alerts::{self, SeenSet};
 use crate::learner::Suggestions;
+use crate::links;
 use crate::model::Snapshot;
 use crate::placement;
 use crate::platform::Platform;
@@ -65,7 +66,18 @@ pub struct OverlayState {
     pub empty_note: Option<&'static str>,
     pub status: (String, Tone),
     pub done_text: String,
+    /// `"✓  5 done"`: the same figure when the row also carries at-risk.
+    pub done_short: String,
     pub sla: Option<(String, Tone)>,
+    /// `"5d 94% · 20d 95%"` beside today's SLA %, once fetched.
+    pub sla_trend: Option<String>,
+    /// `"⚠ 3 at risk"` while any open ticket's SLA is about to breach.
+    pub at_risk: Option<String>,
+    /// At-risk keys from the last reading (`None` before the first, which
+    /// never toasts).
+    at_risk_seen: Option<HashSet<String>>,
+    /// Tickets that arrived while snoozed, in arrival order.
+    pub snoozed_arrivals: Vec<String>,
     prev_counts: HashMap<String, u64>,
     pub flashes: HashMap<String, Instant>,
     pub seen: SeenSet,
@@ -104,7 +116,12 @@ impl OverlayState {
             empty_note: None,
             status: ("Connecting…".into(), Tone::Dim),
             done_text: "✓  Completed today — —".into(),
+            done_short: "✓  — done".into(),
             sla: None,
+            sla_trend: None,
+            at_risk: None,
+            at_risk_seen: None,
+            snoozed_arrivals: Vec::new(),
             prev_counts: HashMap::new(),
             flashes: HashMap::new(),
             seen: SeenSet::default(),
@@ -202,21 +219,38 @@ impl OverlayState {
         let snoozed = self.is_snoozed();
         // The first poll never alerts: everything in the queue is "new" then.
         let has_new_alert = !truly_new.is_empty() && self.prev_newly.is_some();
+        let notify = config::truthy(&cfg, "notificationsEnabled", true);
         if has_new_alert && !snoozed {
             let (summaries, queues) = alerts::lookups(&self.snap.new_issues);
             let (title, body) = alerts::compose_alert(&truly_new, &summaries, &queues, &self.suggestions);
-            if config::truthy(&cfg, "notificationsEnabled", true) {
-                platform.toast(&title, &body);
+            if notify {
+                let open = match truly_new.as_slice() {
+                    [key] => links::ticket(&cfg, key),
+                    _ => self.queue_link(&cfg, &truly_new),
+                };
+                platform.toast(&title, &body, Some(&open));
             }
             if config::truthy(&cfg, "soundEnabled", true) {
                 platform.beep();
             }
+        } else if has_new_alert {
+            // Snoozed: no individual alerts, but remembered for the catch-up.
+            for key in truly_new {
+                if !self.snoozed_arrivals.contains(&key) {
+                    self.snoozed_arrivals.push(key);
+                }
+            }
+        }
+        if !snoozed && !self.snoozed_arrivals.is_empty() {
+            self.snooze_catch_up(&cfg, notify, platform);
         }
         self.prev_newly = Some(newly_count);
         self.last_refresh = Some(now);
 
         let day = stats::working_day_window(stats::today(), stats::weekends_off(&cfg)).1;
         self.done_text = format!("✓  Completed {day} — {}", self.snap.completed_today);
+        let suffix = if day == "today" { String::new() } else { format!(" {day}") };
+        self.done_short = format!("✓  {} done{suffix}", self.snap.completed_today);
         self.sla = self.snap.sla_compliance.map(|pct| {
             let tone = if pct >= 95 {
                 Tone::Ok
@@ -227,6 +261,8 @@ impl OverlayState {
             };
             (format!("SLA {pct}%"), tone)
         });
+        self.sla_trend = self.sla.as_ref().and(self.snap.sla_trend.as_ref()).map(stats::trend_text);
+        self.at_risk_update(&cfg, notify && !snoozed, platform);
 
         let tray_queue = tray_queue(&cfg);
         let wanted = tray_queue.to_lowercase();
@@ -263,6 +299,53 @@ impl OverlayState {
                 }
             }
         }
+    }
+
+    /// The Jira queue holding the first of `keys`, else the desk's queues.
+    fn queue_link(&self, cfg: &Config, keys: &[String]) -> String {
+        let queue = keys
+            .iter()
+            .find_map(|k| self.snap.new_issues.iter().find(|i| &i.key == k))
+            .and_then(|i| self.snap.alert_queue_ids.get(&i.queue));
+        match queue {
+            Some(id) => links::queue(cfg, id),
+            None => links::desk(cfg),
+        }
+    }
+
+    /// The snooze ended: one summary toast for the tickets that arrived
+    /// meanwhile and are still waiting (never individual alerts).
+    fn snooze_catch_up(&mut self, cfg: &Config, notify: bool, platform: &dyn Platform) {
+        let present: HashSet<&str> = self.snap.new_issues.iter().map(|i| i.key.as_str()).collect();
+        let arrivals = std::mem::take(&mut self.snoozed_arrivals);
+        let waiting: Vec<String> = arrivals.into_iter().filter(|k| present.contains(k.as_str())).collect();
+        if waiting.is_empty() || !notify {
+            return;
+        }
+        let (summaries, _) = alerts::lookups(&self.snap.new_issues);
+        let (title, body) = alerts::compose_catch_up(&waiting, &summaries);
+        platform.toast(&title, &body, Some(&self.queue_link(cfg, &waiting)));
+    }
+
+    /// The "⚠ n at risk" label, and a toast for tickets newly at risk.
+    fn at_risk_update(&mut self, cfg: &Config, may_toast: bool, platform: &dyn Platform) {
+        let Some(risk) = &self.snap.at_risk else {
+            self.at_risk = None;
+            self.at_risk_seen = None;
+            return;
+        };
+        self.at_risk = (risk.count > 0).then(|| format!("⚠ {} at risk", risk.count));
+        let keys: HashSet<String> = risk.tickets.iter().map(|(k, _)| k.clone()).collect();
+        if let Some(previous) = &self.at_risk_seen {
+            let newly: Vec<(String, Option<String>)> =
+                risk.tickets.iter().filter(|(k, _)| !previous.contains(k)).cloned().collect();
+            if !newly.is_empty() && may_toast && config::truthy(cfg, "slaAtRiskToast", true) {
+                let (title, body) = alerts::compose_at_risk(&newly, stats::at_risk_minutes(cfg));
+                let open = stats::sla_at_risk_jql(cfg).map(|jql| links::jql(cfg, &jql));
+                platform.toast(&title, &body, open.as_deref());
+            }
+        }
+        self.at_risk_seen = Some(keys);
     }
 
     fn set_tray(&mut self, state: TrayState) {
@@ -456,10 +539,7 @@ mod tests {
                 .map(|(i, (n, c))| Queue { name: (*n).into(), id: i.to_string(), issue_count: *c })
                 .collect(),
             all_queue_names: queues.iter().map(|(n, _)| (*n).into()).collect(),
-            new_issues: issues
-                .iter()
-                .map(|k| Issue { key: (*k).into(), summary: Some(format!("about {k}")), queue: "Open".into() })
-                .collect(),
+            new_issues: issues.iter().map(|k| Issue::new(k, Some(&format!("about {k}")), "Open")).collect(),
             alert_count,
             completed_today: 5,
             sla_compliance: Some(98),
@@ -528,10 +608,155 @@ mod tests {
         assert!(s.status.0.starts_with("Snoozed until ") && s.status.1 == Tone::Warn);
         s.snap = snap(&[("Open", 2)], &["SD-1", "SD-2"], 2);
         s.update_ui(now, &p);
-        assert!(p.with(|r| r.toasts.is_empty()), "no toast while snoozed");
+        assert!(p.with(|r| r.toasts.is_empty() && r.beeps == 0), "no toast or sound while snoozed");
+        assert_eq!(s.snoozed_arrivals, ["SD-2"], "but the arrival is remembered");
         s.cancel_snooze(now, &p);
-        assert!(p.with(|r| r.toasts.is_empty()), "tickets that arrived during snooze aren't notified later");
+        assert_eq!(
+            p.with(|r| r.toasts.clone()),
+            [("Jira — 1 ticket arrived while snoozed".into(), "SD-2: about SD-2".into())],
+            "one catch-up summary, never the individual alert"
+        );
+        assert_eq!(p.with(|r| r.beeps), 0);
+        assert!(s.snoozed_arrivals.is_empty());
+        s.update_ui(now, &p);
+        assert_eq!(p.with(|r| r.toasts.len()), 1, "the catch-up fires once");
         assert!(s.show_at.is_some());
+    }
+
+    #[test]
+    fn snooze_expiry_catches_up_on_tickets_still_waiting() {
+        let (mut s, _d) = state(json!({"alertQueues": ["Open"], "domain": "e.atlassian.net", "projectKey": "SD"}));
+        let p = FakePlatform::default();
+        let now = Instant::now();
+        s.snap = snap(&[("Open", 0)], &[], 0);
+        s.snap.alert_queue_ids.insert("Open".into(), "7".into());
+        s.update_ui(now, &p);
+        s.snooze(15, now, &p);
+        let ids = s.snap.alert_queue_ids.clone();
+        for keys in [&["SD-1"][..], &["SD-1", "SD-2"], &["SD-2", "SD-3", "SD-4", "SD-5"]] {
+            s.snap = snap(&[("Open", keys.len() as u64)], keys, keys.len() as u64);
+            s.snap.alert_queue_ids = ids.clone();
+            s.update_ui(now, &p);
+        }
+        assert!(p.with(|r| r.toasts.is_empty()));
+        // The snooze runs out on its own; SD-1 was handled meanwhile.
+        s.snooze_until = Some(Local::now() - chrono::Duration::seconds(1));
+        s.update_ui(now, &p);
+        let toasts = p.with(|r| r.toasts.clone());
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].0, "Jira — 4 tickets arrived while snoozed");
+        assert_eq!(toasts[0].1, "SD-2: about SD-2\nSD-3: about SD-3\nSD-4: about SD-4\n…and 1 more");
+        assert_eq!(
+            p.with(|r| r.toast_urls.clone()),
+            [Some("https://e.atlassian.net/jira/servicedesk/projects/SD/queues/custom/7".into())],
+            "clicking it opens the alert queue"
+        );
+
+        // Nothing still waiting: no catch-up at all.
+        let p = FakePlatform::default();
+        s.snooze(15, now, &p);
+        s.snap = snap(&[("Open", 5)], &["SD-2", "SD-3", "SD-4", "SD-5", "SD-9"], 5);
+        s.update_ui(now, &p);
+        s.snap = snap(&[("Open", 0)], &[], 0);
+        s.cancel_snooze(now, &p);
+        assert!(p.with(|r| r.toasts.is_empty()));
+    }
+
+    #[test]
+    fn toasts_open_the_ticket_or_the_queue() {
+        let (mut s, _d) = state(json!({"alertQueues": ["Open"], "domain": "e.atlassian.net", "projectKey": "SD"}));
+        let p = FakePlatform::default();
+        let now = Instant::now();
+        s.snap = snap(&[("Open", 0)], &[], 0);
+        s.update_ui(now, &p);
+        s.snap = snap(&[("Open", 1)], &["SD-1"], 1);
+        s.update_ui(now, &p);
+        s.snap = snap(&[("Open", 3)], &["SD-1", "SD-2", "SD-3"], 3);
+        s.snap.alert_queue_ids.insert("Open".into(), "12".into());
+        s.update_ui(now, &p);
+        assert_eq!(
+            p.with(|r| r.toast_urls.clone()),
+            [
+                Some("https://e.atlassian.net/browse/SD-1".into()),
+                Some("https://e.atlassian.net/jira/servicedesk/projects/SD/queues/custom/12".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn at_risk_label_and_toasts() {
+        use crate::model::AtRisk;
+        let risk = |keys: &[&str]| AtRisk {
+            count: keys.len() as u64,
+            tickets: keys.iter().map(|k| ((*k).to_owned(), Some(format!("about {k}")))).collect(),
+        };
+        let (mut s, _d) = state(json!({"domain": "e.atlassian.net", "projectKey": "SD"}));
+        let p = FakePlatform::default();
+        let now = Instant::now();
+        s.snap.at_risk = Some(risk(&["SD-1"]));
+        s.update_ui(now, &p);
+        assert_eq!(s.at_risk.as_deref(), Some("⚠ 1 at risk"));
+        assert!(p.with(|r| r.toasts.is_empty()), "already at risk at start-up: no toast");
+        s.snap.at_risk = Some(risk(&["SD-1", "SD-2"]));
+        s.update_ui(now, &p);
+        assert_eq!(s.at_risk.as_deref(), Some("⚠ 2 at risk"));
+        assert_eq!(
+            p.with(|r| r.toasts.clone()),
+            [("SLA at risk — SD-2".into(), "about SD-2\nUnder 30 min of SLA left".into())]
+        );
+        let url = p.with(|r| r.toast_urls[0].clone()).unwrap();
+        assert!(
+            url.starts_with("https://e.atlassian.net/issues/?jql=project%20%3D%20SD%20AND%20statusCategory"),
+            "{url}"
+        );
+        assert!(url.contains("remaining%28%2230m%22%29"), "{url}");
+        s.update_ui(now, &p);
+        assert_eq!(p.with(|r| r.toasts.len()), 1, "the same tickets don't toast again");
+        s.snap.at_risk = Some(risk(&[]));
+        s.update_ui(now, &p);
+        assert_eq!(s.at_risk, None, "nothing at risk, no label");
+        s.snap.at_risk = None;
+        s.update_ui(now, &p);
+        assert_eq!(s.at_risk, None);
+
+        // The toast can be switched off on its own, and snoozing silences it.
+        for extra in [json!({"slaAtRiskToast": false}), json!({"notificationsEnabled": false})] {
+            let mut c = json!({"projectKey": "SD"});
+            c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let (mut s, _d) = state(c);
+            let p = FakePlatform::default();
+            s.snap.at_risk = Some(risk(&[]));
+            s.update_ui(now, &p);
+            s.snap.at_risk = Some(risk(&["SD-5"]));
+            s.update_ui(now, &p);
+            assert!(p.with(|r| r.toasts.is_empty()) && s.at_risk.is_some());
+        }
+        let (mut s, _d) = state(json!({"projectKey": "SD"}));
+        let p = FakePlatform::default();
+        s.snap.at_risk = Some(risk(&[]));
+        s.update_ui(now, &p);
+        s.snooze(15, now, &p);
+        s.snap.at_risk = Some(risk(&["SD-5"]));
+        s.update_ui(now, &p);
+        s.cancel_snooze(now, &p);
+        assert!(p.with(|r| r.toasts.is_empty()), "at risk while snoozed: no toast, then or later");
+    }
+
+    #[test]
+    fn sla_trend_text_follows_the_sla_figure() {
+        use crate::model::SlaTrend;
+        let (mut s, _d) = state(json!({}));
+        let p = FakePlatform::default();
+        s.snap.sla_compliance = Some(97);
+        s.snap.sla_trend = Some(SlaTrend { five: Some(94), twenty: Some(95) });
+        s.update_ui(Instant::now(), &p);
+        assert_eq!(s.sla_trend.as_deref(), Some("5d 94% · 20d 95%"));
+        s.snap.sla_compliance = None;
+        s.update_ui(Instant::now(), &p);
+        assert_eq!(s.sla_trend, None, "no SLA figure, no trend");
+        s.snap.completed_today = 12;
+        s.update_ui(Instant::now(), &p);
+        assert_eq!(s.done_short, "✓  12 done");
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //!
 //! Port of `jira_overlay.pyw`. The UI-free core (`poll`, `state`, `alerts`,
 //! `stats`, `report`, `settings`, `placement`, `learner`, `toast`,
-//! `tray_image`, `updates_ui`) carries the behaviour; `app`, `view`,
-//! `windows`, `tray` and `setup` are the egui shell around it.
+//! `tray_image`, `updates_ui`, `links`, `preview`, `hotkey`) carries the
+//! behaviour; `app`, `view`, `windows`, `tray` and `setup` are the egui
+//! shell around it.
 
 use std::cell::Cell;
 use std::os::windows::process::CommandExt;
@@ -17,11 +18,14 @@ use jo_core::lifecycle::{self, Session};
 
 pub mod alerts;
 pub mod app;
+pub mod hotkey;
 pub mod learner;
+pub mod links;
 pub mod model;
 pub mod placement;
 pub mod platform;
 pub mod poll;
+pub mod preview;
 pub mod report;
 pub mod settings;
 pub mod setup;
@@ -75,7 +79,7 @@ impl eframe::App for Shell<'_> {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::c::BG.to_normalized_gamma_f32()
+        theme::c::bg().to_normalized_gamma_f32()
     }
 }
 
@@ -140,8 +144,14 @@ pub fn run(root: &Path, session: &Session) -> Result<Exit, String> {
                 cfg,
                 services,
                 Box::new(move |reason, quit| session.reason(reason, quit)),
-                app::Options { hwnd, tray: true, poller: true },
+                app::Options { hwnd, tray: true, poller: true, hotkey: true },
             );
+            // Clicked toasts open on the UI thread (domain-checked there).
+            let (tx, waker) = (app.tx.clone(), app.waker.clone());
+            windows_platform.set_toast_activation(Arc::new(move |url| {
+                let _ = tx.send(UiEvent::OpenUrl(url));
+                waker();
+            }));
             session.ready();
             start_background(root, &app);
             Ok(Box::new(Shell { app, exit: shell_exit }))

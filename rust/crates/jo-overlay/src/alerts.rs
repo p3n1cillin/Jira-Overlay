@@ -44,6 +44,14 @@ pub fn suggestion(suggestions: &Map<String, Value>, key: &str) -> Option<(String
     Some((util::py_str(label), util::truthy(entry.get("review"))))
 }
 
+/// The short inline hint for a learner label: `"→ With DEV · 92%"` (the
+/// "because" reasons dropped), or `"⚠ review — likely …"` for a review.
+pub fn suggestion_hint(label: &str, review: bool) -> String {
+    let core = label.split(" — because:").next().unwrap_or(label).trim();
+    let core = if core.chars().count() > 48 { format!("{}…", util::take_chars(core, 48)) } else { core.to_owned() };
+    if review { format!("⚠\u{FE0E} {core}") } else { format!("→ {core}") }
+}
+
 /// Title/body for a new-ticket toast (Python `_compose_alert`). `truly_new`
 /// keeps the order tickets were seen in.
 pub fn compose_alert(
@@ -99,6 +107,44 @@ pub fn compose_alert(
     (title, lines.join("\n"))
 }
 
+/// One `KEY: summary` line (summary cut at 60), or the bare key.
+fn key_line(key: &str, summary: Option<&str>) -> String {
+    match summary.filter(|s| !s.is_empty()) {
+        Some(summary) => format!("{key}: {}", util::take_chars(summary, 60)),
+        None => key.to_owned(),
+    }
+}
+
+/// The one toast after a snooze: how many arrived, and up to three keys.
+pub fn compose_catch_up(keys: &[String], summaries: &HashMap<String, String>) -> (String, String) {
+    let n = keys.len();
+    let title = format!("Jira — {n} {} arrived while snoozed", if n == 1 { "ticket" } else { "tickets" });
+    let mut lines: Vec<String> =
+        keys.iter().take(3).map(|k| key_line(k, summaries.get(k).map(String::as_str))).collect();
+    if n > 3 {
+        lines.push(format!("…and {} more", n - 3));
+    }
+    (title, lines.join("\n"))
+}
+
+/// Toast for tickets whose SLA newly has under `minutes` left.
+pub fn compose_at_risk(newly: &[(String, Option<String>)], minutes: i64) -> (String, String) {
+    let left = format!("Under {minutes} min of SLA left");
+    if let [(key, summary)] = newly {
+        let body = match summary.as_deref().filter(|s| !s.is_empty()) {
+            Some(summary) => format!("{}\n{left}", util::take_chars(summary, 120)),
+            None => left,
+        };
+        return (format!("SLA at risk — {key}"), body);
+    }
+    let mut lines: Vec<String> = newly.iter().take(3).map(|(k, s)| key_line(k, s.as_deref())).collect();
+    if newly.len() > 3 {
+        lines.push(format!("…and {} more", newly.len() - 3));
+    }
+    lines.push(left);
+    (format!("SLA at risk — {} tickets", newly.len()), lines.join("\n"))
+}
+
 /// Toast inputs from the fetched tickets: `(summaries, queues_by_key)`.
 pub fn lookups(issues: &[Issue]) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut summaries = HashMap::new();
@@ -135,15 +181,36 @@ pub fn short_summary(issue: &Issue) -> String {
 }
 
 /// What the alert popup lists: queue headers, at most 15 ticket rows and an
-/// overflow line.
+/// overflow line. `detail` is `"2h · Sam Carter"` when Jira sent either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PopupLine {
     Header(String),
-    Ticket { key: String, summary: String, suggestion: Option<(String, bool)> },
+    Ticket {
+        key: String,
+        summary: String,
+        detail: Option<String>,
+        suggestion: Option<(String, bool)>,
+    },
     More(usize),
+    /// A dim one-line note ("Loading…").
+    Note(String),
+}
+
+/// `"2h · Sam Carter"` from a ticket's age and assignee, if any.
+pub fn detail_text(age: Option<&str>, assignee: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = [age, assignee].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 pub fn popup_lines(issues: &[Issue], suggestions: &Map<String, Value>) -> Vec<PopupLine> {
+    popup_lines_at(issues, suggestions, chrono::Utc::now())
+}
+
+pub fn popup_lines_at(
+    issues: &[Issue],
+    suggestions: &Map<String, Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PopupLine> {
     let (groups, multi) = group_by_queue(issues);
     let mut lines = Vec::new();
     let mut shown = 0;
@@ -155,10 +222,12 @@ pub fn popup_lines(issues: &[Issue], suggestions: &Map<String, Value>) -> Vec<Po
             if shown >= 15 {
                 break;
             }
+            let age = issue.created.as_deref().and_then(|c| crate::preview::age_text(c, now));
             lines.push(PopupLine::Ticket {
                 key: issue.key.clone(),
                 summary: short_summary(issue),
-                suggestion: suggestion(suggestions, &issue.key),
+                detail: detail_text(age.as_deref(), issue.assignee.as_deref()),
+                suggestion: suggestion(suggestions, &issue.key).map(|(l, r)| (suggestion_hint(&l, r), r)),
             });
             shown += 1;
         }
@@ -176,7 +245,7 @@ mod tests {
     use serde_json::json;
 
     fn issue(key: &str, queue: &str) -> Issue {
-        Issue { key: key.into(), summary: None, queue: queue.into() }
+        Issue::new(key, None, queue)
     }
 
     fn map(v: Value) -> Map<String, Value> {
@@ -235,10 +304,48 @@ mod tests {
             PopupLine::Ticket {
                 key: "A-0".into(),
                 summary: "(no summary)".into(),
-                suggestion: Some(("With DEV".into(), true))
+                detail: None,
+                suggestion: Some(("⚠\u{FE0E} With DEV".into(), true))
             }
         );
         assert!(matches!(&lines[1], PopupLine::Ticket { suggestion: None, .. }));
+
+        let mut dated = issue("A-9", "Alpha");
+        dated.created = Some("2026-11-27T10:00:00.000+0000".into());
+        dated.assignee = Some("Sam Carter".into());
+        let now = crate::preview::parse_created("2026-11-27T12:30:00Z").unwrap();
+        let lines = popup_lines_at(&[dated], &Map::new(), now);
+        assert!(matches!(&lines[0], PopupLine::Ticket { detail: Some(d), .. } if d == "2h · Sam Carter"));
+    }
+
+    #[test]
+    fn suggestion_hints_are_short() {
+        assert_eq!(suggestion_hint("With DEV · 92% — because: vpn, laptop", false), "→ With DEV · 92%");
+        assert_eq!(
+            suggestion_hint("review — likely With DEV (61%), or IT (30%)", true),
+            "⚠\u{FE0E} review — likely With DEV (61%), or IT (30%)"
+        );
+        let long = suggestion_hint(&"x".repeat(80), false);
+        assert_eq!(long.chars().count(), 2 + 48 + 1);
+        assert_eq!(detail_text(None, None), None);
+        assert_eq!(detail_text(Some("5m"), None).as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn catch_up_and_at_risk_toasts() {
+        let s: HashMap<String, String> = [("SD-1".to_owned(), "Printer on fire".to_owned())].into();
+        let keys: Vec<String> = (1..=5).map(|i| format!("SD-{i}")).collect();
+        let (title, body) = compose_catch_up(&keys, &s);
+        assert_eq!(title, "Jira — 5 tickets arrived while snoozed");
+        assert_eq!(body, "SD-1: Printer on fire\nSD-2\nSD-3\n…and 2 more");
+        assert_eq!(compose_catch_up(&keys[..1], &s).0, "Jira — 1 ticket arrived while snoozed");
+
+        let (title, body) = compose_at_risk(&[("SD-7".into(), Some("VPN down".into()))], 30);
+        assert_eq!((title.as_str(), body.as_str()), ("SLA at risk — SD-7", "VPN down\nUnder 30 min of SLA left"));
+        let many: Vec<(String, Option<String>)> = (1..=4).map(|i| (format!("SD-{i}"), None)).collect();
+        let (title, body) = compose_at_risk(&many, 15);
+        assert_eq!(title, "SLA at risk — 4 tickets");
+        assert_eq!(body, "SD-1\nSD-2\nSD-3\n…and 1 more\nUnder 15 min of SLA left");
     }
 
     #[test]

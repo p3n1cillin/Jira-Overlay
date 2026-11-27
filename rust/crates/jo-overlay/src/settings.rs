@@ -3,7 +3,15 @@
 use jo_core::config::{self, Config};
 use serde_json::{Value, json};
 
-use crate::util;
+use crate::{hotkey, stats, theme, util};
+
+/// Settings this build added after `jo_core::config::OVERLAY_KEYS` was
+/// fixed. The shared save treats unknown keys as another tool's and keeps
+/// the copy on disk, so `Shared::save` writes these explicitly.
+pub const EXTRA_KEYS: [&str; 4] = ["slaAtRiskMinutes", "slaAtRiskToast", "hotkey", "theme"];
+
+/// At-risk warning choices (minutes left; 0 = off).
+pub const AT_RISK_CHOICES: [(i64, &str); 4] = [(0, "Off"), (15, "15 min"), (30, "30 min"), (60, "1 hour")];
 
 /// Every control in the Settings panel.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +35,14 @@ pub struct SettingsForm {
     pub completed_filter: String,
     pub check_updates: bool,
     pub startup: bool,
+    pub at_risk_minutes: i64,
+    pub at_risk_toast: bool,
+    pub hotkey: String,
+    pub theme: String,
+    was_at_risk_minutes: i64,
+    was_at_risk_toast: bool,
+    was_hotkey: String,
+    was_theme: String,
     was_sla_enabled: bool,
     was_sla_field: String,
     previous_hidden: Vec<String>,
@@ -65,6 +81,14 @@ impl SettingsForm {
             completed_filter: config::get_str(cfg, "completedTodayFilter", "").to_owned(),
             check_updates: config::truthy(cfg, "checkForUpdates", true),
             startup,
+            at_risk_minutes: stats::at_risk_minutes(cfg),
+            at_risk_toast: config::truthy(cfg, "slaAtRiskToast", true),
+            hotkey: hotkey::configured(cfg),
+            theme: theme::theme_choice(cfg).to_owned(),
+            was_at_risk_minutes: stats::at_risk_minutes(cfg),
+            was_at_risk_toast: config::truthy(cfg, "slaAtRiskToast", true),
+            was_hotkey: hotkey::configured(cfg),
+            was_theme: theme::theme_choice(cfg).to_owned(),
             was_sla_enabled: config::truthy(cfg, "slaEnabled", true),
             was_sla_field: config::get_str(cfg, "slaField", "").trim().to_owned(),
             previous_hidden: hidden,
@@ -147,7 +171,23 @@ impl SettingsForm {
         if cfg.contains_key("autoInstallUpdates") {
             cfg.insert("autoInstallUpdates".into(), Value::Bool(false));
         }
-        self.sla_enabled != self.was_sla_enabled || self.sla_field.trim() != self.was_sla_field
+        // Newer settings are written only once changed, so an untouched
+        // save leaves a hand-edited or absent value exactly as it was.
+        if self.at_risk_minutes != self.was_at_risk_minutes {
+            cfg.insert("slaAtRiskMinutes".into(), json!(self.at_risk_minutes.max(0)));
+        }
+        if self.at_risk_toast != self.was_at_risk_toast {
+            cfg.insert("slaAtRiskToast".into(), Value::Bool(self.at_risk_toast));
+        }
+        if self.hotkey != self.was_hotkey {
+            cfg.insert("hotkey".into(), json!(self.hotkey));
+        }
+        if self.theme != self.was_theme {
+            cfg.insert("theme".into(), json!(self.theme));
+        }
+        self.sla_enabled != self.was_sla_enabled
+            || self.sla_field.trim() != self.was_sla_field
+            || self.at_risk_minutes != self.was_at_risk_minutes
     }
 }
 
@@ -244,6 +284,42 @@ mod tests {
         form.alerts[0] = false; // untick "Open"
         form.apply(&mut c);
         assert_eq!(c["alertQueues"], json!(["Busy", "Gone", "New"]), "a listed queue can still be removed");
+    }
+
+    #[test]
+    fn newer_settings_are_written_only_when_changed() {
+        let original = round_trip();
+        let mut saved = original.clone();
+        let form = SettingsForm::from_config(&original, vec![], false);
+        assert_eq!(
+            (form.at_risk_minutes, form.at_risk_toast, form.hotkey.as_str(), form.theme.as_str()),
+            (30, true, "Ctrl+Alt+J", "System"),
+            "the defaults"
+        );
+        form.apply(&mut saved);
+        assert!(EXTRA_KEYS.iter().all(|k| !saved.contains_key(*k)), "an untouched save writes nothing new");
+
+        let mut form = SettingsForm::from_config(&saved, vec![], false);
+        form.at_risk_minutes = 60;
+        form.at_risk_toast = false;
+        form.hotkey = "Off".into();
+        form.theme = "Light".into();
+        assert!(form.apply(&mut saved), "the at-risk threshold is an SLA setting (drops the latch)");
+        assert_eq!(saved["slaAtRiskMinutes"], 60);
+        assert_eq!(saved["slaAtRiskToast"], false);
+        assert_eq!(saved["hotkey"], "Off");
+        assert_eq!(saved["theme"], "Light");
+
+        // Hand-edited values the form can't show survive an untouched save.
+        let mut odd = cfg(json!({"slaAtRiskMinutes": 7, "hotkey": "Ctrl+Alt+Nope", "theme": "neon",
+                                 "slaField": "Time to resolution"}));
+        let before = odd.clone();
+        let form = SettingsForm::from_config(&odd, vec![], false);
+        assert_eq!((form.at_risk_minutes, form.hotkey.as_str(), form.theme.as_str()), (7, "Off", "System"));
+        assert!(!form.apply(&mut odd));
+        for key in EXTRA_KEYS {
+            assert_eq!(odd.get(key), before.get(key), "{key}");
+        }
     }
 
     #[test]

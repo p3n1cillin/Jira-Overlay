@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 pub const SIZE: u32 = 128;
@@ -15,15 +15,12 @@ pub fn badge_text(count: u64) -> String {
     if count < 100 { count.to_string() } else { "99+".to_owned() }
 }
 
-fn font() -> Option<&'static FontVec> {
-    static FONT: OnceLock<Option<FontVec>> = OnceLock::new();
+fn font() -> Option<&'static FontRef<'static>> {
+    static FONT: OnceLock<Option<FontRef<'static>>> = OnceLock::new();
     FONT.get_or_init(|| {
-        let fonts = std::env::var_os("SystemRoot")
-            .map_or_else(|| std::path::PathBuf::from(r"C:\Windows"), std::path::PathBuf::from)
-            .join("Fonts");
         ["arialbd.ttf", "arial.ttf", "calibrib.ttf"]
             .iter()
-            .find_map(|name| std::fs::read(fonts.join(name)).ok().and_then(|bytes| FontVec::try_from_vec(bytes).ok()))
+            .find_map(|name| crate::theme::system_font(&[name]).and_then(|bytes| FontRef::try_from_slice(bytes).ok()))
     })
     .as_ref()
 }
@@ -55,7 +52,7 @@ pub fn render(count: u64, alert: bool) -> Vec<u8> {
 
 /// White text centred on its ink bounds, 64 px to the em like PIL's
 /// `truetype(size=64)`.
-fn draw_text(pixmap: &mut Pixmap, font: &FontVec, text: &str) {
+fn draw_text(pixmap: &mut Pixmap, font: &FontRef<'_>, text: &str) {
     let em = font.units_per_em().unwrap_or(2048.0);
     let scale = PxScale::from(64.0 * font.height_unscaled() / em);
     let scaled = font.as_scaled(scale);

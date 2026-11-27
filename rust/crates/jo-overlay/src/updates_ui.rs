@@ -94,7 +94,7 @@ impl UpdateUi {
         {
             self.notice = Some(v);
             if config::truthy(cfg, "notificationsEnabled", true) {
-                platform.toast("Jira Overlay update", &format!("{text}. Open Settings to update."));
+                platform.toast("Jira Overlay update", &format!("{text}. Open Settings to update."), None);
             }
         }
     }

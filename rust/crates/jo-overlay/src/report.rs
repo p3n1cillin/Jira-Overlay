@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{Days, NaiveDate};
@@ -14,6 +14,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::poll::{self, MakeTransport};
+use crate::stats;
 
 /// Label -> days back from today; `None` means "pick the dates yourself".
 pub const REPORT_RANGES: [(&str, Option<u64>); 5] =
@@ -132,17 +133,93 @@ pub fn base_jql(project_key: &str, basis: &str, start: NaiveDate, end: NaiveDate
     )
 }
 
+/// Per-person SLA and speed over the report period.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PersonStats {
+    /// Share of their completed tickets with no SLA ever breached (the
+    /// overlay's any-SLA rule); `None` with SLA off or nothing completed.
+    pub sla: Option<i64>,
+    /// Median time to resolution in milliseconds (see [`resolution_millis`]).
+    pub median_ms: Option<u64>,
+}
+
 /// A finished count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub seq: u64,
     pub results: Vec<(String, Option<u64>)>,
+    /// Parallel to `results`.
+    pub stats: Vec<PersonStats>,
     pub total: u64,
     pub completed: Option<u64>,
     pub unassigned: Option<u64>,
 }
 
-/// Count every person plus the two coverage totals on a pool of four
+/// At most this many of a person's newest resolved tickets feed the median.
+pub const MEDIAN_SAMPLE: usize = 500;
+
+/// One unit of work for the report pool.
+enum Job {
+    /// A count (`None`: nothing to ask).
+    Count(Option<String>),
+    /// Resolution times of the tickets matching this JQL.
+    Durations(String),
+}
+
+/// What a job produced.
+#[derive(Clone)]
+enum Answer {
+    Count(Option<u64>),
+    Durations(Option<Vec<u64>>),
+}
+
+/// Time to resolution for one resolved issue: the last completed cycle of
+/// the first configured SLA (`elapsedTime.millis`, which follows the SLA's
+/// business-hours calendar) when there is one, else wall-clock
+/// `resolutiondate − created`.
+pub fn resolution_millis(issue: &serde_json::Map<String, Value>, sla_field_id: Option<&str>) -> Option<u64> {
+    let fields = issue.get("fields")?;
+    let from_sla = sla_field_id
+        .and_then(|id| fields.get(id)?.get("completedCycles")?.as_array()?.last().cloned())
+        .and_then(|cycle| cycle.get("elapsedTime")?.get("millis")?.as_u64());
+    if from_sla.is_some() {
+        return from_sla;
+    }
+    let at = |k: &str| fields.get(k).and_then(Value::as_str).and_then(crate::preview::parse_created);
+    let (created, resolved) = (at("created")?, at("resolutiondate")?);
+    u64::try_from((resolved - created).num_milliseconds()).ok()
+}
+
+/// The median of a sample (mean of the middle two for an even count).
+pub fn median(values: &mut [u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let mid = values.len() / 2;
+    Some(if values.len() % 2 == 1 {
+        values[mid]
+    } else {
+        values[mid - 1] / 2 + values[mid] / 2 + (values[mid - 1] % 2 + values[mid] % 2) / 2
+    })
+}
+
+/// The id (`customfield_10030`) of the field named `name`, from Jira's
+/// field list (search takes ids, not names).
+pub fn field_id(jira: &jo_jira::Jira, name: &str) -> Option<String> {
+    let r = jira.send(Method::Get, "/rest/api/3/field", &[], None, Duration::from_secs(15), Retry::Once).ok()?;
+    if !r.ok() {
+        return None;
+    }
+    let fields = r.json()?;
+    fields.as_array()?.iter().find_map(|f| {
+        let matches = f.get("name")?.as_str()?.trim().eq_ignore_ascii_case(name.trim());
+        matches.then(|| f.get("id")?.as_str().map(str::to_owned)).flatten()
+    })
+}
+
+/// Count every person (completed, and breached when SLA is on), collect
+/// their resolution times, plus the two coverage totals, on a pool of four
 /// workers, each with its own client. `still_wanted` lets a superseded or
 /// closed report stop early; it then returns `None` and posts nothing.
 pub fn count_all(
@@ -154,23 +231,31 @@ pub fn count_all(
     still_wanted: &(dyn Fn() -> bool + Sync),
 ) -> Option<Outcome> {
     let base = base_jql(config::get_str(cfg, "projectKey", ""), basis, start, end);
-    // Jobs: one per person (None = nothing to ask), then the two totals.
-    let mut jobs: Vec<Option<String>> = people
-        .iter()
-        .map(|p| {
-            let who = if p.account_id.is_empty() { &p.name } else { &p.account_id };
-            (!who.is_empty()).then(|| format!("{base} AND assignee = {}", jql::quote(who)))
-        })
-        .collect();
-    jobs.push(Some(base.clone()));
-    jobs.push(Some(format!("{base} AND assignee IS EMPTY")));
+    let sla_fields = if stats::sla_wanted(cfg) { stats::sla_fields(cfg) } else { Vec::new() };
+    let breach = (!sla_fields.is_empty()).then(|| stats::breach_clause(&sla_fields));
+    // Jobs: three per person (completed, breached, durations), then the
+    // two totals. A person with no name or id costs nothing.
+    let mut jobs: Vec<Job> = Vec::new();
+    for p in people {
+        let who = if p.account_id.is_empty() { &p.name } else { &p.account_id };
+        let mine = (!who.is_empty()).then(|| format!("{base} AND assignee = {}", jql::quote(who)));
+        jobs.push(Job::Count(mine.clone()));
+        jobs.push(Job::Count(mine.as_ref().zip(breach.as_ref()).map(|(q, b)| format!("{q} AND {b}"))));
+        jobs.push(match mine {
+            Some(q) => Job::Durations(format!("{q} ORDER BY resolved DESC")),
+            None => Job::Count(None),
+        });
+    }
+    jobs.push(Job::Count(Some(base.clone())));
+    jobs.push(Job::Count(Some(format!("{base} AND assignee IS EMPTY"))));
 
+    let sla_id: OnceLock<Option<String>> = OnceLock::new();
     let workers = 4.min((people.len() + 2).max(1));
     let next = AtomicUsize::new(0);
-    let counts: Mutex<Vec<Option<u64>>> = Mutex::new(vec![None; jobs.len()]);
+    let answers: Mutex<Vec<Answer>> = Mutex::new(vec![Answer::Count(None); jobs.len()]);
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            let (next, counts, jobs) = (&next, &counts, &jobs);
+            let (next, answers, jobs, sla_id, sla_fields) = (&next, &answers, &jobs, &sla_id, &sla_fields);
             scope.spawn(move || {
                 let jira = poll::client(cfg, make);
                 loop {
@@ -179,8 +264,21 @@ pub fn count_all(
                     if !still_wanted() {
                         break;
                     }
-                    let n = job.as_deref().and_then(|q| jira.count(q).0);
-                    counts.lock().unwrap_or_else(|p| p.into_inner())[i] = n;
+                    let answer = match job {
+                        Job::Count(q) => Answer::Count(q.as_deref().and_then(|q| jira.count(q).0)),
+                        Job::Durations(q) => {
+                            let id = sla_id.get_or_init(|| sla_fields.first().and_then(|n| field_id(&jira, n)));
+                            let mut wanted = vec!["created", "resolutiondate"];
+                            if let Some(id) = id {
+                                wanted.push(id);
+                            }
+                            let issues = jira.search(q, &wanted, Some(MEDIAN_SAMPLE));
+                            Answer::Durations(Some(
+                                issues.iter().filter_map(|i| resolution_millis(i, id.as_deref())).collect(),
+                            ))
+                        }
+                    };
+                    answers.lock().unwrap_or_else(|p| p.into_inner())[i] = answer;
                 }
             });
         }
@@ -188,10 +286,51 @@ pub fn count_all(
     if !still_wanted() {
         return None;
     }
-    let counts = counts.into_inner().unwrap_or_else(|p| p.into_inner());
-    let results: Vec<(String, Option<u64>)> = people.iter().zip(&counts).map(|(p, c)| (p.name.clone(), *c)).collect();
+    let answers = answers.into_inner().unwrap_or_else(|p| p.into_inner());
+    let count_at = |i: usize| match &answers[i] {
+        Answer::Count(c) => *c,
+        Answer::Durations(_) => None,
+    };
+    let mut results = Vec::with_capacity(people.len());
+    let mut person_stats = Vec::with_capacity(people.len());
+    for (n, p) in people.iter().enumerate() {
+        let completed = count_at(3 * n);
+        let breached = count_at(3 * n + 1);
+        let sla = match (completed, breached) {
+            (Some(total), Some(b)) if total > 0 => {
+                Some(crate::util::py_round((total - b.min(total)) as f64 / total as f64 * 100.0))
+            }
+            _ => None,
+        };
+        let median_ms = match &answers[3 * n + 2] {
+            Answer::Durations(Some(d)) => median(&mut d.clone()),
+            _ => None,
+        };
+        results.push((p.name.clone(), completed));
+        person_stats.push(PersonStats { sla, median_ms });
+    }
     let total = results.iter().filter_map(|(_, c)| *c).sum();
-    Some(Outcome { seq, results, total, completed: counts[people.len()], unassigned: counts[people.len() + 1] })
+    let last = 3 * people.len();
+    Some(Outcome {
+        seq,
+        results,
+        stats: person_stats,
+        total,
+        completed: count_at(last),
+        unassigned: count_at(last + 1),
+    })
+}
+
+/// `"35m"`, `"4.2h"`, `"3.1d"`.
+pub fn duration_text(ms: u64) -> String {
+    let hours = ms as f64 / 3_600_000.0;
+    if hours < 1.0 {
+        format!("{}m", (ms / 60_000).max(1))
+    } else if hours < 48.0 {
+        format!("{hours:.1}h")
+    } else {
+        format!("{:.1}d", hours / 24.0)
+    }
 }
 
 /// The status line after a count: `(text, warn)`.
@@ -226,22 +365,31 @@ pub struct RankRow {
     pub share: String,
     /// Bar length as a fraction of the best count.
     pub bar: f32,
+    /// `"SLA 94%"`, or empty.
+    pub sla: String,
+    /// `"4.2h"` median time to resolution, or empty.
+    pub median: String,
 }
 
-/// Ranked rows: highest first, failures last.
-pub fn ranking(results: &[(String, Option<u64>)], total: u64) -> Vec<RankRow> {
-    let mut ranked: Vec<&(String, Option<u64>)> = results.iter().collect();
-    ranked.sort_by_key(|(_, c)| (c.is_none(), std::cmp::Reverse(c.unwrap_or(0))));
-    let best = ranked.iter().map(|(_, c)| c.unwrap_or(0)).max().filter(|b| *b > 0).unwrap_or(1);
+/// Ranked rows: highest first, failures last. `stats` is parallel to
+/// `results` (missing entries show blank).
+pub fn ranking(results: &[(String, Option<u64>)], stats: &[PersonStats], total: u64) -> Vec<RankRow> {
+    let blank = PersonStats::default();
+    let mut ranked: Vec<(&(String, Option<u64>), &PersonStats)> =
+        results.iter().enumerate().map(|(i, r)| (r, stats.get(i).unwrap_or(&blank))).collect();
+    ranked.sort_by_key(|((_, c), _)| (c.is_none(), std::cmp::Reverse(c.unwrap_or(0))));
+    let best = ranked.iter().map(|((_, c), _)| c.unwrap_or(0)).max().filter(|b| *b > 0).unwrap_or(1);
     ranked
         .into_iter()
         .enumerate()
-        .map(|(i, (name, count))| RankRow {
+        .map(|(i, ((name, count), st))| RankRow {
             place: i + 1,
             name: name.clone(),
             count: count.map_or_else(|| "—".to_owned(), |c| c.to_string()),
             share: (100 * count.unwrap_or(0)).checked_div(total).map_or_else(String::new, |p| format!("{p}%")),
             bar: count.unwrap_or(0) as f32 / best as f32,
+            sla: st.sla.map_or_else(String::new, |p| format!("SLA {p}%")),
+            median: st.median_ms.map_or_else(String::new, duration_text),
         })
         .collect()
 }
@@ -254,15 +402,26 @@ fn csv_field(value: &str) -> String {
     }
 }
 
-/// CSV text as Python's `csv.writer` writes it.
-pub fn csv_text(results: &[(String, Option<u64>)], start: NaiveDate, end: NaiveDate, basis: &str) -> String {
-    let mut rows: Vec<&(String, Option<u64>)> = results.iter().collect();
-    rows.sort_by_key(|(_, c)| std::cmp::Reverse(c.unwrap_or(0)));
-    let mut out = String::from("Person,Completed,From,To,Counted by\r\n");
-    for (name, count) in rows {
+/// CSV text as Python's `csv.writer` writes it. `stats` is parallel to
+/// `results`; the median is in hours.
+pub fn csv_text(
+    results: &[(String, Option<u64>)],
+    stats: &[PersonStats],
+    start: NaiveDate,
+    end: NaiveDate,
+    basis: &str,
+) -> String {
+    let blank = PersonStats::default();
+    let mut rows: Vec<(&(String, Option<u64>), &PersonStats)> =
+        results.iter().enumerate().map(|(i, r)| (r, stats.get(i).unwrap_or(&blank))).collect();
+    rows.sort_by_key(|((_, c), _)| std::cmp::Reverse(c.unwrap_or(0)));
+    let mut out = String::from("Person,Completed,SLA %,Median hours to resolution,From,To,Counted by\r\n");
+    for ((name, count), st) in rows {
         let fields = [
             csv_safe(name),
             count.map(|c| c.to_string()).unwrap_or_default(),
+            st.sla.map(|p| p.to_string()).unwrap_or_default(),
+            st.median_ms.map(|ms| format!("{:.1}", ms as f64 / 3_600_000.0)).unwrap_or_default(),
             start.format("%Y-%m-%d").to_string(),
             end.format("%Y-%m-%d").to_string(),
             basis.to_owned(),
@@ -466,7 +625,7 @@ mod tests {
     }
 
     fn jqls(fake: &FakeJira) -> Vec<String> {
-        fake.requests().iter().map(|r| r.body.as_ref().unwrap()["jql"].as_str().unwrap().to_owned()).collect()
+        fake.requests().iter().filter_map(|r| r.body.as_ref()?["jql"].as_str().map(str::to_owned)).collect()
     }
 
     #[test]
@@ -506,7 +665,10 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let b = barrier.clone();
         let (fake, make) = counting(move |jql| {
-            b.wait();
+            // Only the counts rendezvous (an even number of them).
+            if !jql.is_empty() && !jql.contains("ORDER BY") {
+                b.wait();
+            }
             Some(if jql.contains("assignee =") { 7 } else { 3 })
         });
         let people = [Person::new("A", "a"), Person::new("B", "b")];
@@ -536,6 +698,7 @@ mod tests {
         Outcome {
             seq: 1,
             results: vec![("Alfie".into(), Some(291)), ("Luke".into(), Some(235))],
+            stats: vec![],
             total: 526,
             completed,
             unassigned,
@@ -558,12 +721,22 @@ mod tests {
 
     #[test]
     fn ranking_rows() {
-        let rows = ranking(&[("A".into(), Some(2)), ("B".into(), None), ("C".into(), Some(6))], 8);
+        let stats = [
+            PersonStats { sla: Some(90), median_ms: Some(2 * 3_600_000) },
+            PersonStats::default(),
+            PersonStats { sla: Some(100), median_ms: Some(20 * 60_000) },
+        ];
+        let rows = ranking(&[("A".into(), Some(2)), ("B".into(), None), ("C".into(), Some(6))], &stats, 8);
         assert_eq!(names_of(&rows), ["C", "A", "B"]);
         assert_eq!(rows[0].share, "75%");
         assert_eq!(rows[2].count, "—");
         assert!((rows[1].bar - 1.0 / 3.0).abs() < 1e-6);
-        assert_eq!(ranking(&[("Z".into(), Some(0))], 0)[0].share, "");
+        assert_eq!((rows[0].sla.as_str(), rows[0].median.as_str()), ("SLA 100%", "20m"), "stats follow the person");
+        assert_eq!((rows[1].sla.as_str(), rows[1].median.as_str()), ("SLA 90%", "2.0h"));
+        assert_eq!((rows[2].sla.as_str(), rows[2].median.as_str()), ("", ""));
+        assert_eq!(ranking(&[("Z".into(), Some(0))], &[], 0)[0].share, "");
+        assert_eq!(duration_text(30_000), "1m");
+        assert_eq!(duration_text(3 * 86_400_000), "3.0d");
     }
 
     fn names_of(rows: &[RankRow]) -> Vec<&str> {
@@ -580,15 +753,114 @@ mod tests {
             assert_eq!(csv_safe(name), name);
         }
         let d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let stats = [
+            PersonStats { sla: Some(50), median_ms: Some(5_400_000) },
+            PersonStats { sla: Some(100), median_ms: None },
+            PersonStats::default(),
+        ];
         let text = csv_text(
             &[("=cmd".into(), Some(1)), ("Lee, Ann".into(), Some(3)), ("Gone".into(), None)],
+            &stats,
             d,
             d,
             "resolved",
         );
         assert_eq!(
             text,
-            "Person,Completed,From,To,Counted by\r\n\"Lee, Ann\",3,2026-01-01,2026-01-01,resolved\r\n'=cmd,1,2026-01-01,2026-01-01,resolved\r\nGone,,2026-01-01,2026-01-01,resolved\r\n"
+            "Person,Completed,SLA %,Median hours to resolution,From,To,Counted by\r\n\"Lee, Ann\",3,100,,2026-01-01,2026-01-01,resolved\r\n'=cmd,1,50,1.5,2026-01-01,2026-01-01,resolved\r\nGone,,,,2026-01-01,2026-01-01,resolved\r\n"
+        );
+    }
+
+    #[test]
+    fn resolution_times_and_median() {
+        let issue = |v: Value| v.as_object().unwrap().clone();
+        let sla = issue(json!({"key": "SD-1", "fields": {
+            "created": "2026-11-02T09:00:00.000+0000", "resolutiondate": "2026-11-04T09:00:00.000+0000",
+            "customfield_10030": {"completedCycles": [
+                {"elapsedTime": {"millis": 1000}}, {"elapsedTime": {"millis": 7_200_000}}]}}}));
+        assert_eq!(resolution_millis(&sla, Some("customfield_10030")), Some(7_200_000), "the SLA's last cycle");
+        assert_eq!(resolution_millis(&sla, None), Some(2 * 86_400_000), "without the SLA: wall clock");
+        let open_cycle = issue(json!({"fields": {"created": "2026-11-02T09:00:00.000+0000",
+            "resolutiondate": "2026-11-02T10:30:00.000+0000", "customfield_10030": {"completedCycles": []}}}));
+        assert_eq!(resolution_millis(&open_cycle, Some("customfield_10030")), Some(5_400_000));
+        let unresolved = issue(json!({"fields": {"created": "2026-11-02T09:00:00.000+0000", "resolutiondate": null}}));
+        assert_eq!(resolution_millis(&unresolved, None), None);
+        let backwards =
+            issue(json!({"fields": {"created": "2026-11-03T09:00:00Z", "resolutiondate": "2026-11-02T09:00:00Z"}}));
+        assert_eq!(resolution_millis(&backwards, None), None);
+        assert_eq!(median(&mut [5, 1, 3]), Some(3));
+        assert_eq!(median(&mut [4, 1, 3, 2]), Some(2), "mean of the middle two, rounded down");
+        assert_eq!(median(&mut [u64::MAX, u64::MAX]), Some(u64::MAX), "no overflow");
+        assert_eq!(median(&mut []), None);
+    }
+
+    #[test]
+    fn per_person_sla_and_median_queries() {
+        let fake = FakeJira::new(|req| {
+            if req.url.ends_with("/rest/api/3/field") {
+                return ok_json(json!([{"id": "summary", "name": "Summary"},
+                                      {"id": "customfield_10030", "name": "Time to resolution"}]));
+            }
+            let body = req.body.clone().unwrap_or_default();
+            let jql = body["jql"].as_str().unwrap_or_default().to_owned();
+            if req.url.ends_with("/search/jql") {
+                assert!(jql.ends_with("ORDER BY resolved DESC"), "{jql}");
+                let fields: Vec<&str> =
+                    body["fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+                assert_eq!(fields, ["created", "resolutiondate", "customfield_10030"], "only the needed fields");
+                let mins = if jql.contains("acc-1") { [10, 20, 90] } else { [60, 60, 60] };
+                let issues: Vec<Value> = mins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        json!({"key": format!("SD-{i}"),
+                    "fields": {"customfield_10030": {"completedCycles": [{"elapsedTime": {"millis": m * 60_000}}]}}})
+                    })
+                    .collect();
+                return ok_json(json!({"issues": issues, "isLast": true}));
+            }
+            let n = if jql.contains("everBreached") {
+                1
+            } else if jql.contains("assignee =") {
+                4
+            } else {
+                10
+            };
+            ok_json(json!({"count": n}))
+        });
+        let d = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let people = [Person::new("Sam", "acc-1"), Person::new("Ada", "acc-2"), Person::new("", "")];
+        let c = cfg(json!({"projectKey": "SD", "domain": "x.atlassian.net"}));
+        let out = count_all(1, &c, &people, ("resolved", d, d), &fake.make(), &|| true).unwrap();
+        assert_eq!(out.stats[0], PersonStats { sla: Some(75), median_ms: Some(20 * 60_000) });
+        assert_eq!(out.stats[1], PersonStats { sla: Some(75), median_ms: Some(60 * 60_000) });
+        assert_eq!(out.stats[2], PersonStats::default(), "no name, no queries");
+        assert_eq!((out.total, out.completed, out.unassigned), (8, Some(10), Some(10)));
+        let breach = fake
+            .requests()
+            .iter()
+            .filter_map(|r| r.body.as_ref()?["jql"].as_str().map(str::to_owned))
+            .find(|j| j.contains("everBreached") && j.contains("acc-1"))
+            .unwrap();
+        assert!(breach.ends_with(r#"AND assignee = "acc-1" AND ("Time to resolution" = everBreached())"#), "{breach}");
+        let lookups = fake.requests().iter().filter(|r| r.url.ends_with("/field")).count();
+        assert_eq!(lookups, 1, "the SLA field id is looked up once per report");
+        assert!(fake.clients() <= 4, "still the four-worker pool");
+
+        // SLA switched off: no breach counts, wall-clock medians, no field lookup.
+        let fake = FakeJira::new(|req| {
+            if req.url.ends_with("/search/jql") {
+                return ok_json(json!({"issues": [{"key": "SD-1", "fields": {
+                    "created": "2026-11-02T09:00:00.000+0000", "resolutiondate": "2026-11-02T13:00:00.000+0000"}}]}));
+            }
+            ok_json(json!({"count": 2}))
+        });
+        let c = cfg(json!({"projectKey": "SD", "slaEnabled": false}));
+        let out = count_all(2, &c, &people[..1], ("resolved", d, d), &fake.make(), &|| true).unwrap();
+        assert_eq!(out.stats[0], PersonStats { sla: None, median_ms: Some(4 * 3_600_000) });
+        assert!(
+            !fake.requests().iter().any(|r| r.url.ends_with("/field")
+                || r.body.as_ref().is_some_and(|b| b.to_string().contains("everBreached")))
         );
     }
 

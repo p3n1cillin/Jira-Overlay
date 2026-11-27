@@ -11,8 +11,9 @@ use jo_core::config::{self, Config};
 use serde_json::json;
 
 use crate::Exit;
-use crate::learner::{self, LearnerLines};
-use crate::model::Desk;
+use crate::hotkey::{self, Hotkey};
+use crate::learner::{self, AccuracyView, LearnerLines};
+use crate::model::{Desk, Issue};
 use crate::placement::{self, Rect};
 use crate::platform::{self, Platform};
 use crate::poll::{self, MakeTransport, PollCmd, PollEvent, Poller, Shared};
@@ -53,6 +54,15 @@ pub enum UiEvent {
     TrayClick,
     /// A second launch asked the running overlay to show itself.
     Show,
+    /// The global show/hide hotkey was pressed.
+    Hotkey,
+    /// A toast was clicked: open its URL (checked against the domain).
+    OpenUrl(String),
+    /// A hover-preview fetch finished (`None`: it failed).
+    Preview {
+        queue_id: String,
+        issues: Option<Vec<Issue>>,
+    },
     /// Setup/the updater asked this installation's apps to stop.
     StopForUpdate,
 }
@@ -61,6 +71,8 @@ pub enum UiEvent {
 pub struct SettingsPanel {
     pub form: SettingsForm,
     pub learner: Option<LearnerLines>,
+    /// The learner's 7/30-day accuracy table, when it reported one.
+    pub accuracy: Option<AccuracyView>,
     /// `(healthy, message)` for native installs.
     pub recovery: Option<(bool, String)>,
 }
@@ -100,6 +112,8 @@ pub struct OverlayApp<'a> {
     pub hwnd: Option<isize>,
     applied_mapped: bool,
     applied_alpha: f32,
+    /// The display scale last frame (0 before the first).
+    applied_ppp: f32,
     /// The overlay's rectangle in physical pixels (kept even without a real window).
     pub rect: Rect,
     pub has_icon_font: bool,
@@ -125,6 +139,21 @@ pub struct OverlayApp<'a> {
     /// Measured size of the alert popup (points) and its window.
     pub popup_size: Option<egui::Vec2>,
     pub popup_hwnd: Option<isize>,
+    /// The global hotkey thread (real app only).
+    pub hotkey: Option<Hotkey>,
+    /// Hover previews: per-queue cache and the queue shown, `(id, name)`.
+    pub preview: crate::preview::Cache,
+    pub preview_queue: Option<(String, String)>,
+    /// The row being hovered and since when (a short dwell before fetching).
+    pub preview_dwell: Option<(String, Instant)>,
+    /// Last time the pointer was on a previewed row or in its popup.
+    pub preview_inside: Option<Instant>,
+    pub preview_size: Option<egui::Vec2>,
+    pub preview_hwnd: Option<isize>,
+    preview_client: Option<Arc<jo_jira::Jira>>,
+    /// Re-read the Windows app theme at this time (and after Settings).
+    next_theme_check: Instant,
+    pub theme_dirty: bool,
 }
 
 /// Construction options (tests skip the tray and the poller thread).
@@ -132,7 +161,16 @@ pub struct Options {
     pub hwnd: Option<isize>,
     pub tray: bool,
     pub poller: bool,
+    /// Register the global show/hide hotkey.
+    pub hotkey: bool,
 }
+
+/// How long the pointer rests on a row before its preview is fetched.
+pub const PREVIEW_DWELL: Duration = Duration::from_millis(300);
+/// How long a preview survives the pointer leaving row and popup.
+pub const PREVIEW_GRACE: Duration = Duration::from_millis(450);
+/// How often the Windows light/dark setting is re-read.
+pub const THEME_EVERY: Duration = Duration::from_secs(30);
 
 impl<'a> OverlayApp<'a> {
     pub fn new(
@@ -165,6 +203,7 @@ impl<'a> OverlayApp<'a> {
             hwnd: options.hwnd,
             applied_mapped: false,
             applied_alpha: -1.0,
+            applied_ppp: 0.0,
             rect: Rect { x: 100, y: 100, w: 260, h: 60 },
             has_icon_font: false,
             styled: false,
@@ -184,6 +223,16 @@ impl<'a> OverlayApp<'a> {
             snooze_anchor: egui::Rect::NOTHING,
             popup_size: None,
             popup_hwnd: None,
+            hotkey: None,
+            preview: crate::preview::Cache::default(),
+            preview_queue: None,
+            preview_dwell: None,
+            preview_inside: None,
+            preview_size: None,
+            preview_hwnd: None,
+            preview_client: None,
+            next_theme_check: now + THEME_EVERY,
+            theme_dirty: false,
         };
         if let Some(h) = app.hwnd {
             platform::round_corners(h, false);
@@ -193,6 +242,17 @@ impl<'a> OverlayApp<'a> {
         }
         if options.tray {
             app.tray = Tray::new(&app.root, app.tx.clone(), app.waker.clone());
+        }
+        if options.hotkey {
+            let (tx, waker, root) = (app.tx.clone(), app.waker.clone(), app.root.clone());
+            app.hotkey = Hotkey::start(
+                &hotkey::configured(&app.config()),
+                move || {
+                    let _ = tx.send(UiEvent::Hotkey);
+                    waker();
+                },
+                move |message| util::log_error(&root, message),
+            );
         }
         if options.poller {
             let (tx, waker) = (app.tx.clone(), app.waker.clone());
@@ -217,8 +277,26 @@ impl<'a> OverlayApp<'a> {
     pub fn ensure_style(&mut self, ctx: &egui::Context) {
         if !self.styled {
             self.has_icon_font = crate::theme::install_fonts(ctx);
+            crate::theme::c::set_light(self.wants_light());
             crate::theme::install_style(ctx);
             self.styled = true;
+        }
+    }
+
+    /// The palette the Theme setting (and, for "System", Windows) asks for.
+    pub fn wants_light(&self) -> bool {
+        crate::theme::wants_light(crate::theme::theme_choice(&self.config()), crate::theme::system_prefers_light)
+    }
+
+    /// Follow a Windows light/dark switch or a Theme change.
+    fn follow_theme(&mut self, ctx: &egui::Context, now: Instant) {
+        if !self.styled || (!self.theme_dirty && now < self.next_theme_check) {
+            return;
+        }
+        self.theme_dirty = false;
+        self.next_theme_check = now + THEME_EVERY;
+        if crate::theme::apply_palette(ctx, self.wants_light()) {
+            ctx.request_repaint();
         }
     }
 
@@ -252,6 +330,8 @@ impl<'a> OverlayApp<'a> {
             self.next_relative = now + RELATIVE_TIME_EVERY;
             self.st.relative_time(now);
         }
+        self.follow_theme(ctx, now);
+        self.follow_scale(ctx);
         let animating = self.st.tick(now) || self.geom.is_some() || self.drag.is_some();
         self.apply_window();
         if let Some(pending) = self.st.tray_pending.take()
@@ -262,8 +342,13 @@ impl<'a> OverlayApp<'a> {
         if animating {
             ctx.request_repaint();
         } else {
-            let deadlines =
-                [self.st.show_at, self.updates.next_check, self.report_previous_at, Some(self.next_relative)];
+            let deadlines = [
+                self.st.show_at,
+                self.updates.next_check,
+                self.report_previous_at,
+                Some(self.next_relative),
+                Some(self.next_theme_check),
+            ];
             if let Some(next) = deadlines.into_iter().flatten().min() {
                 ctx.request_repaint_after(next.saturating_duration_since(now));
             }
@@ -306,6 +391,18 @@ impl<'a> OverlayApp<'a> {
             }
             UiEvent::TrayClick => self.tray_toggle(now),
             UiEvent::Show => self.st.user_show(now),
+            UiEvent::Hotkey => self.tray_toggle(now),
+            UiEvent::OpenUrl(url) => {
+                // Only ever a page on the configured Jira site.
+                let site = format!("https://{}/", config::get_str(&self.config(), "domain", ""));
+                if site.len() > "https:///".len() && url.starts_with(&site) {
+                    self.svc.platform.open_url(&url);
+                }
+            }
+            UiEvent::Preview { queue_id, issues } => {
+                self.preview.finish(&queue_id, issues, now);
+                ctx.request_repaint();
+            }
             UiEvent::StopForUpdate => {
                 (self.record_reason)("update", false);
                 self.close(ctx);
@@ -354,6 +451,30 @@ impl<'a> OverlayApp<'a> {
             platform::set_mapped(h, self.st.mapped);
             self.applied_mapped = self.st.mapped;
         }
+    }
+
+    /// Moving to a monitor with another scale: winit has already resized
+    /// the window to Windows' suggestion, so take the real rectangle back
+    /// before refitting at the new scale (otherwise a stale cached size
+    /// could match the new target and skip the refit).
+    fn follow_scale(&mut self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
+        if (ppp - self.applied_ppp).abs() < 0.001 {
+            return;
+        }
+        let first = self.applied_ppp == 0.0;
+        self.applied_ppp = ppp;
+        if first {
+            return;
+        }
+        if let Some((x, y, w, h)) = self.hwnd.and_then(platform::window_rect) {
+            self.rect = Rect { x, y, w, h };
+        }
+        self.ppp = ppp;
+        self.st.resize_requested = true;
+        self.popup_size = None;
+        self.preview_size = None;
+        ctx.request_repaint();
     }
 
     pub fn set_rect(&mut self, rect: Rect) {
@@ -453,38 +574,49 @@ impl<'a> OverlayApp<'a> {
 
     // ── Actions ────────────────────────────────────────────────────────────
 
-    fn domain_url(&self, path: &str) -> String {
-        format!("https://{}{path}", config::get_str(&self.config(), "domain", ""))
-    }
-
     pub fn row_url(&self, queue_id: &str) -> String {
-        let cfg = self.config();
-        match config::get_str(&cfg, "projectKey", "") {
-            "" => self.domain_url("/jira/servicedesk"),
-            pk => self.domain_url(&format!(
-                "/jira/servicedesk/projects/{}/queues/custom/{}",
-                jo_core::jql::path_segment(pk),
-                jo_core::jql::path_segment(queue_id)
-            )),
-        }
+        crate::links::queue(&self.config(), queue_id)
     }
 
     pub fn open_service_desk(&self) {
-        let cfg = self.config();
-        let url = match config::get_str(&cfg, "projectKey", "") {
-            "" => self.domain_url("/jira/servicedesk"),
-            pk => self.domain_url(&format!("/jira/servicedesk/projects/{}/queues", jo_core::jql::path_segment(pk))),
-        };
-        self.svc.platform.open_url(&url);
+        self.svc.platform.open_url(&crate::links::desk(&self.config()));
     }
 
     pub fn open_completed_today(&self) {
-        let jql = crate::stats::completed_today_jql(&self.config(), crate::stats::today());
-        self.svc.platform.open_url(&self.domain_url(&format!("/issues/?jql={}", quote_all(&jql))));
+        let cfg = self.config();
+        let jql = crate::stats::completed_today_jql(&cfg, crate::stats::today());
+        self.svc.platform.open_url(&crate::links::jql(&cfg, &jql));
+    }
+
+    /// The at-risk tickets in Jira (the same JQL the count used).
+    pub fn open_at_risk(&self) {
+        let cfg = self.config();
+        if let Some(jql) = crate::stats::sla_at_risk_jql(&cfg) {
+            self.svc.platform.open_url(&crate::links::jql(&cfg, &jql));
+        }
     }
 
     pub fn ticket_url(&self, key: &str) -> String {
-        self.domain_url(&format!("/browse/{}", jo_core::jql::path_segment(key)))
+        crate::links::ticket(&self.config(), key)
+    }
+
+    /// Fetch a queue's newest tickets for its hover preview, off the UI
+    /// thread on a dedicated client (never the poller's), unless cached.
+    pub fn request_preview(&mut self, queue_id: &str, queue_name: &str) {
+        if !self.preview.begin(queue_id, Instant::now()) {
+            return;
+        }
+        let cfg = self.config();
+        let jira =
+            self.preview_client.get_or_insert_with(|| Arc::new(poll::client(&cfg, &self.svc.make_transport))).clone();
+        let desk = util::id_text(cfg.get("serviceDeskId"));
+        let (tx, waker) = (self.tx.clone(), self.waker.clone());
+        let (queue_id, queue_name) = (queue_id.to_owned(), queue_name.to_owned());
+        let _ = std::thread::Builder::new().name("queue-preview".into()).spawn(move || {
+            let issues = crate::preview::fetch(&jira, &desk, &queue_id, &queue_name);
+            let _ = tx.send(UiEvent::Preview { queue_id, issues });
+            waker();
+        });
     }
 
     pub fn refresh(&self) {
@@ -633,9 +765,11 @@ impl<'a> OverlayApp<'a> {
                 jo_core::ipc::component_running(name).unwrap_or(false)
             })
         });
+        let status = learner::load_status(&self.root.join("triage_status.json"));
         SettingsPanel {
             form: SettingsForm::from_config(&cfg, names, self.svc.platform.startup_enabled()),
-            learner: learner::load_status(&self.root.join("triage_status.json")).map(|s| learner::learner_lines(&s)),
+            learner: status.as_ref().map(learner::learner_lines),
+            accuracy: status.as_ref().map(learner::accuracy_view).filter(|v| !v.is_empty()),
             recovery,
         }
     }
@@ -680,6 +814,10 @@ impl<'a> OverlayApp<'a> {
         let form = panel.form.clone();
         let reset_sla = self.shared().update(|c| form.apply(c));
         self.shared().save();
+        if let Some(hk) = &self.hotkey {
+            hk.set(&hotkey::configured(&self.config()));
+        }
+        self.theme_dirty = true;
         self.st.rows.clear();
         self.st.flashes.clear();
         self.send_poll(PollCmd::SettingsSaved { reset_sla });
@@ -737,18 +875,7 @@ impl<'a> OverlayApp<'a> {
     }
 }
 
-/// `urllib.parse.quote(text, safe="")`.
-pub fn quote_all(text: &str) -> String {
-    text.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"_.-~".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
+pub use crate::links::quote_all;
 
 #[cfg(test)]
 mod tests {

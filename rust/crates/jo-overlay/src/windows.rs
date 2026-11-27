@@ -18,12 +18,15 @@ use crate::alerts::{self, PopupLine};
 use crate::app::{OverlayApp, Services, UiEvent, Waker};
 use crate::model::{Desk, Queue};
 use crate::platform;
+use crate::preview;
 use crate::report::{self, Outcome, Person, RankRow, ReportGate};
 use crate::stats;
 use crate::theme::{self, c};
 use crate::widgets::{self, Clickable};
 
 pub const POPUP_TITLE: &str = "Jira Overlay — Alerts";
+pub const PREVIEW_TITLE: &str = "Jira Overlay — Preview";
+const ALERT_HEADER: &str = "  ALERT QUEUE — click to open  ";
 
 /// First-run "Which queues should trigger alerts?".
 pub struct AlertPicker {
@@ -68,6 +71,8 @@ pub struct ReportWindow {
     pub to: String,
     pub people: Vec<Person>,
     pub results: Vec<(String, Option<u64>)>,
+    /// Per-person SLA % and median, parallel to `results`.
+    pub stats: Vec<report::PersonStats>,
     pub rows: Vec<RankRow>,
     pub subtitle: String,
     pub status: (String, bool),
@@ -109,6 +114,7 @@ impl ReportWindow {
             to: today.format("%Y-%m-%d").to_string(),
             people: report::report_users(cfg),
             results: Vec::new(),
+            stats: Vec::new(),
             rows: Vec::new(),
             subtitle: String::new(),
             status: (String::new(), false),
@@ -155,9 +161,10 @@ impl ReportWindow {
         if !self.gate.wanted(outcome.seq) {
             return;
         }
-        self.rows = report::ranking(&outcome.results, outcome.total);
+        self.rows = report::ranking(&outcome.results, &outcome.stats, outcome.total);
         self.status = report::coverage_status(&outcome);
         self.results = outcome.results;
+        self.stats = outcome.stats;
     }
 
     pub fn export(&mut self, root: &Path, platform: &dyn platform::Platform) {
@@ -167,7 +174,7 @@ impl ReportWindow {
         }
         let (start, end) = self.period().unwrap_or((stats::today(), stats::today()));
         let path = report::export_path(root, start, end);
-        match std::fs::write(&path, report::csv_text(&self.results, start, end, &self.basis)) {
+        match std::fs::write(&path, report::csv_text(&self.results, &self.stats, start, end, &self.basis)) {
             Ok(()) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.status = (format!("Saved {name}"), false);
@@ -190,6 +197,7 @@ impl OverlayApp<'_> {
     pub fn secondary_windows(&mut self, ctx: &egui::Context) {
         self.snooze_menu(ctx);
         self.alert_popup(ctx);
+        self.preview_popup(ctx);
         self.desk_picker_window(ctx);
         self.alert_picker_window(ctx);
         self.report_window(ctx);
@@ -209,7 +217,7 @@ impl OverlayApp<'_> {
             .fixed_pos(pos2(anchor.left(), anchor.top() - 4.0))
             .constrain(true)
             .show(ctx, |ui| {
-                egui::Frame::new().fill(c::INPUT).stroke(egui::Stroke::new(1.0, c::DIVIDER)).corner_radius(4).show(
+                egui::Frame::new().fill(c::input()).stroke(egui::Stroke::new(1.0, c::divider())).corner_radius(4).show(
                     ui,
                     |ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -218,7 +226,7 @@ impl OverlayApp<'_> {
                                 ui,
                                 label,
                                 font.clone(),
-                                (c::FG_BRIGHT, c::INPUT, c::ACCENT),
+                                (c::fg_bright(), c::input(), c::accent()),
                                 Some(120.0),
                                 true,
                             );
@@ -250,31 +258,20 @@ impl OverlayApp<'_> {
             self.popup_hwnd = None;
             return;
         }
-        let ppp = self.ppp;
         let size = self.popup_size.unwrap_or(vec2(360.0, 120.0));
-        let (sw, _) = self.svc.platform.screen_size();
-        let (x, y) = (self.rect.x as f32 / ppp, self.rect.y as f32 / ppp);
-        let pos = pos2(x.min(sw as f32 / ppp - size.x - 10.0).max(0.0), (y - size.y - 6.0).max(0.0));
-        let builder = ViewportBuilder::default()
-            .with_title(POPUP_TITLE)
-            .with_decorations(false)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_active(false)
-            .with_resizable(false)
-            .with_inner_size(size)
-            .with_position(pos);
+        let builder = self.popup_builder(POPUP_TITLE, size);
         let lines = alerts::popup_lines(&self.st.snap.new_issues, &self.st.suggestions);
         let mut open = None;
         let mut dismiss = false;
-        let measured = ctx.show_viewport_immediate(ViewportId::from_hash_of("alert-popup"), builder, |ui, _class| {
-            ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, c::INPUT);
-            let inner = egui::Frame::new().fill(c::INPUT).show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                popup_contents(ui, &lines, &mut open, &mut dismiss)
+        let (measured, _) =
+            ctx.show_viewport_immediate(ViewportId::from_hash_of("alert-popup"), builder, |ui, _class| {
+                ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, c::input());
+                let inner = egui::Frame::new().fill(c::input()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    popup_contents(ui, ALERT_HEADER, &lines, &mut open, Some(&mut dismiss))
+                });
+                popup_measure(ui, &inner.response.rect)
             });
-            inner.response.rect.size()
-        });
         if self.popup_hwnd.is_none() {
             self.popup_hwnd = platform::find_own_window(POPUP_TITLE);
             if let Some(h) = self.popup_hwnd {
@@ -295,6 +292,80 @@ impl OverlayApp<'_> {
         }
     }
 
+    /// A borderless, non-activating popup just above the overlay.
+    fn popup_builder(&self, title: &str, size: Vec2) -> ViewportBuilder {
+        let ppp = self.ppp;
+        let (sw, _) = self.svc.platform.screen_size();
+        let (x, y) = (self.rect.x as f32 / ppp, self.rect.y as f32 / ppp);
+        let pos = pos2(x.min(sw as f32 / ppp - size.x - 10.0).max(0.0), (y - size.y - 6.0).max(0.0));
+        ViewportBuilder::default()
+            .with_title(title)
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_active(false)
+            .with_resizable(false)
+            .with_inner_size(size)
+            .with_position(pos)
+    }
+
+    /// A queue's newest tickets while its row (or this popup) is hovered.
+    fn preview_popup(&mut self, ctx: &egui::Context) {
+        let Some((queue_id, queue_name)) = self.preview_queue.clone() else {
+            self.preview_size = None;
+            self.preview_hwnd = None;
+            return;
+        };
+        if !self.st.visible || self.st.in_settings {
+            self.close_preview();
+            return;
+        }
+        let lines: Vec<PopupLine> = match self.preview.get(&queue_id) {
+            None => vec![PopupLine::Note("Loading…".into())],
+            Some(None) => vec![PopupLine::Note("Could not load this queue".into())],
+            Some(Some([])) => vec![PopupLine::Note("No tickets in this queue".into())],
+            Some(Some(issues)) => preview::tickets(issues, &self.st.suggestions, chrono::Utc::now())
+                .into_iter()
+                .map(|t| PopupLine::Ticket {
+                    detail: alerts::detail_text(t.age.as_deref(), t.assignee.as_deref()),
+                    key: t.key,
+                    summary: t.summary,
+                    suggestion: t.suggestion,
+                })
+                .collect(),
+        };
+        let header = format!("  {} — newest  ", queue_name.to_uppercase());
+        let size = self.preview_size.unwrap_or(vec2(360.0, 80.0));
+        let builder = self.popup_builder(PREVIEW_TITLE, size);
+        let mut open = None;
+        let (measured, inside) =
+            ctx.show_viewport_immediate(ViewportId::from_hash_of("queue-preview"), builder, |ui, _class| {
+                ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, c::input());
+                let inner = egui::Frame::new().fill(c::input()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    popup_contents(ui, &header, &lines, &mut open, None)
+                });
+                popup_measure(ui, &inner.response.rect)
+            });
+        if inside {
+            self.preview_inside = Some(Instant::now());
+        }
+        if self.preview_hwnd.is_none() {
+            self.preview_hwnd = platform::find_own_window(PREVIEW_TITLE);
+            if let Some(h) = self.preview_hwnd {
+                platform::round_corners(h, false);
+            }
+        }
+        if self.preview_size.is_none_or(|s| (s - measured).length() > 1.0) {
+            self.preview_size = Some(measured);
+            ctx.request_repaint();
+        }
+        if let Some(key) = open {
+            let url = self.ticket_url(&key);
+            self.svc.platform.open_url(&url);
+        }
+    }
+
     fn desk_picker_window(&mut self, ctx: &egui::Context) {
         let Some(picker) = &self.desk_picker else { return };
         let desks = picker.desks.clone();
@@ -304,9 +375,9 @@ impl OverlayApp<'_> {
             .with_resizable(false);
         let mut answer: Option<Option<Desk>> = None;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("desk-picker"), builder, |ui, _| {
-            egui::Frame::new().fill(c::BG_DARK).inner_margin(egui::Margin::symmetric(24, 18)).show(ui, |ui| {
+            egui::Frame::new().fill(c::bg_dark()).inner_margin(egui::Margin::symmetric(24, 18)).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    widgets::label(ui, "Which service desk to monitor?", theme::bold(11.0), c::FG_BRIGHT);
+                    widgets::label(ui, "Which service desk to monitor?", theme::bold(11.0), c::fg_bright());
                 });
                 ui.add_space(10.0);
                 let width = ui.available_width();
@@ -315,7 +386,7 @@ impl OverlayApp<'_> {
                         ui,
                         &desk.label(),
                         theme::regular(10.0),
-                        (c::FG_BRIGHT, c::INPUT, c::ACCENT),
+                        (c::fg_bright(), c::input(), c::accent()),
                         Some(width),
                         true,
                     );
@@ -345,14 +416,14 @@ impl OverlayApp<'_> {
             .with_always_on_top();
         let mut result: Option<Option<Vec<String>>> = None;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("alert-picker"), builder, |ui, _| {
-            egui::Frame::new().fill(c::BG_DARK).inner_margin(egui::Margin::symmetric(20, 16)).show(ui, |ui| {
+            egui::Frame::new().fill(c::bg_dark()).inner_margin(egui::Margin::symmetric(20, 16)).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    widgets::label(ui, "Which queues should trigger alerts?", theme::bold(11.0), c::FG_BRIGHT);
+                    widgets::label(ui, "Which queues should trigger alerts?", theme::bold(11.0), c::fg_bright());
                     widgets::label(
                         ui,
                         "The overlay will appear and notifications will fire\nwhen new tickets arrive in any of these queues.",
                         theme::regular(8.0),
-                        c::FG_DIM,
+                        c::fg_dim(),
                     );
                 });
                 ui.add_space(10.0);
@@ -365,7 +436,7 @@ impl OverlayApp<'_> {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let half = (ui.available_width() - 4.0) / 2.0;
-                        if widgets::flat_button(ui, "✓  Save", theme::bold(9.0), (c::WHITE, c::ACCENT, c::ACCENT_HI), Some(half), true)
+                        if widgets::flat_button(ui, "✓  Save", theme::bold(9.0), (c::white(), c::accent(), c::accent_hi()), Some(half), true)
                             .clicked()
                         {
                             result = Some(Some(picker.chosen()));
@@ -374,7 +445,7 @@ impl OverlayApp<'_> {
                             ui,
                             "Don't alert me — just show the counts",
                             theme::regular(9.0),
-                            (c::FG_DIM, c::INPUT, c::CHIP),
+                            (c::fg_dim(), c::input(), c::chip()),
                             Some(half),
                             true,
                         )
@@ -413,7 +484,7 @@ impl OverlayApp<'_> {
             ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
         }
         ctx.show_viewport_immediate(id, builder, |ui, _| {
-            egui::Frame::new().fill(c::BG).inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
+            egui::Frame::new().fill(c::bg()).inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
                 if modal {
                     ui.disable();
                 }
@@ -473,13 +544,13 @@ impl OverlayApp<'_> {
             ViewportBuilder::default().with_title("Jira Overlay — Report People").with_inner_size([380.0, 460.0]);
         let mut result: Option<Option<Vec<Person>>> = None;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("report-people"), builder, |ui, _| {
-            egui::Frame::new().fill(c::BG).inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
-                widgets::label(ui, "Tick everyone the report should cover", theme::regular(9.0), c::FG);
+            egui::Frame::new().fill(c::bg()).inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+                widgets::label(ui, "Tick everyone the report should cover", theme::regular(9.0), c::fg());
                 ui.add_space(8.0);
                 let list_h = (ui.available_height() - 44.0).max(60.0);
                 egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                     if picker.rows.is_empty() {
-                        widgets::label(ui, "Looking up assignable users…", theme::regular(9.0), c::FG_DIM);
+                        widgets::label(ui, "Looking up assignable users…", theme::regular(9.0), c::fg_dim());
                     }
                     for (i, (person, ticked)) in picker.rows.iter_mut().enumerate() {
                         ui.push_id(i, |ui| ui.checkbox(ticked, person.name.as_str()));
@@ -491,7 +562,7 @@ impl OverlayApp<'_> {
                         ui,
                         "Save",
                         theme::bold(9.0),
-                        (c::WHITE, c::ACCENT, c::ACCENT_HI),
+                        (c::white(), c::accent(), c::accent_hi()),
                         None,
                         true,
                     )
@@ -500,8 +571,15 @@ impl OverlayApp<'_> {
                         result = Some(Some(picker.chosen()));
                     }
                     ui.add_space(8.0);
-                    if widgets::flat_button(ui, "Cancel", theme::regular(9.0), (c::FG, c::INPUT, c::CHIP), None, true)
-                        .clicked()
+                    if widgets::flat_button(
+                        ui,
+                        "Cancel",
+                        theme::regular(9.0),
+                        (c::fg(), c::input(), c::chip()),
+                        None,
+                        true,
+                    )
+                    .clicked()
                     {
                         result = Some(None);
                     }
@@ -526,46 +604,68 @@ impl OverlayApp<'_> {
     }
 }
 
-fn popup_contents(ui: &mut Ui, lines: &[PopupLine], open: &mut Option<String>, dismiss: &mut bool) {
-    let width = popup_width(ui, lines);
-    let header = "  ALERT QUEUE — click to open  ";
+/// A popup's content size, and whether the pointer is over it.
+fn popup_measure(ui: &Ui, content: &Rect) -> (Vec2, bool) {
+    let inside = ui.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| content.contains(p));
+    (content.size(), inside)
+}
+
+fn popup_contents(
+    ui: &mut Ui,
+    header: &str,
+    lines: &[PopupLine],
+    open: &mut Option<String>,
+    dismiss: Option<&mut bool>,
+) {
+    let width = popup_width(ui, header, lines, dismiss.is_some());
     let font7b = theme::bold(7.0);
     let h = widgets::text_size(ui, header, &font7b).y + 8.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, header, font7b.clone(), c::FG_DIM);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, header, font7b.clone(), c::fg_dim());
     widgets::describe(&resp, Role::Label, header.trim());
-    rule(ui, width, c::FG_DIM, 0.0);
+    rule(ui, width, c::fg_dim(), 0.0);
     for line in lines {
         match line {
             PopupLine::Header(name) => {
                 ui.add_space(4.0);
-                widgets::line(ui, &format!("  {name}  "), font7b.clone(), c::INFO);
+                widgets::line(ui, &format!("  {name}  "), font7b.clone(), c::info());
             }
-            PopupLine::Ticket { key, summary, suggestion } => {
+            PopupLine::Ticket { key, summary, detail, suggestion } => {
                 ui.add_space(2.0);
                 let key_font = theme::bold(8.0);
                 let text_font = theme::regular(8.0);
                 let line_h = widgets::text_size(ui, key, &key_font).y;
-                let rows = if suggestion.is_some() { 2.0 } else { 1.0 };
+                let rows = if suggestion.is_some() || detail.is_some() { 2.0 } else { 1.0 };
                 let (rect, resp) = ui.allocate_exact_size(vec2(width, line_h * rows), Sense::click());
                 ui.add_space(2.0);
                 let row = rect.shrink2(vec2(8.0, 0.0));
                 if resp.hovered() {
-                    ui.painter().rect_filled(row, CornerRadius::ZERO, c::CHIP);
+                    ui.painter().rect_filled(row, CornerRadius::ZERO, c::chip());
                 }
                 let top = row.top() + line_h / 2.0;
-                ui.painter().text(pos2(row.left(), top), Align2::LEFT_CENTER, key, key_font, c::ACCENT);
-                ui.painter().text(pos2(row.left() + 76.0, top), Align2::LEFT_CENTER, summary, text_font.clone(), c::FG);
-                if let Some((label, review)) = suggestion {
-                    // U+FE0E keeps the triangle a text glyph in the label colour.
-                    let (icon, colour) = if *review { ("⚠\u{FE0E}", c::WARN) } else { ("●", c::OK) };
-                    ui.painter().text(
-                        pos2(row.left() + 48.0, top + line_h),
-                        Align2::LEFT_CENTER,
-                        format!("{icon} {label}"),
-                        text_font,
-                        colour,
-                    );
+                ui.painter().text(pos2(row.left(), top), Align2::LEFT_CENTER, key, key_font, c::accent());
+                ui.painter().text(
+                    pos2(row.left() + 76.0, top),
+                    Align2::LEFT_CENTER,
+                    summary,
+                    text_font.clone(),
+                    c::fg(),
+                );
+                if let Some(detail) = detail {
+                    let at = pos2(row.left() + 76.0, top + line_h);
+                    ui.painter().text(at, Align2::LEFT_CENTER, detail, text_font.clone(), c::fg_dim());
+                }
+                if let Some((hint, review)) = suggestion {
+                    // The hint carries its own "→" or (text-style) "⚠".
+                    let colour = if *review { c::warn() } else { c::ok() };
+                    let x = match detail {
+                        Some(d) => row.left() + 76.0 + widgets::text_size(ui, d, &text_font).x + 12.0,
+                        None => row.left() + 76.0,
+                    };
+                    let drawn = ui.painter().text(pos2(x, top + line_h), Align2::LEFT_CENTER, hint, text_font, colour);
+                    // Readable by screen readers (hover-only: the row keeps the click).
+                    let note = ui.interact(drawn, ui.scope_id().with(("hint", key)), Sense::hover());
+                    widgets::describe(&note, Role::Label, hint);
                 }
                 widgets::describe(&resp, Role::Button, &format!("{key} {summary}"));
                 if resp.clicked() {
@@ -573,18 +673,27 @@ fn popup_contents(ui: &mut Ui, lines: &[PopupLine], open: &mut Option<String>, d
                 }
             }
             PopupLine::More(n) => {
-                widgets::line(ui, &format!("  …and {n} more  "), theme::regular(7.0), c::FG_DIM);
+                widgets::line(ui, &format!("  …and {n} more  "), theme::regular(7.0), c::fg_dim());
+            }
+            PopupLine::Note(text) => {
+                ui.add_space(4.0);
+                widgets::line(ui, &format!("  {text}  "), theme::regular(8.0), c::fg_dim());
+                ui.add_space(4.0);
             }
         }
     }
-    rule(ui, width, c::FG_DIM, 4.0);
+    let Some(dismiss) = dismiss else {
+        ui.add_space(4.0);
+        return;
+    };
+    rule(ui, width, c::fg_dim(), 4.0);
     let resp = Clickable {
         text: "✓  Dismiss — hide until new tickets",
         font: theme::regular(8.0),
-        color: c::OK,
-        hover_color: c::OK,
+        color: c::ok(),
+        hover_color: c::ok(),
         bg: None,
-        hover_bg: Some(c::CHIP),
+        hover_bg: Some(c::chip()),
         pad: vec2(8.0, 4.0),
         label: None,
     };
@@ -599,20 +708,23 @@ fn popup_contents(ui: &mut Ui, lines: &[PopupLine], open: &mut Option<String>, d
     ui.add_space(4.0);
 }
 
-fn popup_width(ui: &Ui, lines: &[PopupLine]) -> f32 {
-    let mut width = widgets::text_size(ui, "  ALERT QUEUE — click to open  ", &theme::bold(7.0)).x;
-    width = width.max(widgets::text_size(ui, "✓  Dismiss — hide until new tickets", &theme::regular(8.0)).x + 32.0);
+fn popup_width(ui: &Ui, header: &str, lines: &[PopupLine], dismiss: bool) -> f32 {
+    let small = theme::regular(8.0);
+    let mut width = widgets::text_size(ui, header, &theme::bold(7.0)).x;
+    if dismiss {
+        width = width.max(widgets::text_size(ui, "✓  Dismiss — hide until new tickets", &small).x + 32.0);
+    }
     for line in lines {
         let w = match line {
             PopupLine::Header(name) => widgets::text_size(ui, &format!("  {name}  "), &theme::bold(7.0)).x,
-            PopupLine::Ticket { summary, suggestion, .. } => {
-                let main = 16.0 + 76.0 + widgets::text_size(ui, summary, &theme::regular(8.0)).x;
-                let sugg = suggestion.as_ref().map_or(0.0, |(l, _)| {
-                    16.0 + 48.0 + widgets::text_size(ui, &format!("⚠ {l}"), &theme::regular(8.0)).x
-                });
-                main.max(sugg)
+            PopupLine::Ticket { summary, detail, suggestion, .. } => {
+                let main = 16.0 + 76.0 + widgets::text_size(ui, summary, &small).x;
+                let detail_w = detail.as_ref().map_or(0.0, |d| widgets::text_size(ui, d, &small).x + 12.0);
+                let hint_w = suggestion.as_ref().map_or(0.0, |(l, _)| widgets::text_size(ui, l, &small).x);
+                main.max(16.0 + 76.0 + detail_w + hint_w)
             }
             PopupLine::More(n) => widgets::text_size(ui, &format!("  …and {n} more  "), &theme::regular(7.0)).x,
+            PopupLine::Note(text) => widgets::text_size(ui, &format!("  {text}  "), &small).x,
         };
         width = width.max(w);
     }
@@ -627,8 +739,8 @@ fn rule(ui: &mut Ui, width: f32, color: Color32, above: f32) {
 
 fn report_contents(ui: &mut Ui, r: &mut ReportWindow, act: &mut ReportActions) {
     ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
-    widgets::label(ui, &theme::track("TEAM REPORT"), theme::bold(9.0), c::ACCENT);
-    widgets::label(ui, &r.subtitle, theme::regular(9.0), c::FG_DIM);
+    widgets::label(ui, &theme::track("TEAM REPORT"), theme::bold(9.0), c::accent());
+    widgets::label(ui, &r.subtitle, theme::regular(9.0), c::fg_dim());
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         for (label, _) in report::REPORT_RANGES {
@@ -640,18 +752,18 @@ fn report_contents(ui: &mut Ui, r: &mut ReportWindow, act: &mut ReportActions) {
     if r.range == "Custom" {
         ui.horizontal(|ui| {
             for (text, value) in [("From", &mut r.from), ("To", &mut r.to)] {
-                widgets::label(ui, text, theme::regular(8.0), c::FG_DIM);
+                widgets::label(ui, text, theme::regular(8.0), c::fg_dim());
                 let resp = ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     act.refresh = true;
                 }
             }
-            widgets::label(ui, "yyyy-mm-dd", theme::regular(8.0), c::FG_DIM);
+            widgets::label(ui, "yyyy-mm-dd", theme::regular(8.0), c::fg_dim());
         });
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        widgets::label(ui, "Count by", theme::regular(8.0), c::FG_DIM);
+        widgets::label(ui, "Count by", theme::regular(8.0), c::fg_dim());
         for (label, value) in report::REPORT_BASES {
             if ui.radio_value(&mut r.basis, value.to_owned(), label).clicked() {
                 act.refresh = true;
@@ -662,7 +774,7 @@ fn report_contents(ui: &mut Ui, r: &mut ReportWindow, act: &mut ReportActions) {
     let list_h = (ui.available_height() - 60.0).max(80.0);
     egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
         if r.rows.is_empty() {
-            widgets::label(ui, "Nothing to show yet.", theme::regular(9.0), c::FG_DIM);
+            widgets::label(ui, "Nothing to show yet.", theme::regular(9.0), c::fg_dim());
         }
         for row in &r.rows {
             rank_row(ui, row);
@@ -676,10 +788,10 @@ fn report_contents(ui: &mut Ui, r: &mut ReportWindow, act: &mut ReportActions) {
             let resp = Clickable {
                 text,
                 font: theme::regular(9.0),
-                color: c::FG,
-                hover_color: c::FG_BRIGHT,
-                bg: Some(c::INPUT),
-                hover_bg: Some(c::CHIP),
+                color: c::fg(),
+                hover_color: c::fg_bright(),
+                bg: Some(c::input()),
+                hover_bg: Some(c::chip()),
                 pad: vec2(12.0, 5.0),
                 label: None,
             }
@@ -690,7 +802,7 @@ fn report_contents(ui: &mut Ui, r: &mut ReportWindow, act: &mut ReportActions) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (text, warn) = &r.status;
-            widgets::label(ui, text, theme::regular(8.0), if *warn { c::WARN } else { c::FG_DIM });
+            widgets::label(ui, text, theme::regular(8.0), if *warn { c::warn() } else { c::fg_dim() });
         });
     });
 }
@@ -699,28 +811,49 @@ fn rank_row(ui: &mut Ui, row: &RankRow) {
     let first = row.place == 1;
     let font = theme::regular(9.0);
     let h = widgets::text_size(ui, &row.name, &font).y + 6.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let label = [row.name.as_str(), row.count.as_str(), row.sla.as_str(), row.median.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    widgets::describe(&resp, Role::Label, &label);
     let p = ui.painter();
     let cy = rect.center().y;
-    p.text(pos2(rect.left(), cy), Align2::LEFT_CENTER, format!("{}.", row.place), font.clone(), c::FG_DIM);
+    p.text(pos2(rect.left(), cy), Align2::LEFT_CENTER, format!("{}.", row.place), font.clone(), c::fg_dim());
     let name_rect = Rect::from_min_max(pos2(rect.left() + 26.0, rect.top()), pos2(rect.left() + 176.0, rect.bottom()));
     p.with_clip_rect(name_rect).text(
         pos2(name_rect.left(), cy),
         Align2::LEFT_CENTER,
         &row.name,
         font.clone(),
-        if first { c::FG_BRIGHT } else { c::FG },
+        if first { c::fg_bright() } else { c::fg() },
     );
     let chip = Rect::from_min_max(pos2(rect.right() - 52.0, rect.top() + 1.0), pos2(rect.right(), rect.bottom() - 1.0));
-    p.rect_filled(chip, CornerRadius::same(3), c::BADGE);
-    p.text(chip.center(), Align2::CENTER_CENTER, &row.count, theme::bold(9.0), if first { c::ACCENT } else { c::FG });
-    p.text(pos2(chip.left() - 8.0, cy), Align2::RIGHT_CENTER, &row.share, theme::regular(8.0), c::FG_DIM);
-    let track = Rect::from_min_max(pos2(name_rect.right() + 8.0, cy - 3.0), pos2(chip.left() - 52.0, cy + 3.0));
+    p.rect_filled(chip, CornerRadius::same(3), c::badge());
+    p.text(
+        chip.center(),
+        Align2::CENTER_CENTER,
+        &row.count,
+        theme::bold(9.0),
+        if first { c::accent() } else { c::fg() },
+    );
+    p.text(pos2(chip.left() - 8.0, cy), Align2::RIGHT_CENTER, &row.share, theme::regular(8.0), c::fg_dim());
+    // Per-person SLA % and median time to resolution, before the share.
+    let stats_text = [row.sla.as_str(), row.median.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let stats_right = chip.left() - 48.0;
+    let mut track_right = stats_right;
+    if !stats_text.is_empty() {
+        let text = stats_text.join(" · ");
+        let drawn = p.text(pos2(stats_right, cy), Align2::RIGHT_CENTER, &text, theme::regular(8.0), c::fg());
+        track_right = drawn.left() - 8.0;
+    }
+    let track = Rect::from_min_max(pos2(name_rect.right() + 8.0, cy - 3.0), pos2(track_right, cy + 3.0));
     if track.width() > 0.0 {
-        p.rect_filled(track, CornerRadius::ZERO, c::INPUT);
+        p.rect_filled(track, CornerRadius::ZERO, c::input());
         if row.bar > 0.0 {
             let bar = Rect::from_min_size(track.min, vec2(track.width() * row.bar, track.height()));
-            p.rect_filled(bar, CornerRadius::ZERO, if first { c::ACCENT } else { c::INFO });
+            p.rect_filled(bar, CornerRadius::ZERO, if first { c::accent() } else { c::info() });
         }
     }
 }

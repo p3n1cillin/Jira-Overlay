@@ -1,11 +1,22 @@
 //! Windows toast notifications through WinRT directly — no PowerShell, no
 //! child process, nothing for ticket text to escape into but XML.
 
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use windows::Data::Xml::Dom::XmlDocument;
+use windows::Foundation::TypedEventHandler;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, IInspectable};
+
+/// Receives the URL of a clicked toast (the UI thread opens it).
+pub type ActivationSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Toasts stay clickable only while their object is alive in this
+/// process, so the most recent few are kept.
+const KEEP_ALIVE: usize = 16;
+static LIVE: Mutex<VecDeque<ToastNotification>> = Mutex::new(VecDeque::new());
 
 /// The AppUserModelID the installer's Start-menu shortcut registers.
 pub const APP_ID: &str = "JiraOverlay";
@@ -47,6 +58,7 @@ pub fn toast_xml(title: &str, body: &str) -> String {
 /// Chooses the AppUserModelID once and shows toasts off the UI thread.
 pub struct Toaster {
     app_id: &'static str,
+    sink: Arc<Mutex<Option<ActivationSink>>>,
 }
 
 impl Toaster {
@@ -60,7 +72,12 @@ impl Toaster {
                 let _ = windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID));
             }
         }
-        Self { app_id: if registered { APP_ID } else { FALLBACK_ID } }
+        Self { app_id: if registered { APP_ID } else { FALLBACK_ID }, sink: Arc::default() }
+    }
+
+    /// Where clicks on toasts go. Until set, toasts are not clickable.
+    pub fn set_activation_sink(&self, sink: ActivationSink) {
+        *self.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
     }
 
     pub fn app_id(&self) -> &'static str {
@@ -68,11 +85,14 @@ impl Toaster {
     }
 
     /// Fire and forget; any failure is silent, as a toast is never worth
-    /// interrupting the repaint that triggered it.
-    pub fn show(&self, title: &str, body: &str) {
+    /// interrupting the repaint that triggered it. Clicking the toast hands
+    /// `open` to the activation sink.
+    pub fn show(&self, title: &str, body: &str, open: Option<&str>) {
         let (id, xml) = (self.app_id, toast_xml(title, body));
+        let sink = self.sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let target = open.zip(sink).map(|(url, sink)| (url.to_owned(), sink));
         let _ = std::thread::Builder::new().name("toast".into()).spawn(move || {
-            let _ = send(id, &xml);
+            let _ = send(id, &xml, target);
         });
     }
 }
@@ -82,11 +102,26 @@ fn start_menu_shortcut() -> Option<std::path::PathBuf> {
     Some(Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs\Jira Overlay\Jira Overlay.lnk"))
 }
 
-fn send(app_id: &str, xml: &str) -> windows::core::Result<()> {
+fn send(app_id: &str, xml: &str, target: Option<(String, ActivationSink)>) -> windows::core::Result<()> {
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(xml))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
-    ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))?.Show(&toast)
+    if let Some((url, sink)) = target {
+        // In-process activation: works while the toast object lives here.
+        // Where it isn't available the toast still shows, just not clickable.
+        let handler = TypedEventHandler::<ToastNotification, IInspectable>::new(move |_, _| {
+            sink(url.clone());
+            Ok(())
+        });
+        let _ = toast.Activated(&handler);
+    }
+    ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))?.Show(&toast)?;
+    let mut live = LIVE.lock().unwrap_or_else(|p| p.into_inner());
+    live.push_back(toast);
+    while live.len() > KEEP_ALIVE {
+        live.pop_front();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -130,6 +165,30 @@ mod tests {
         // The document WinRT receives must parse, whatever the summary held.
         let doc = XmlDocument::new().unwrap();
         doc.LoadXml(&HSTRING::from(xml)).expect("well-formed toast XML");
+    }
+
+    #[test]
+    fn activation_reaches_the_sink() {
+        // The handler is the one wired to `Activated`; invoking it directly
+        // proves a click hands over exactly the URL the toast was built with.
+        let got: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = got.clone();
+        let sink: ActivationSink = Arc::new(move |url| log.lock().unwrap().push(url));
+        let url = "https://e.atlassian.net/browse/SD-1".to_owned();
+        let handler = TypedEventHandler::<ToastNotification, IInspectable>::new(move |_, _| {
+            sink(url.clone());
+            Ok(())
+        });
+        let doc = XmlDocument::new().unwrap();
+        doc.LoadXml(&HSTRING::from(toast_xml("t", "b"))).unwrap();
+        let toast = ToastNotification::CreateToastNotification(&doc).unwrap();
+        let token = toast.Activated(&handler).expect("the event can be subscribed in-process");
+        handler.Invoke(&toast, None).unwrap();
+        toast.RemoveActivated(token).unwrap();
+        assert_eq!(*got.lock().unwrap(), ["https://e.atlassian.net/browse/SD-1"]);
+
+        let toaster = Toaster::detect(tempfile::tempdir().unwrap().path());
+        assert!(toaster.sink.lock().unwrap().is_none(), "not clickable until the UI provides a sink");
     }
 
     #[test]

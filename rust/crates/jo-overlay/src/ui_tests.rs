@@ -47,7 +47,7 @@ fn fixture_in(dir: tempfile::TempDir, config: Config, jira: FakeJira, latest: Op
         config,
         svc,
         Box::new(move |reason, quit| log.lock().unwrap().push((reason.to_owned(), quit))),
-        Options { hwnd: None, tray: false, poller: false },
+        Options { hwnd: None, tray: false, poller: false, hotkey: false },
     );
     let harness =
         Harness::builder().with_size([420.0, 1900.0]).with_accessibility_check(false).with_max_steps(8).build_ui_state(
@@ -78,10 +78,7 @@ fn snapshot(queues: &[(&str, u64)], issues: &[(&str, &str)]) -> Snapshot {
             .map(|(i, (n, c))| Queue { name: (*n).into(), id: (i + 1).to_string(), issue_count: *c })
             .collect(),
         all_queue_names: queues.iter().map(|(n, _)| (*n).into()).collect(),
-        new_issues: issues
-            .iter()
-            .map(|(k, q)| Issue { key: (*k).into(), summary: Some(format!("Printer {k}")), queue: (*q).into() })
-            .collect(),
+        new_issues: issues.iter().map(|(k, q)| Issue::new(k, Some(&format!("Printer {k}")), q)).collect(),
         alert_count: issues.len() as u64,
         completed_today: 5,
         sla_compliance: Some(98),
@@ -431,8 +428,18 @@ fn report_jira() -> FakeJira {
                 json!([{"displayName": "Ada", "accountId": "acc-ada"}, {"displayName": "Sam", "accountId": "acc-sam"}]),
             );
         }
+        if req.url.ends_with("/search/jql") {
+            let issue = |h: u32| {
+                json!({"key": format!("SD-{h}"), "fields": {
+                "created": "2026-11-02T09:00:00.000+0000",
+                "resolutiondate": format!("2026-11-02T{:02}:00:00.000+0000", 9 + h)}})
+            };
+            return ok_json(json!({"issues": [issue(2), issue(4), issue(6)], "isLast": true}));
+        }
         let jql = req.body.as_ref().and_then(|b| b["jql"].as_str()).unwrap_or_default().to_owned();
-        let n = if jql.contains("acc-sam") || jql.contains("\"Sam\"") {
+        let n = if jql.contains("everBreached") {
+            1
+        } else if jql.contains("acc-sam") || jql.contains("\"Sam\"") {
             4
         } else if jql.contains("IS EMPTY") {
             1
@@ -465,12 +472,15 @@ fn team_report_counts_exports_and_picks_people() {
     assert_eq!(f.app().report.as_ref().unwrap().range, "30 days", "an unknown range falls back");
     wait_for(&mut f, |f| f.app().report.as_ref().is_some_and(|r| !r.rows.is_empty()));
     assert!(f.has_text("4 of 10 completed (40%) · 1 had no assignee"));
+    assert!(f.has_text("Sam · 4 · SLA 75% · 4.0h"), "per-person SLA and median resolution time");
 
     f.click("Export CSV");
     let report = f.app().report.as_ref().unwrap();
     let (start, end) = report.period().unwrap();
     let csv = crate::report::export_path(f.dir.path(), start, end);
-    assert!(fs::read_to_string(&csv).unwrap().contains("Sam,4,"));
+    let text = fs::read_to_string(&csv).unwrap();
+    assert!(text.starts_with("Person,Completed,SLA %,Median hours to resolution,"), "{text}");
+    assert!(text.contains("Sam,4,75,4.0,"), "{text}");
     assert_eq!(f.platform.with(|r| r.opened.clone()), [csv]);
 
     f.click("People…");
@@ -505,6 +515,182 @@ fn team_report_counts_exports_and_picks_people() {
     let saved = config::load(&f.dir.path().join(config::FILE_NAME)).unwrap();
     assert_eq!(saved["reportRange"], "30 days");
     assert_eq!(saved["reportBasis"], "resolved");
+}
+
+#[test]
+fn at_risk_shows_on_the_completed_row_and_opens_its_jql() {
+    use crate::model::{AtRisk, SlaTrend};
+    let mut f = fixture(wiring_config());
+    f.steps(2);
+    let mut snap = snapshot(&[("Open", 0)], &[]);
+    snap.at_risk = Some(AtRisk { count: 2, tickets: vec![("SD-1".into(), None), ("SD-2".into(), None)] });
+    snap.sla_trend = Some(SlaTrend { five: Some(94), twenty: Some(95) });
+    f.feed(snap);
+    assert!(f.has_text("⚠ 2 at risk"));
+    assert_eq!(f.app().st.sla_trend.as_deref(), Some("5d 94% · 20d 95%"));
+    f.click("⚠ 2 at risk");
+    let urls = f.platform.with(|r| r.urls.clone());
+    assert_eq!(urls.len(), 1, "the at-risk label takes the click, not the completed row: {urls:?}");
+    assert!(urls[0].contains("running%28%29") && urls[0].contains("remaining%28%2230m%22%29"), "{urls:?}");
+    f.click("✓  Completed today — 5");
+    assert!(f.platform.with(|r| r.urls[1].contains("statusCategory%20%3D%20Done")), "the row still opens completed");
+}
+
+#[test]
+fn hovering_a_queue_previews_its_newest_tickets() {
+    let jira = FakeJira::new(|req| {
+        if req.url.ends_with("/queue/2/issue") {
+            let values: Vec<Value> = (1..=10)
+                .map(|i| {
+                    json!({"key": format!("SD-{i}"), "fields": {
+                        "summary": format!("Laptop {i}"),
+                        "created": format!("2026-11-27T{:02}:00:00.000+0000", i),
+                        "assignee": {"displayName": "Sam Carter"}}})
+                })
+                .collect();
+            return ok_json(json!({ "values": values }));
+        }
+        ok_json(json!({}))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("triage_suggestions.json"),
+        json!({"SD-10": {"label": "With DEV · 92% — because: vpn", "review": false}}).to_string(),
+    )
+    .unwrap();
+    let mut f = fixture_in(dir, cfg(wiring_config()), jira.clone(), None);
+    f.steps(2);
+    f.feed(snapshot(&[("Open", 0), ("In Progress", 10)], &[]));
+    let fetches = |jira: &FakeJira| jira.requests().iter().filter(|r| r.url.ends_with("/queue/2/issue")).count();
+
+    f.harness.get_by_label("In Progress 10").hover();
+    f.steps(2);
+    assert_eq!(fetches(&jira), 0, "a passing pointer fetches nothing");
+    std::thread::sleep(crate::app::PREVIEW_DWELL + Duration::from_millis(50));
+    f.steps(2);
+    wait_for(&mut f, |f| f.app().preview.get("2").is_some());
+    assert!(f.has_text("IN PROGRESS — newest"));
+    assert!(f.has_text("SD-10 Laptop 10"), "newest first");
+    assert!(!f.has_text("SD-2 Laptop 2"), "at most eight");
+    assert!(f.has_text("→ With DEV · 92%"), "the learner's suggestion, inline");
+    let request = jira.requests().into_iter().find(|r| r.url.ends_with("/queue/2/issue")).unwrap();
+    assert_eq!(request.method, jo_jira::Method::Get, "read-only");
+    f.click("SD-9 Laptop 9");
+    assert!(f.platform.with(|r| r.urls.contains(&"https://e.atlassian.net/browse/SD-9".to_owned())));
+
+    // Hovering again within a minute reuses what was fetched.
+    f.app().close_preview();
+    f.harness.get_by_label("In Progress 10").hover();
+    // (Embedded in the test harness the old popup covered the row for one frame.)
+    f.steps(2);
+    std::thread::sleep(crate::app::PREVIEW_DWELL + Duration::from_millis(50));
+    f.steps(3);
+    assert!(f.app().preview_queue.is_some());
+    assert_eq!(fetches(&jira), 1, "cached per queue for 60 s");
+}
+
+#[test]
+fn new_settings_save_and_take_effect() {
+    let mut f = fixture(wiring_config());
+    f.steps(2);
+    f.click("Settings");
+    std::thread::sleep(Duration::from_millis(300));
+    f.steps(2);
+    f.click("Light");
+    f.click("1 hour");
+    f.app().settings.as_mut().unwrap().form.hotkey = "Off".into();
+    f.click("✓  Save");
+    let saved = config::load(&f.dir.path().join(config::FILE_NAME)).unwrap();
+    assert_eq!(saved["theme"], "Light");
+    assert_eq!(saved["slaAtRiskMinutes"], 60);
+    assert_eq!(saved["hotkey"], "Off");
+    assert!(!saved.contains_key("slaAtRiskToast"), "untouched settings stay unwritten");
+    f.steps(2);
+    assert!(crate::theme::c::is_light(), "the light palette is applied right away");
+    assert_eq!(f.harness.ctx.global_style().visuals.panel_fill, crate::theme::c::LIGHT.bg);
+
+    // Dark again.
+    f.click("Settings");
+    std::thread::sleep(Duration::from_millis(300));
+    f.steps(2);
+    f.click("Dark");
+    f.click("✓  Save");
+    f.steps(2);
+    assert!(!crate::theme::c::is_light());
+    assert_eq!(config::load(&f.dir.path().join(config::FILE_NAME)).unwrap()["theme"], "Dark");
+}
+
+#[test]
+fn learner_accuracy_table_renders_in_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string();
+    fs::write(
+        dir.path().join("triage_status.json"),
+        json!({"healthy": true, "updatedAt": now,
+               "recentPerformance": {
+                   "7": {"accuracy": {"predictions": 40, "correct": 36, "pct": 90.0}, "byPredicted": {"IT": [30, 27]}},
+                   "30": {"accuracy": {"predictions": 200, "correct": 184, "pct": 92.0}, "byPredicted": {"IT": [150, 139]}}},
+               "performanceDrift": {"warnings": [{"label": "Overall accuracy", "dropPoints": 5.5}]},
+               "routeSafety": {"With DEV": {"forceReview": true, "reason": "dormant"}}})
+        .to_string(),
+    )
+    .unwrap();
+    let mut f = fixture_in(dir, cfg(wiring_config()), FakeJira::new(|_| ok_json(json!({}))), None);
+    f.steps(2);
+    f.click("Settings");
+    for text in [
+        "Overall",
+        "90% (40)",
+        "92% (200)",
+        "93% (150)",
+        "Overall accuracy dropped 5.5 points",
+        "With DEV: always suggested for review — dormant",
+    ] {
+        assert!(f.has_text(text), "{text}");
+    }
+}
+
+#[test]
+fn toast_clicks_and_the_hotkey() {
+    let mut f = fixture(wiring_config());
+    f.steps(2);
+    let tx = f.app().tx.clone();
+    for url in [
+        "https://e.atlassian.net/browse/SD-1",
+        "https://evil.example/browse/SD-1",
+        "https://e.atlassian.net.evil.example/x",
+    ] {
+        tx.send(UiEvent::OpenUrl(url.into())).unwrap();
+    }
+    f.steps(2);
+    assert_eq!(
+        f.platform.with(|r| r.urls.clone()),
+        ["https://e.atlassian.net/browse/SD-1"],
+        "only the Jira site opens"
+    );
+
+    let visible = f.app().st.visible;
+    tx.send(UiEvent::Hotkey).unwrap();
+    f.steps(2);
+    assert_ne!(f.app().st.visible, visible, "the hotkey toggles the overlay");
+    tx.send(UiEvent::Hotkey).unwrap();
+    f.steps(2);
+    assert_eq!(f.app().st.visible, visible);
+}
+
+#[test]
+fn a_display_scale_change_refits_the_overlay() {
+    let mut f = fixture(wiring_config());
+    f.steps(2);
+    f.feed(snapshot(&[("Open", 1), ("In Progress", 3)], &[]));
+    f.steps(2);
+    let before = f.app().rect;
+    assert_eq!(before.w, 260);
+    f.harness.set_pixels_per_point(1.5);
+    f.steps(4);
+    let after = f.app().rect;
+    assert_eq!(after.w, 390, "width follows the new scale");
+    assert!((after.h as f32 - before.h as f32 * 1.5).abs() <= 3.0, "{before:?} -> {after:?}");
 }
 
 #[test]

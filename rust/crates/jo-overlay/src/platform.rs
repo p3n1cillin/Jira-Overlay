@@ -41,7 +41,8 @@ pub trait Platform: Send + Sync {
     fn open_folder(&self, path: &Path) -> io::Result<()>;
     /// Open a file with its associated app, falling back to Notepad.
     fn open_document(&self, path: &Path);
-    fn toast(&self, title: &str, body: &str);
+    /// A toast; clicking it opens `open` (a URL built by `links`).
+    fn toast(&self, title: &str, body: &str, open: Option<&str>);
     /// `MessageBeep(MB_ICONEXCLAMATION)`.
     fn beep(&self);
     fn info(&self, title: &str, text: &str);
@@ -67,6 +68,11 @@ pub struct Windows {
 impl Windows {
     pub fn new(root: &Path) -> Self {
         Self { root: root.to_path_buf(), owner: AtomicIsize::new(0), toaster: toast::Toaster::detect(root) }
+    }
+
+    /// Clicked toasts hand their URL to `sink`.
+    pub fn set_toast_activation(&self, sink: toast::ActivationSink) {
+        self.toaster.set_activation_sink(sink);
     }
 
     pub fn set_owner(&self, hwnd: isize) {
@@ -110,8 +116,8 @@ impl Platform for Windows {
         let _ = Command::new(system_binary("notepad.exe")).arg(path).spawn();
     }
 
-    fn toast(&self, title: &str, body: &str) {
-        self.toaster.show(title, body);
+    fn toast(&self, title: &str, body: &str, open: Option<&str>) {
+        self.toaster.show(title, body, open);
     }
 
     fn beep(&self) {

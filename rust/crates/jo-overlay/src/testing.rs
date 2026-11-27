@@ -70,6 +70,8 @@ pub struct Recorded {
     pub urls: Vec<String>,
     pub opened: Vec<PathBuf>,
     pub toasts: Vec<(String, String)>,
+    /// What clicking each toast would open, in toast order.
+    pub toast_urls: Vec<Option<String>>,
     pub beeps: usize,
     pub messages: Vec<(String, String)>,
     pub questions: Vec<(String, String)>,
@@ -120,8 +122,10 @@ impl Platform for FakePlatform {
     fn open_document(&self, path: &Path) {
         self.log.lock().unwrap().opened.push(path.to_path_buf());
     }
-    fn toast(&self, title: &str, body: &str) {
-        self.log.lock().unwrap().toasts.push((title.to_owned(), body.to_owned()));
+    fn toast(&self, title: &str, body: &str, open: Option<&str>) {
+        let mut log = self.log.lock().unwrap();
+        log.toasts.push((title.to_owned(), body.to_owned()));
+        log.toast_urls.push(open.map(str::to_owned));
     }
     fn beep(&self) {
         self.log.lock().unwrap().beeps += 1;

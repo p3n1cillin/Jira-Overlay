@@ -159,6 +159,120 @@ pub fn learner_lines(status: &Map<String, Value>) -> LearnerLines {
     LearnerLines { healthy, headline, details: (!details.is_empty()).then(|| details.join(" · ")), drift }
 }
 
+/// One accuracy cell: `(percent, predictions)`.
+pub type Cell = Option<(f64, u64)>;
+
+/// The Settings accuracy table: 7- and 30-day accuracy overall and per
+/// suggested route (how often a suggestion of that route was right), plus
+/// warnings. Built from `recentPerformance`, `performanceDrift`, `drift`
+/// and `routeSafety`; anything missing or malformed is simply left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccuracyView {
+    pub overall: [Cell; 2],
+    /// `(route, [7 days, 30 days])`, routes sorted by 30-day volume.
+    pub routes: Vec<(String, [Cell; 2])>,
+    pub warnings: Vec<String>,
+    /// `(route, reason)` for routes the learner forces to review.
+    pub forced_review: Vec<(String, String)>,
+}
+
+impl AccuracyView {
+    pub fn is_empty(&self) -> bool {
+        self.overall.iter().all(Option::is_none)
+            && self.routes.is_empty()
+            && self.warnings.is_empty()
+            && self.forced_review.is_empty()
+    }
+}
+
+/// `"91% (40)"`: percent and sample size, or "—".
+pub fn cell_text(cell: &Cell) -> String {
+    match cell {
+        Some((pct, n)) => format!("{pct:.0}% ({n})"),
+        None => "—".into(),
+    }
+}
+
+fn count(v: Option<&Value>) -> Option<u64> {
+    match v? {
+        Value::Number(n) => n.as_u64().or_else(|| n.as_f64().filter(|f| f.is_finite() && *f >= 0.0).map(|f| f as u64)),
+        _ => None,
+    }
+}
+
+/// `[predictions, correct]` pairs as the learner writes them.
+fn pair(v: &Value) -> Option<(u64, u64)> {
+    let items = v.as_array()?;
+    let (n, ok) = (count(items.first())?, count(items.get(1))?);
+    (n > 0 && ok <= n).then_some((n, ok))
+}
+
+fn window_cells(window: Option<&Value>) -> (Cell, Map<String, Value>) {
+    let empty = Map::new();
+    let window = window.and_then(Value::as_object).unwrap_or(&empty);
+    let overall = window.get("accuracy").and_then(Value::as_object).and_then(|a| {
+        let n = count(a.get("predictions")).filter(|n| *n > 0)?;
+        let pct = a.get("pct").and_then(Value::as_f64).filter(|p| p.is_finite())?;
+        Some((pct.clamp(0.0, 100.0), n))
+    });
+    let routes = window.get("byPredicted").and_then(Value::as_object).cloned().unwrap_or_default();
+    (overall, routes)
+}
+
+pub fn accuracy_view(status: &Map<String, Value>) -> AccuracyView {
+    let empty = Map::new();
+    let recent = status.get("recentPerformance").and_then(Value::as_object).unwrap_or(&empty);
+    let (week, week_routes) = window_cells(recent.get("7"));
+    let (month, month_routes) = window_cells(recent.get("30"));
+    let cell = |routes: &Map<String, Value>, name: &str| {
+        routes.get(name).and_then(pair).map(|(n, ok)| (100.0 * ok as f64 / n as f64, n))
+    };
+    let mut names: Vec<&String> = month_routes.keys().chain(week_routes.keys()).collect();
+    names.sort();
+    names.dedup();
+    let mut routes: Vec<(String, [Cell; 2])> = names
+        .into_iter()
+        .map(|name| (name.clone(), [cell(&week_routes, name), cell(&month_routes, name)]))
+        .filter(|(_, cells)| cells.iter().any(Option::is_some))
+        .collect();
+    routes.sort_by_key(|(name, cells)| (std::cmp::Reverse(cells[1].map_or(0, |c| c.1)), name.clone()));
+
+    let mut warnings = Vec::new();
+    if let Some(Value::Array(items)) = status.get("performanceDrift").and_then(|d| d.get("warnings")) {
+        for w in items.iter().filter_map(Value::as_object) {
+            let label = w.get("label").and_then(Value::as_str).filter(|l| !l.is_empty());
+            let drop = w.get("dropPoints").and_then(Value::as_f64).filter(|d| d.is_finite());
+            if let (Some(label), Some(drop)) = (label, drop) {
+                warnings.push(format!("{label} dropped {drop:.1} points (last 7 days vs the 21 before)"));
+            }
+        }
+    }
+    if let Some(drift) = status.get("drift").and_then(Value::as_object)
+        && let Some(detail) = drift.get("detail").and_then(Value::as_str).filter(|d| !d.is_empty())
+    {
+        warnings.push(format!("Since last tune: {detail}"));
+    }
+
+    let mut forced_review: Vec<(String, String)> = status
+        .get("routeSafety")
+        .and_then(Value::as_object)
+        .map(|safety| {
+            safety
+                .iter()
+                .filter_map(|(route, policy)| {
+                    let policy = policy.as_object()?;
+                    (policy.get("forceReview") == Some(&Value::Bool(true))).then(|| {
+                        let reason = policy.get("reason").and_then(Value::as_str).unwrap_or_default();
+                        (route.clone(), reason.to_owned())
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    forced_review.sort();
+    AccuracyView { overall: [week, month], routes, warnings, forced_review }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +361,46 @@ mod tests {
         assert_eq!(status_view(&unhealthy, now)["healthMessage"], "Learner polling needs attention");
         let z = map(json!({"updatedAt": now.format("%Y-%m-%dT%H:%M:%SZ").to_string()}));
         assert!(!status_view(&z, now).contains_key("healthMessage"));
+    }
+
+    #[test]
+    fn accuracy_view_from_the_status_file() {
+        let view = accuracy_view(&map(json!({
+            "recentPerformance": {
+                "7": {"accuracy": {"predictions": 40, "correct": 36, "pct": 90.0},
+                      "byPredicted": {"With DEV": [10, 9], "IT": [30, 27], "Odd": "x", "Zero": [0, 0]}},
+                "30": {"accuracy": {"predictions": 200, "correct": 184, "pct": 92.0},
+                       "byPredicted": {"With DEV": [50, 45], "IT": [150, 139], "Bad": [3, 9]}}
+            },
+            "performanceDrift": {"warnings": [{"label": "Overall accuracy", "dropPoints": 6.25}, {"label": 5}]},
+            "drift": {"date": "2026-11-20", "detail": "balanced accuracy dropped 8%"},
+            "routeSafety": {"With DEV": {"forceReview": true, "reason": "only 3 confident validation predictions exist"},
+                            "IT": {"forceReview": false, "reason": ""}, "Broken": "x"}
+        })));
+        assert_eq!(view.overall, [Some((90.0, 40)), Some((92.0, 200))]);
+        let names: Vec<&str> = view.routes.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["IT", "With DEV"], "busiest first; malformed and empty rows left out");
+        assert_eq!(view.routes[1].1, [Some((90.0, 10)), Some((90.0, 50))]);
+        assert_eq!(cell_text(&view.routes[0].1[1]), "93% (150)");
+        assert_eq!(cell_text(&None), "—");
+        assert_eq!(
+            view.warnings,
+            [
+                "Overall accuracy dropped 6.2 points (last 7 days vs the 21 before)",
+                "Since last tune: balanced accuracy dropped 8%"
+            ]
+        );
+        assert_eq!(view.forced_review, [("With DEV".into(), "only 3 confident validation predictions exist".into())]);
+        for data in [
+            json!({}),
+            json!({"recentPerformance": "x"}),
+            json!({"recentPerformance": {"7": [1], "30": {"accuracy": {"pct": "high", "predictions": 5}}}}),
+            json!({"recentPerformance": {"7": {"accuracy": {"pct": 50.0, "predictions": -3}}}}),
+            json!({"performanceDrift": {"warnings": "x"}, "routeSafety": [1, 2]}),
+            json!({"routeSafety": {"A": {"forceReview": "yes"}}}),
+        ] {
+            assert!(accuracy_view(&map(data.clone())).is_empty(), "{data}");
+        }
     }
 
     #[test]

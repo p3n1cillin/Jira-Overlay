@@ -153,18 +153,18 @@ impl SetupApp {
             self.styled = true;
         }
         self.poll_check(&ctx);
-        ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, c::BG_DARK);
+        ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, c::bg_dark());
         let mut save = false;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 20)).show(ui, |ui| {
-            ui.vertical_centered(|ui| widgets::label(ui, "Jira Overlay Setup", theme::bold(14.0), c::FG_BRIGHT));
+            ui.vertical_centered(|ui| widgets::label(ui, "Jira Overlay Setup", theme::bold(14.0), c::fg_bright()));
             ui.add_space(16.0);
             egui::Grid::new("setup-fields").num_columns(2).spacing(vec2(8.0, 12.0)).show(ui, |ui| {
                 for ((label, hint, secret), value) in FIELDS.iter().zip(self.values.iter_mut()) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        widgets::label(ui, &format!("{label}:"), theme::regular(9.0), c::FG);
+                        widgets::label(ui, &format!("{label}:"), theme::regular(9.0), c::fg());
                     });
                     let edit = egui::TextEdit::singleline(value)
-                        .hint_text(egui::RichText::new(*hint).color(c::FG_DIM))
+                        .hint_text(egui::RichText::new(*hint).color(c::fg_dim()))
                         .password(*secret)
                         .desired_width(260.0)
                         .margin(vec2(6.0, 5.0));
@@ -181,7 +181,7 @@ impl SetupApp {
                 let font = theme::regular(8.0);
                 let size = widgets::text_size(ui, text, &font);
                 let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-                let colour = if resp.hovered() { c::ACCENT_HI } else { c::ACCENT };
+                let colour = if resp.hovered() { c::accent_hi() } else { c::accent() };
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, colour);
                 ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, egui::Stroke::new(1.0, colour));
                 widgets::describe(&resp, Role::Link, text);
@@ -194,7 +194,7 @@ impl SetupApp {
                     ui,
                     "Save & Launch",
                     theme::bold(10.0),
-                    (c::WHITE, c::ACCENT, c::ACCENT_HI),
+                    (c::white(), c::accent(), c::accent_hi()),
                     None,
                     !busy,
                 )
@@ -203,7 +203,7 @@ impl SetupApp {
                     save = true;
                 }
                 ui.add_space(4.0);
-                widgets::label(ui, &self.status, theme::regular(8.0), c::FG_DIM);
+                widgets::label(ui, &self.status, theme::regular(8.0), c::fg_dim());
             });
         });
         if save {
@@ -218,7 +218,7 @@ impl eframe::App for SetupApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        c::BG_DARK.to_normalized_gamma_f32()
+        c::bg_dark().to_normalized_gamma_f32()
     }
 }
 

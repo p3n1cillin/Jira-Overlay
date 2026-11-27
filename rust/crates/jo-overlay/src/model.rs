@@ -14,8 +14,8 @@ pub struct Queue {
     pub issue_count: u64,
 }
 
-/// One alert-queue ticket.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One queue ticket (alert-queue pull or hover preview).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Issue {
     /// `issueKey`, else `key`; may be empty for a malformed entry.
     pub key: String,
@@ -23,15 +23,41 @@ pub struct Issue {
     pub summary: Option<String>,
     /// The alert queue it was pulled from (Python `_queue`).
     pub queue: String,
+    /// `fields.created` as Jira sent it, when the queue returns it.
+    pub created: Option<String>,
+    /// `fields.assignee.displayName`, when assigned and returned.
+    pub assignee: Option<String>,
 }
 
 impl Issue {
+    pub fn new(key: &str, summary: Option<&str>, queue: &str) -> Self {
+        Self { key: key.into(), summary: summary.map(str::to_owned), queue: queue.into(), ..Self::default() }
+    }
+
     pub fn from_json(value: &Value, queue: &str) -> Self {
         let text = |v: Option<&Value>| v.and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let key = text(value.get("issueKey")).or_else(|| text(value.get("key"))).unwrap_or_default();
-        let summary = value.get("fields").and_then(|f| f.get("summary")).and_then(Value::as_str).map(str::to_owned);
-        Self { key, summary, queue: queue.to_owned() }
+        let fields = value.get("fields");
+        let summary = fields.and_then(|f| f.get("summary")).and_then(Value::as_str).map(str::to_owned);
+        let created = text(fields.and_then(|f| f.get("created")));
+        let assignee = text(fields.and_then(|f| f.get("assignee")).and_then(|a| a.get("displayName")));
+        Self { key, summary, queue: queue.to_owned(), created, assignee }
     }
+}
+
+/// Open tickets whose SLA is running with little time left (slow path).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AtRisk {
+    pub count: u64,
+    /// `(key, summary)` of the tickets returned (at most one page).
+    pub tickets: Vec<(String, Option<String>)>,
+}
+
+/// SLA % over the last 5 and 20 working days (slow path, cached).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlaTrend {
+    pub five: Option<i64>,
+    pub twenty: Option<i64>,
 }
 
 /// A service desk returned by discovery.
@@ -78,6 +104,11 @@ pub struct Snapshot {
     pub alert_count: u64,
     /// Alert queues configured but not in Jira.
     pub alert_queues_missing: Vec<String>,
+    /// Alert queue name -> queue id (for links to the queue).
+    pub alert_queue_ids: HashMap<String, String>,
     pub completed_today: u64,
     pub sla_compliance: Option<i64>,
+    /// `None`: switched off, not supported by this Jira, or not fetched yet.
+    pub at_risk: Option<AtRisk>,
+    pub sla_trend: Option<SlaTrend>,
 }

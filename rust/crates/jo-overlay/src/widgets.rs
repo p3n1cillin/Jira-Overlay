@@ -71,7 +71,7 @@ pub fn divider(ui: &mut Ui, above: f32, below: f32) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, above + 1.0 + below), Sense::hover());
     let y = rect.top() + above + 0.5;
-    ui.painter().hline(rect.x_range(), y, Stroke::new(1.0, c::DIVIDER));
+    ui.painter().hline(rect.x_range(), y, Stroke::new(1.0, c::divider()));
 }
 
 /// Settings section title: small accent caps over a divider.
@@ -80,7 +80,7 @@ pub fn section(ui: &mut Ui, title: &str) {
     let font = theme::bold(7.0);
     let size = text_size(ui, &title.to_uppercase(), &font);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.y), Sense::hover());
-    ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, title.to_uppercase(), font, c::ACCENT);
+    ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, title.to_uppercase(), font, c::accent());
     divider(ui, 3.0, 2.0);
 }
 
@@ -99,7 +99,7 @@ pub fn flat_button(
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let fill = if enabled && resp.hovered() { hover_bg } else { bg };
     ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
-    let color = if enabled { fg } else { c::FG_DIM };
+    let color = if enabled { fg } else { c::fg_dim() };
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, color);
     let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
     let label = text.to_owned();
