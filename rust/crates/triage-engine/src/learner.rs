@@ -1,12 +1,17 @@
 //! Naive-Bayes-style router over learned destinations, ported line for line
 //! from the Python `Learner` so predictions are identical.
+//!
+//! Speed without changing results: every floating-point expression keeps the
+//! Python operand order, and the caches below only memoise values that are
+//! recomputed bit-for-bit identically (sums over unchanged tables, set sizes).
+//! The caches assume the model is changed only through [`Learner::learn`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 
-use crate::model::{Model, Table};
+use crate::model::{FastMap, FastSet, Model, Nested, RouteBalance, Table};
 use crate::num::{first_max, py_round_int, py_sum};
 use crate::text::{BIGRAM, counter, truthy};
 use crate::tuning::Tuning;
@@ -19,6 +24,9 @@ const EX_CAP: usize = 5000;
 const EX_SLACK: usize = 1000;
 const WHO_MIN_SEEN: f64 = 3.0;
 const WHO_MIN_RATIO: f64 = 2.0;
+/// Destination subsets whose vocabulary size is kept (the ready set and the
+/// escalation set, plus a few superseded ready sets from early learning).
+const UNION_CACHE: usize = 4;
 
 /// One routing suggestion.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,14 +71,19 @@ impl Prediction {
 }
 
 /// Route-frequency correction factors (Python `route_balance_factors`).
-pub fn route_balance_factors(balance: &crate::model::RouteBalance, weight: f64) -> HashMap<String, f64> {
-    let mut factors = HashMap::new();
+pub fn route_balance_factors(balance: &RouteBalance, weight: f64) -> HashMap<String, f64> {
+    balance_factors(balance, weight).into_iter().map(|(d, f)| (d.to_owned(), f)).collect()
+}
+
+/// [`route_balance_factors`] as `(dest, factor)` pairs; dests are unique.
+fn balance_factors(balance: &RouteBalance, weight: f64) -> Vec<(&str, f64)> {
+    let mut factors: Vec<(&str, f64)> = Vec::new();
     if weight == 0.0 || balance.observations < 50.0 {
         return factors;
     }
     let exponent = weight.clamp(0.0, 2.0);
     for dest in balance.actual.keys().chain(balance.predicted.keys()) {
-        if factors.contains_key(dest) {
+        if factors.iter().any(|(d, _)| d == dest) {
             continue;
         }
         let observed = balance.actual.get(dest).copied().unwrap_or(0.0);
@@ -79,14 +92,369 @@ pub fn route_balance_factors(balance: &crate::model::RouteBalance, weight: f64) 
             continue;
         }
         let ratio = ((observed + 20.0) / (suggested + 20.0)).clamp(0.5, 2.0);
-        factors.insert(dest.clone(), ratio.powf(exponent));
+        factors.push((dest, ratio.powf(exponent)));
     }
     factors
 }
 
+fn factor_of(factors: &[(&str, f64)], dest: &str) -> Option<f64> {
+    factors.iter().find(|(d, _)| *d == dest).map(|(_, f)| *f)
+}
+
 /// Inverted index over exemplar titles: token -> exemplar positions, plus each
 /// exemplar's token count.
-type ExemplarIndex = (HashMap<String, Vec<usize>>, Vec<usize>);
+type ExemplarIndex = (FastMap<String, Vec<usize>>, Vec<usize>);
+
+/// Values derived from the model, kept in step with it by `learn`.
+#[derive(Default)]
+struct Caches {
+    /// `len(set().union(*tables))` for destination subsets the scorer used.
+    unions: Vec<Union>,
+    /// dest → unscaled `sum(reqTypes[dest].values())` and
+    /// `sum(reporters[dest].values())`, dropped whenever those tables change.
+    side_sums: FastMap<String, [Option<f64>; 2]>,
+    /// Scratch for `nearest`: shared-token count per exemplar, and which
+    /// exemplars are non-zero.
+    overlap: Vec<u32>,
+    touched: Vec<usize>,
+}
+
+const REQ_TYPES: usize = 0;
+const REPORTERS: usize = 1;
+
+/// CPython `sum(table.values())`, memoised per destination.
+fn side_sum(sums: &mut FastMap<String, [Option<f64>; 2]>, which: usize, table: Option<&Table>, dest: &str) -> f64 {
+    if let Some(v) = sums.get(dest).and_then(|s| s[which]) {
+        return v;
+    }
+    let v = table.map_or(0.0, |t| py_sum(t.values().copied()));
+    match sums.get_mut(dest) {
+        Some(slot) => slot[which] = Some(v),
+        None => {
+            let mut slot = [None, None];
+            slot[which] = Some(v);
+            sums.insert(dest.to_owned(), slot);
+        }
+    }
+    v
+}
+
+/// The vocabulary size of a destination subset.
+struct Union {
+    dests: Vec<String>,
+    /// Each dest's position in `model.tokens` (`None`: no table yet).
+    cols: Vec<Option<usize>>,
+    len: usize,
+}
+
+/// Number of distinct tokens across `dests`' token tables, memoised.
+fn union_len(unions: &mut Vec<Union>, tokens: &Nested, dests: &[&str]) -> usize {
+    if let Some(u) =
+        unions.iter().find(|u| u.dests.len() == dests.len() && u.dests.iter().zip(dests).all(|(a, b)| a == b))
+    {
+        return u.len;
+    }
+    let len = dests.iter().filter_map(|d| tokens.get(*d)).flat_map(|t| t.keys()).collect::<FastSet<&String>>().len();
+    if unions.len() >= UNION_CACHE {
+        unions.remove(0);
+    }
+    unions.push(Union {
+        dests: dests.iter().map(|d| (*d).to_owned()).collect(),
+        cols: dests.iter().map(|d| tokens.get_index_of(*d)).collect(),
+        len,
+    });
+    len
+}
+
+/// Where a token sits in one destination's table, with a copy of its value.
+#[derive(Clone, Copy)]
+struct Cell {
+    pos: u32,
+    value: f64,
+}
+
+/// No entry: reads as `.get(t, 0)` does.
+const ABSENT: Cell = Cell { pos: u32::MAX, value: 0.0 };
+
+impl Cell {
+    fn present(self) -> bool {
+        self.pos != ABSENT.pos
+    }
+}
+
+/// Token-major view of `model.tokens`: token → a [`Cell`] per destination,
+/// by the table's position in `model.tokens` (a short row is absent). The
+/// values are copies of the table entries, so reading them is the same as
+/// looking them up; the keys are the whole vocabulary.
+type TokenIndex = FastMap<String, Vec<Cell>>;
+
+fn cell(row: &[Cell], col: usize) -> Cell {
+    row.get(col).copied().unwrap_or(ABSENT)
+}
+
+fn ensure_index<'a>(index: &'a mut Option<TokenIndex>, model: &Model) -> &'a mut TokenIndex {
+    index.get_or_insert_with(|| {
+        let mut index = TokenIndex::default();
+        for (col, table) in model.tokens.values().enumerate() {
+            for (pos, (t, v)) in table.iter().enumerate() {
+                let put = |row: &mut Vec<Cell>| {
+                    row.resize(row.len().max(col + 1), ABSENT);
+                    row[col] = Cell { pos: u32::try_from(pos).expect("table fits u32"), value: *v };
+                };
+                if let Some(row) = index.get_mut(t.as_str()) {
+                    put(row);
+                } else {
+                    let mut row = Vec::new();
+                    put(&mut row);
+                    index.insert(t.clone(), row);
+                }
+            }
+        }
+        index
+    })
+}
+
+/// `table[key] = table.get(key, 0) + x`, appending new keys.
+fn add(table: &mut Table, key: &str, x: f64) {
+    match table.get_mut(key) {
+        Some(v) => *v += x,
+        None => {
+            table.insert(key.to_owned(), 0.0 + x);
+        }
+    }
+}
+
+fn nested_add(nested: &mut Nested, dest: &str, key: &str, x: f64) {
+    match nested.get_mut(dest) {
+        Some(table) => add(table, key, x),
+        None => {
+            let mut table = Table::default();
+            add(&mut table, key, x);
+            nested.insert(dest.to_owned(), table);
+        }
+    }
+}
+
+fn clone_project_for(model: &Model, dest: &str) -> String {
+    model.clone_projects.get(dest).and_then(|cp| first_max(cp.iter()).cloned()).unwrap_or_default()
+}
+
+fn plan_for(plans: &IndexMap<String, String>, model: &Model, dest: &str) -> String {
+    if let Some(plan) = plans.get(dest).filter(|p| !p.is_empty()) {
+        return plan.clone();
+    }
+    let proj = clone_project_for(model, dest);
+    if proj.is_empty() {
+        format!("move to {dest}")
+    } else {
+        format!("raise a linked {proj} issue, then move to {dest}")
+    }
+}
+
+fn request_type_hint<'a>(model: &'a Model, req_type: &str) -> Option<&'a str> {
+    if req_type.is_empty() {
+        return None;
+    }
+    let scale = model.scale;
+    let counts: Vec<(&String, f64)> =
+        model.req_types.iter().map(|(d, table)| (d, table.get(req_type).copied().unwrap_or(0.0) * scale)).collect();
+    let total = py_sum(counts.iter().map(|(_, c)| *c));
+    if total < HINT_MIN_EXAMPLES {
+        return None;
+    }
+    let best: &'a String = *first_max(counts.iter().map(|(d, c)| (d, c)))?;
+    let best_count = counts.iter().find(|(d, _)| *d == best).map(|(_, c)| *c).unwrap_or(0.0);
+    (best_count / total >= HINT_MIN_SHARE).then_some(best.as_str())
+}
+
+/// Most similar previous title (Jaccard), newest first on ties.
+fn nearest(
+    model: &Model,
+    ex_index: &mut Option<ExemplarIndex>,
+    caches: &mut Caches,
+    title: &[String],
+) -> (Option<String>, f64) {
+    if model.exemplars.is_empty() || title.is_empty() {
+        return (None, 0.0);
+    }
+    let (index, lens) = ex_index.get_or_insert_with(|| {
+        let mut index: FastMap<String, Vec<usize>> = FastMap::default();
+        let mut lens = Vec::with_capacity(model.exemplars.len());
+        for (i, (toks, _)) in model.exemplars.iter().enumerate() {
+            for t in toks {
+                index.entry(t.clone()).or_default().push(i);
+            }
+            lens.push(toks.len());
+        }
+        (index, lens)
+    });
+    let mut query: Vec<&str> = title.iter().map(String::as_str).collect();
+    query.sort_unstable();
+    query.dedup();
+    let Caches { overlap, touched, .. } = caches;
+    if overlap.len() < lens.len() {
+        overlap.resize(lens.len(), 0);
+    }
+    touched.clear();
+    for t in &query {
+        for &i in index.get(*t).map(Vec::as_slice).unwrap_or_default() {
+            if overlap[i] == 0 {
+                touched.push(i);
+            }
+            overlap[i] += 1;
+        }
+    }
+    let nq = query.len();
+    // Python scans newest first and keeps the first strict improvement: the
+    // highest similarity, the newest exemplar among equals.
+    let (mut best, mut best_j) = (None, 0.0_f64);
+    for &i in touched.iter() {
+        let shared = overlap[i] as usize;
+        overlap[i] = 0;
+        let j = shared as f64 / (nq + lens[i] - shared) as f64;
+        if j > best_j || (j == best_j && best.is_some_and(|b| i > b)) {
+            best_j = j;
+            best = Some(i);
+        }
+    }
+    (best.map(|i| model.exemplars[i].1.clone()), best_j)
+}
+
+/// Per-prediction inputs shared by the full scorer and the escalation rerank.
+struct Scoring<'a> {
+    tuning: &'a Tuning,
+    counts: &'a [(&'a str, u32)],
+    req_type: &'a str,
+    reporter: &'a str,
+    /// Ready destinations, in prior order.
+    ready: &'a [&'a str],
+    priors: &'a [f64],
+    /// `tokens[ready[d]].get(counts[t], 0)` at `raw[t * ready.len() + d]`.
+    raw: &'a [f64],
+    /// Tokens no ready destination has a count for (every raw cell `+0.0`):
+    /// their per-destination term is the same value, computed once.
+    unseen: &'a [bool],
+    hint: Option<&'a str>,
+}
+
+impl Scoring<'_> {
+    fn raw(&self, token: usize, dest: usize) -> f64 {
+        self.raw[token * self.ready.len() + dest]
+    }
+
+    /// Request-type and reporter terms, in the Python order.
+    fn side_terms(&self, m: &Model, caches: &mut Caches, d: &str, mut score: f64) -> f64 {
+        let s = m.scale;
+        if !self.req_type.is_empty() {
+            let rt = m.req_types.get(d);
+            let n_rt = side_sum(&mut caches.side_sums, REQ_TYPES, rt, d) * s;
+            score += ((rt.and_then(|t| t.get(self.req_type)).copied().unwrap_or(0.0) * s + 1.0)
+                / (n_rt + self.tuning.get("reqSmooth")))
+            .ln();
+            if self.hint == Some(d) {
+                score += self.tuning.get("requestTypeHintWeight");
+            }
+        }
+        if !self.reporter.is_empty() {
+            let rp = m.reporters.get(d);
+            let n_rp = side_sum(&mut caches.side_sums, REPORTERS, rp, d) * s;
+            score += self.tuning.get("reporterWeight")
+                * ((rp.and_then(|t| t.get(self.reporter)).copied().unwrap_or(0.0) * s + 1.0)
+                    / (n_rp + self.tuning.get("repSmooth")))
+                .ln();
+        }
+        score
+    }
+
+    /// Score a closed candidate set against itself (escalation rerank).
+    /// `candidates` index `ready`.
+    fn subset_scores(&self, m: &Model, caches: &mut Caches, candidates: &[usize], prior_weight: f64) -> Vec<f64> {
+        let s = m.scale;
+        let total_examples = py_sum(candidates.iter().map(|&i| self.priors[i]));
+        let names: Vec<&str> = candidates.iter().map(|&i| self.ready[i]).collect();
+        let vocab = union_len(&mut caches.unions, &m.tokens, &names).max(1) as f64;
+        let tot_all = py_sum(names.iter().map(|d| m.totals.get(*d).copied().unwrap_or(0.0))) * s;
+        let all_cnt: Vec<f64> =
+            (0..self.counts.len()).map(|t| py_sum(candidates.iter().map(|&i| self.raw(t, i))) * s).collect();
+        let mut scores = Vec::with_capacity(candidates.len());
+        for &i in candidates {
+            let d = self.ready[i];
+            let mut score = prior_weight * (self.priors[i] / total_examples).ln();
+            let total = m.totals.get(d).copied().unwrap_or(0.0) * s;
+            let den_in = total + vocab;
+            let den_out = (tot_all - total) + vocab;
+            let term = |raw: f64, all: f64| {
+                let inside = raw * s;
+                let p_in = (inside + 1.0) / den_in;
+                let p_out = (all - inside + 1.0) / den_out;
+                (p_in / p_out).ln()
+            };
+            // An unseen token's all_cnt is py_sum(+0.0, ...) * s == 0.0 * s.
+            let unseen_term = term(0.0, 0.0 * s);
+            for (t, (_, reps)) in self.counts.iter().enumerate() {
+                let x = if self.unseen[t] { unseen_term } else { term(self.raw(t, i), all_cnt[t]) };
+                score += f64::from(*reps) * x;
+            }
+            scores.push(self.side_terms(m, caches, d, score));
+        }
+        scores
+    }
+}
+
+fn why(
+    m: &Model,
+    vocab_len: usize,
+    caches: &mut Caches,
+    scoring: &Scoring<'_>,
+    best: &str,
+    second: &str,
+) -> Vec<String> {
+    let (tuning, reporter) = (scoring.tuning, scoring.reporter);
+    let vocab = vocab_len.max(1) as f64;
+    let s = m.scale;
+    let tok_best = m.tokens.get(best);
+    let tok_second = m.tokens.get(second);
+    let get = |t: Option<&Table>, k: &str| t.and_then(|t| t.get(k)).copied().unwrap_or(0.0);
+    let den_best = m.totals.get(best).copied().unwrap_or(0.0) * s + vocab;
+    let den_second = m.totals.get(second).copied().unwrap_or(0.0) * s + vocab;
+    let ratio_ln = |b: f64, c: f64| {
+        let rate_best = (b * s + 1.0) / den_best;
+        let rate_second = (c * s + 1.0) / den_second;
+        (rate_best / rate_second).ln()
+    };
+    let unseen_ln = ratio_ln(0.0, 0.0);
+    // Counts for ready destinations are already in the score matrix.
+    let col_best = scoring.ready.iter().position(|d| *d == best);
+    let col_second = scoring.ready.iter().position(|d| *d == second);
+    let mut weighed: Vec<(f64, &str)> = Vec::new();
+    for (i, (t, k)) in scoring.counts.iter().enumerate() {
+        let b = col_best.map_or_else(|| get(tok_best, t), |c| scoring.raw(i, c));
+        let c = col_second.map_or_else(|| get(tok_second, t), |c| scoring.raw(i, c));
+        let x = if b.to_bits() == 0 && c.to_bits() == 0 { unseen_ln } else { ratio_ln(b, c) };
+        let weight = f64::from(*k) * x;
+        if weight > 0.0 {
+            weighed.push((weight, t));
+        }
+    }
+    weighed.sort_by(|a, b| (-a.0).partial_cmp(&-b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut reasons: Vec<String> = weighed.iter().take(4).map(|(_, t)| t.replace(BIGRAM, " ")).collect();
+    if !reporter.is_empty() {
+        let rep_best = m.reporters.get(best);
+        let rep_second = m.reporters.get(second);
+        let seen = get(rep_best, reporter) + get(rep_second, reporter);
+        if seen * s >= WHO_MIN_SEEN {
+            let rep_smooth = tuning.get("repSmooth");
+            let n_best = side_sum(&mut caches.side_sums, REPORTERS, rep_best, best) * s;
+            let n_second = side_sum(&mut caches.side_sums, REPORTERS, rep_second, second) * s;
+            let rate_best = (get(rep_best, reporter) * s + 1.0) / (n_best + rep_smooth);
+            let rate_second = (get(rep_second, reporter) * s + 1.0) / (n_second + rep_smooth);
+            if rate_best >= rate_second * WHO_MIN_RATIO {
+                reasons.push(format!("usually raised by {reporter}"));
+            }
+        }
+    }
+    reasons
+}
 
 pub struct Learner {
     pub model: Model,
@@ -95,8 +463,9 @@ pub struct Learner {
     pub escalation_dests: Vec<String>,
     /// dest → `{forceReview, reason, ...}` from nightly validation.
     pub route_safety: Map<String, Value>,
-    vocab: Option<HashSet<String>>,
+    index: Option<TokenIndex>,
     ex_index: Option<ExemplarIndex>,
+    caches: Caches,
     /// Bumped by `learn`, so the watcher can skip rewriting unchanged state.
     pub mutations: u64,
 }
@@ -108,8 +477,9 @@ impl Learner {
             plans: IndexMap::new(),
             escalation_dests,
             route_safety: Map::new(),
-            vocab: None,
+            index: None,
             ex_index: None,
+            caches: Caches::default(),
             mutations: 0,
         }
     }
@@ -131,6 +501,17 @@ impl Learner {
             }
         }
         m.scale = 1.0;
+        self.caches.side_sums.clear();
+        if let Some(index) = &mut self.index {
+            let tables: Vec<&Table> = self.model.tokens.values().collect();
+            for row in index.values_mut() {
+                for (col, c) in row.iter_mut().enumerate() {
+                    if c.present() {
+                        c.value = tables[col][c.pos as usize];
+                    }
+                }
+            }
+        }
     }
 
     fn advance_decay(&mut self, tuning: &Tuning) -> f64 {
@@ -142,13 +523,6 @@ impl Learner {
             }
         }
         1.0 / self.model.scale
-    }
-
-    fn vocab_len(&mut self) -> usize {
-        if self.vocab.is_none() {
-            self.vocab = Some(self.model.tokens.values().flat_map(|t| t.keys().cloned()).collect());
-        }
-        self.vocab.as_ref().map_or(0, HashSet::len)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -164,14 +538,44 @@ impl Learner {
         exemplar: Option<&[String]>,
         prediction: Option<&Prediction>,
     ) {
+        let counts: Vec<(&str, u32)> = counter(tokens).into_iter().collect();
         let computed;
         let prediction = match prediction {
             Some(p) => p,
             None => {
-                computed = self.predict_ex(tuning, tokens, req_type, reporter, exemplar);
+                computed = self.predict_counted(tuning, &counts, tokens.len(), req_type, reporter, exemplar);
                 &computed
             }
         };
+        self.learn_counted(
+            tuning,
+            dest,
+            &counts,
+            tokens.len(),
+            req_type,
+            clone_projects,
+            reporter,
+            weight,
+            exemplar,
+            prediction,
+        );
+    }
+
+    /// `learn` from `Counter(tokens)` (first-occurrence order) and `len(tokens)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn learn_counted(
+        &mut self,
+        tuning: &Tuning,
+        dest: &str,
+        counts: &[(&str, u32)],
+        n_tokens: usize,
+        req_type: &str,
+        clone_projects: &[String],
+        reporter: &str,
+        weight: f64,
+        exemplar: Option<&[String]>,
+        prediction: &Prediction,
+    ) {
         if let Some(pred_dest) = &prediction.dest {
             let balance = &mut self.model.route_balance;
             for table in [&mut balance.actual, &mut balance.predicted] {
@@ -179,232 +583,117 @@ impl Learner {
                     *v *= 0.995;
                 }
             }
-            *balance.actual.entry(dest.to_owned()).or_insert(0.0) += 1.0;
-            *balance.predicted.entry(pred_dest.clone()).or_insert(0.0) += 1.0;
+            add(&mut balance.actual, dest, 1.0);
+            add(&mut balance.predicted, pred_dest, 1.0);
             balance.observations += 1.0;
         }
         self.mutations += 1;
         let boost = self.advance_decay(tuning);
         let w = weight * boost;
-        let m = &mut self.model;
-        *m.priors.entry(dest.to_owned()).or_insert(0.0) += boost;
-        *m.seen.entry(dest.to_owned()).or_insert(0.0) += 1.0;
-        let tok = m.tokens.entry(dest.to_owned()).or_default();
-        for (t, k) in counter(tokens) {
-            if let Some(vocab) = &mut self.vocab
-                && !tok.contains_key(t)
-            {
-                vocab.insert(t.to_owned());
+        let Self { model: m, index, ex_index, caches, .. } = self;
+        add(&mut m.priors, dest, boost);
+        add(&mut m.seen, dest, 1.0);
+        let col = match m.tokens.get_index_of(dest) {
+            Some(col) => col,
+            None => {
+                let col = m.tokens.insert_full(dest.to_owned(), Table::default()).0;
+                for u in &mut caches.unions {
+                    for (name, c) in u.dests.iter().zip(&mut u.cols) {
+                        if name == dest {
+                            *c = Some(col);
+                        }
+                    }
+                }
+                col
             }
-            *tok.entry(t.to_owned()).or_insert(0.0) += w * f64::from(k);
+        };
+        // One index lookup per token finds its table entry, if any.
+        let index = ensure_index(index, m);
+        let tok = &mut m.tokens[col];
+        let unions = &mut caches.unions;
+        for (t, k) in counts {
+            let x = w * f64::from(*k);
+            let mut update = |row: &mut Vec<Cell>| {
+                if row.len() <= col {
+                    row.resize(col + 1, ABSENT);
+                }
+                let c = row[col];
+                if c.present() {
+                    let v = &mut tok[c.pos as usize];
+                    *v += x;
+                    row[col].value = *v;
+                } else {
+                    // A token new to this destination grows a subset's
+                    // vocabulary unless another member already has it.
+                    for u in unions.iter_mut() {
+                        if u.cols.contains(&Some(col))
+                            && u.cols.iter().all(|e| *e == Some(col) || !e.is_some_and(|e| cell(row, e).present()))
+                        {
+                            u.len += 1;
+                        }
+                    }
+                    let v = 0.0 + x;
+                    let (pos, old) = tok.insert_full((*t).to_owned(), v);
+                    debug_assert!(old.is_none(), "token index out of step with the table");
+                    row[col] = Cell { pos: u32::try_from(pos).expect("table fits u32"), value: v };
+                }
+            };
+            if let Some(row) = index.get_mut(*t) {
+                update(row);
+            } else {
+                let mut row = Vec::new();
+                update(&mut row);
+                index.insert((*t).to_owned(), row);
+            }
         }
-        *m.totals.entry(dest.to_owned()).or_insert(0.0) += w * tokens.len() as f64;
+        add(&mut m.totals, dest, w * n_tokens as f64);
         if !req_type.is_empty() {
-            *m.req_types.entry(dest.to_owned()).or_default().entry(req_type.to_owned()).or_insert(0.0) += w;
+            nested_add(&mut m.req_types, dest, req_type, w);
         }
         if !reporter.is_empty() {
-            *m.reporters.entry(dest.to_owned()).or_default().entry(reporter.to_owned()).or_insert(0.0) += w;
+            nested_add(&mut m.reporters, dest, reporter, w);
+        }
+        if !req_type.is_empty() || !reporter.is_empty() {
+            caches.side_sums.remove(dest);
         }
         for proj in clone_projects {
-            *m.clone_projects.entry(dest.to_owned()).or_default().entry(proj.clone()).or_insert(0.0) += 1.0;
+            nested_add(&mut m.clone_projects, dest, proj, 1.0);
         }
         if let Some(exemplar) = exemplar.filter(|e| !e.is_empty()) {
-            let mut toks: Vec<String> = exemplar.iter().cloned().collect::<HashSet<_>>().into_iter().collect();
+            let mut toks: Vec<String> = exemplar.to_vec();
             toks.sort();
+            toks.dedup();
             m.exemplars.push((toks, dest.to_owned()));
             if m.exemplars.len() > EX_CAP + EX_SLACK {
                 let excess = m.exemplars.len() - EX_CAP;
                 m.exemplars.drain(..excess);
-                self.ex_index = None;
-            } else if let Some((index, lens)) = &mut self.ex_index {
+                *ex_index = None;
+            } else if let Some((index, lens)) = ex_index {
                 let i = m.exemplars.len() - 1;
                 let toks = &m.exemplars[i].0;
                 for t in toks {
-                    index.entry(t.clone()).or_default().push(i);
+                    match index.get_mut(t.as_str()) {
+                        Some(list) => list.push(i),
+                        None => {
+                            index.insert(t.clone(), vec![i]);
+                        }
+                    }
                 }
                 lens.push(toks.len());
             }
         }
-    }
-
-    /// Most similar previous title (Jaccard), newest first on ties.
-    fn nearest(&mut self, title: &[String]) -> (Option<String>, f64) {
-        if self.model.exemplars.is_empty() || title.is_empty() {
-            return (None, 0.0);
-        }
-        if self.ex_index.is_none() {
-            let mut index: HashMap<String, Vec<usize>> = HashMap::new();
-            let mut lens = Vec::with_capacity(self.model.exemplars.len());
-            for (i, (toks, _)) in self.model.exemplars.iter().enumerate() {
-                for t in toks {
-                    index.entry(t.clone()).or_default().push(i);
-                }
-                lens.push(toks.len());
-            }
-            self.ex_index = Some((index, lens));
-        }
-        let (index, lens) = self.ex_index.as_ref().expect("built above");
-        let query: HashSet<&String> = title.iter().collect();
-        let mut overlap: HashMap<usize, usize> = HashMap::new();
-        for t in &query {
-            for &i in index.get(*t).map(Vec::as_slice).unwrap_or_default() {
-                *overlap.entry(i).or_insert(0) += 1;
-            }
-        }
-        let nq = query.len();
-        let mut candidates: Vec<usize> = overlap.keys().copied().collect();
-        candidates.sort_unstable_by(|a, b| b.cmp(a));
-        let (mut best_dest, mut best_j) = (None, 0.0_f64);
-        for i in candidates {
-            let shared = overlap[&i];
-            let j = shared as f64 / (nq + lens[i] - shared) as f64;
-            if j > best_j {
-                best_j = j;
-                best_dest = Some(self.model.exemplars[i].1.clone());
-            }
-        }
-        (best_dest, best_j)
     }
 
     pub fn clone_project_for(&self, dest: &str) -> String {
-        self.model.clone_projects.get(dest).and_then(|cp| first_max(cp.iter()).cloned()).unwrap_or_default()
+        clone_project_for(&self.model, dest)
     }
 
     pub fn plan_for(&self, dest: &str) -> String {
-        if let Some(plan) = self.plans.get(dest).filter(|p| !p.is_empty()) {
-            return plan.clone();
-        }
-        let proj = self.clone_project_for(dest);
-        if proj.is_empty() {
-            format!("move to {dest}")
-        } else {
-            format!("raise a linked {proj} issue, then move to {dest}")
-        }
+        plan_for(&self.plans, &self.model, dest)
     }
 
     pub fn request_type_hint(&self, req_type: &str) -> Option<String> {
-        if req_type.is_empty() {
-            return None;
-        }
-        let scale = self.model.scale;
-        let counts: Vec<(&String, f64)> = self
-            .model
-            .req_types
-            .iter()
-            .map(|(d, table)| (d, table.get(req_type).copied().unwrap_or(0.0) * scale))
-            .collect();
-        let total = py_sum(counts.iter().map(|(_, c)| *c));
-        if total < HINT_MIN_EXAMPLES {
-            return None;
-        }
-        let best = first_max(counts.iter().map(|(d, c)| (*d, c)))?;
-        let best_count = counts.iter().find(|(d, _)| *d == best).map(|(_, c)| *c).unwrap_or(0.0);
-        (best_count / total >= HINT_MIN_SHARE).then(|| best.clone())
-    }
-
-    fn why(
-        &mut self,
-        tuning: &Tuning,
-        counts: &IndexMap<&str, u32>,
-        best: &str,
-        second: &str,
-        reporter: &str,
-    ) -> Vec<String> {
-        let vocab = self.vocab_len().max(1) as f64;
-        let m = &self.model;
-        let s = m.scale;
-        let empty = Table::new();
-        let tok_best = m.tokens.get(best).unwrap_or(&empty);
-        let tok_second = m.tokens.get(second).unwrap_or(&empty);
-        let den_best = m.totals.get(best).copied().unwrap_or(0.0) * s + vocab;
-        let den_second = m.totals.get(second).copied().unwrap_or(0.0) * s + vocab;
-        let mut weighed: Vec<(f64, &str)> = Vec::new();
-        for (t, k) in counts {
-            let rate_best = (tok_best.get(*t).copied().unwrap_or(0.0) * s + 1.0) / den_best;
-            let rate_second = (tok_second.get(*t).copied().unwrap_or(0.0) * s + 1.0) / den_second;
-            let weight = f64::from(*k) * (rate_best / rate_second).ln();
-            if weight > 0.0 {
-                weighed.push((weight, t));
-            }
-        }
-        weighed.sort_by(|a, b| (-a.0).partial_cmp(&-b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut reasons: Vec<String> = weighed.iter().take(4).map(|(_, t)| t.replace(BIGRAM, " ")).collect();
-        if !reporter.is_empty() {
-            let rep_best = m.reporters.get(best).unwrap_or(&empty);
-            let rep_second = m.reporters.get(second).unwrap_or(&empty);
-            let seen =
-                rep_best.get(reporter).copied().unwrap_or(0.0) + rep_second.get(reporter).copied().unwrap_or(0.0);
-            if seen * s >= WHO_MIN_SEEN {
-                let rep_smooth = tuning.get("repSmooth");
-                let n_best = py_sum(rep_best.values().copied()) * s;
-                let n_second = py_sum(rep_second.values().copied()) * s;
-                let rate_best = (rep_best.get(reporter).copied().unwrap_or(0.0) * s + 1.0) / (n_best + rep_smooth);
-                let rate_second =
-                    (rep_second.get(reporter).copied().unwrap_or(0.0) * s + 1.0) / (n_second + rep_smooth);
-                if rate_best >= rate_second * WHO_MIN_RATIO {
-                    reasons.push(format!("usually raised by {reporter}"));
-                }
-            }
-        }
-        reasons
-    }
-
-    /// Score a closed candidate set against itself (escalation rerank).
-    fn subset_scores(
-        &self,
-        tuning: &Tuning,
-        counts: &IndexMap<&str, u32>,
-        req_type: &str,
-        reporter: &str,
-        candidates: &[String],
-        prior_weight: f64,
-    ) -> Vec<(String, f64)> {
-        let m = &self.model;
-        let s = m.scale;
-        let empty = Table::new();
-        let total_examples = py_sum(candidates.iter().map(|d| m.priors[d]));
-        let tables: Vec<&Table> = candidates.iter().map(|d| m.tokens.get(d).unwrap_or(&empty)).collect();
-        let vocab = tables.iter().flat_map(|t| t.keys()).collect::<HashSet<_>>().len().max(1) as f64;
-        let tot_all = py_sum(candidates.iter().map(|d| m.totals.get(d).copied().unwrap_or(0.0))) * s;
-        let all_cnt: HashMap<&str, f64> = counts
-            .keys()
-            .map(|t| (*t, py_sum(tables.iter().map(|tbl| tbl.get(*t).copied().unwrap_or(0.0))) * s))
-            .collect();
-        let hint = self.request_type_hint(req_type);
-        let rep_w = tuning.get("reporterWeight");
-        let mut scores = Vec::with_capacity(candidates.len());
-        for (d, table) in candidates.iter().zip(&tables) {
-            let mut score = prior_weight * (m.priors[d] / total_examples).ln();
-            let total = m.totals.get(d).copied().unwrap_or(0.0) * s;
-            let den_in = total + vocab;
-            let den_out = (tot_all - total) + vocab;
-            for (token, reps) in counts {
-                let inside = table.get(*token).copied().unwrap_or(0.0) * s;
-                let p_in = (inside + 1.0) / den_in;
-                let p_out = (all_cnt[token] - inside + 1.0) / den_out;
-                score += f64::from(*reps) * (p_in / p_out).ln();
-            }
-            if !req_type.is_empty() {
-                let rc = m.req_types.get(d).unwrap_or(&empty);
-                let request_total = py_sum(rc.values().copied()) * s;
-                score += ((rc.get(req_type).copied().unwrap_or(0.0) * s + 1.0)
-                    / (request_total + tuning.get("reqSmooth")))
-                .ln();
-                if hint.as_deref() == Some(d.as_str()) {
-                    score += tuning.get("requestTypeHintWeight");
-                }
-            }
-            if !reporter.is_empty() {
-                let rc = m.reporters.get(d).unwrap_or(&empty);
-                let reporter_total = py_sum(rc.values().copied()) * s;
-                score += rep_w
-                    * ((rc.get(reporter).copied().unwrap_or(0.0) * s + 1.0)
-                        / (reporter_total + tuning.get("repSmooth")))
-                    .ln();
-            }
-            scores.push((d.clone(), score));
-        }
-        scores
+        request_type_hint(&self.model, req_type).map(str::to_owned)
     }
 
     /// Full prediction: best destination, confidence, runner-up, margin and
@@ -417,135 +706,154 @@ impl Learner {
         reporter: &str,
         exemplar: Option<&[String]>,
     ) -> Prediction {
-        let ready: Vec<String> = self
-            .model
+        let counts: Vec<(&str, u32)> = counter(tokens).into_iter().collect();
+        self.predict_counted(tuning, &counts, tokens.len(), req_type, reporter, exemplar)
+    }
+
+    /// `predict_ex` from `Counter(tokens)` (first-occurrence order) and `len(tokens)`.
+    pub(crate) fn predict_counted(
+        &mut self,
+        tuning: &Tuning,
+        counts: &[(&str, u32)],
+        n_tokens: usize,
+        req_type: &str,
+        reporter: &str,
+        exemplar: Option<&[String]>,
+    ) -> Prediction {
+        let Self { model: m, plans, escalation_dests, route_safety, index, ex_index, caches, .. } = self;
+        let (ready, priors): (Vec<&str>, Vec<f64>) = m
             .priors
             .iter()
-            .filter(|(d, prior)| self.model.seen.get(*d).copied().unwrap_or(**prior) >= MIN_EXAMPLES)
-            .map(|(d, _)| d.clone())
-            .collect();
+            .filter(|(d, prior)| m.seen.get(*d).copied().unwrap_or(**prior) >= MIN_EXAMPLES)
+            .map(|(d, prior)| (d.as_str(), *prior))
+            .unzip();
         if ready.len() < 2 {
             return Prediction::cold();
         }
-        let vocab_all =
-            if ready.len() == self.model.tokens.len() { Some(self.vocab_len().max(1) as f64) } else { None };
-        let m = &self.model;
+        let index: &TokenIndex = ensure_index(index, m);
+        let vocab_len = index.len();
+        let nr = ready.len();
         let s = m.scale;
-        let empty = Table::new();
-        let total_examples = py_sum(ready.iter().map(|d| m.priors[d]));
-        let tok_tables: Vec<&Table> = ready.iter().map(|d| m.tokens.get(d).unwrap_or(&empty)).collect();
-        let vocab = vocab_all
-            .unwrap_or_else(|| tok_tables.iter().flat_map(|t| t.keys()).collect::<HashSet<_>>().len().max(1) as f64);
+        let total_examples = py_sum(priors.iter().copied());
+        let vocab = if nr == m.tokens.len() {
+            vocab_len.max(1) as f64
+        } else {
+            union_len(&mut caches.unions, &m.tokens, &ready).max(1) as f64
+        };
 
-        let counts = counter(tokens);
-        let log_odds = tuning.get("logOdds") != 0.0;
-        let mut tot_all = 0.0;
-        let mut all_cnt: HashMap<&str, f64> = HashMap::new();
-        if log_odds {
-            tot_all = py_sum(ready.iter().map(|d| m.totals.get(d).copied().unwrap_or(0.0))) * s;
-            for t in counts.keys() {
-                let mut c = 0.0_f64;
-                for tbl in &tok_tables {
-                    c += tbl.get(*t).copied().unwrap_or(0.0);
+        // One lookup per token for every ready destination's count, reused
+        // by every term below.
+        let cols: Vec<Option<usize>> = ready.iter().map(|d| m.tokens.get_index_of(*d)).collect();
+        let mut raw = vec![0.0_f64; counts.len() * nr];
+        let mut unseen = vec![true; counts.len()];
+        for ((cells, (t, _)), unseen) in raw.chunks_exact_mut(nr).zip(counts).zip(&mut unseen) {
+            if let Some(row) = index.get(*t) {
+                for (value, col) in cells.iter_mut().zip(&cols) {
+                    *value = col.map_or(0.0, |c| cell(row, c).value);
                 }
-                all_cnt.insert(t, c * s);
+                *unseen = cells.iter().all(|v| v.to_bits() == 0);
             }
         }
+        let log_odds = tuning.get("logOdds") != 0.0;
+        let mut tot_all = 0.0;
+        let mut all_cnt: Vec<f64> = Vec::new();
+        if log_odds {
+            tot_all = py_sum(ready.iter().map(|d| m.totals.get(*d).copied().unwrap_or(0.0))) * s;
+            all_cnt = raw
+                .chunks_exact(nr)
+                .map(|row| {
+                    let mut c = 0.0_f64;
+                    for v in row {
+                        c += v;
+                    }
+                    c * s
+                })
+                .collect();
+        }
         let prior_w = tuning.get("priorWeight");
-        let rep_w = tuning.get("reporterWeight");
-        let hint_for_type = self.request_type_hint(req_type);
-        let mut scores: Vec<(String, f64)> = Vec::with_capacity(ready.len());
-        for (d, tok) in ready.iter().zip(&tok_tables) {
-            let mut score = prior_w * (m.priors[d] / total_examples).ln();
-            let tot = m.totals.get(d).copied().unwrap_or(0.0) * s;
+        let hint_for_type = request_type_hint(m, req_type);
+        let scoring = Scoring {
+            tuning,
+            counts,
+            req_type,
+            reporter,
+            ready: &ready,
+            priors: &priors,
+            raw: &raw,
+            unseen: &unseen,
+            hint: hint_for_type,
+        };
+        let mut scores: Vec<f64> = Vec::with_capacity(nr);
+        for (di, d) in ready.iter().enumerate() {
+            let mut score = prior_w * (priors[di] / total_examples).ln();
+            let tot = m.totals.get(*d).copied().unwrap_or(0.0) * s;
             let den_in = tot + vocab;
             if log_odds {
                 let den_out = (tot_all - tot) + vocab;
-                for (t, k) in &counts {
-                    let c_in = tok.get(*t).copied().unwrap_or(0.0) * s;
+                let term = |raw: f64, all: f64| {
+                    let c_in = raw * s;
                     let p_in = (c_in + 1.0) / den_in;
-                    let p_out = (all_cnt[t] - c_in + 1.0) / den_out;
-                    score += f64::from(*k) * (p_in / p_out).ln();
+                    let p_out = (all - c_in + 1.0) / den_out;
+                    (p_in / p_out).ln()
+                };
+                // An unseen token's all_cnt is (0.0 + 0.0 + ...) * s == 0.0 * s.
+                let unseen_term = term(0.0, 0.0 * s);
+                for (ti, (_, k)) in counts.iter().enumerate() {
+                    let x = if unseen[ti] { unseen_term } else { term(scoring.raw(ti, di), all_cnt[ti]) };
+                    score += f64::from(*k) * x;
                 }
             } else {
-                for (t, k) in &counts {
-                    score += f64::from(*k) * ((tok.get(*t).copied().unwrap_or(0.0) * s + 1.0) / den_in).ln();
+                let term = |raw: f64| ((raw * s + 1.0) / den_in).ln();
+                let unseen_term = term(0.0);
+                for (ti, (_, k)) in counts.iter().enumerate() {
+                    let x = if unseen[ti] { unseen_term } else { term(scoring.raw(ti, di)) };
+                    score += f64::from(*k) * x;
                 }
             }
-            if !req_type.is_empty() {
-                let rt = m.req_types.get(d).unwrap_or(&empty);
-                let n_rt = py_sum(rt.values().copied()) * s;
-                score += ((rt.get(req_type).copied().unwrap_or(0.0) * s + 1.0) / (n_rt + tuning.get("reqSmooth"))).ln();
-                if hint_for_type.as_deref() == Some(d.as_str()) {
-                    score += tuning.get("requestTypeHintWeight");
-                }
-            }
-            if !reporter.is_empty() {
-                let rp = m.reporters.get(d).unwrap_or(&empty);
-                let n_rp = py_sum(rp.values().copied()) * s;
-                score += rep_w
-                    * ((rp.get(reporter).copied().unwrap_or(0.0) * s + 1.0) / (n_rp + tuning.get("repSmooth"))).ln();
-            }
-            scores.push((d.clone(), score));
+            scores.push(scoring.side_terms(m, caches, d, score));
         }
 
         // Temperature-scaled softmax.
         let global_best = stable_argmax(&scores);
-        let mx = scores[global_best].1;
-        let temp = (tokens.len() as f64 / tuning.get("confTemp")).max(1.0);
-        let exps: Vec<f64> = scores.iter().map(|(_, s)| ((s - mx) / temp).exp()).collect();
+        let mx = scores[global_best];
+        let temp = (n_tokens as f64 / tuning.get("confTemp")).max(1.0);
+        let exps: Vec<f64> = scores.iter().map(|s| ((s - mx) / temp).exp()).collect();
         let tot_e = py_sum(exps.iter().copied());
-        let mut probs: Vec<(String, f64)> =
-            scores.iter().zip(&exps).map(|((d, _), e)| (d.clone(), e / tot_e)).collect();
+        let mut probs: Vec<f64> = exps.iter().map(|e| e / tot_e).collect();
         let mut source = "model";
 
-        let escalation: Vec<String> =
-            self.escalation_dests.iter().filter(|d| scores.iter().any(|(s, _)| s == *d)).cloned().collect();
-        if tuning.get("escalationSpecialist") != 0.0
-            && escalation.contains(&scores[global_best].0)
-            && escalation.len() >= 2
-        {
-            let prob_of =
-                |probs: &[(String, f64)], d: &str| probs.iter().find(|(x, _)| x == d).map_or(0.0, |(_, p)| *p);
-            let handoff_mass = py_sum(escalation.iter().map(|d| prob_of(&probs, d)));
-            let esc_scores = self.subset_scores(
-                tuning,
-                &counts,
-                req_type,
-                reporter,
-                &escalation,
-                tuning.get("escalationPriorWeight"),
-            );
-            let esc_mx = esc_scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
-            let esc_exps: Vec<(String, f64)> =
-                esc_scores.iter().map(|(d, s)| (d.clone(), ((s - esc_mx) / temp).exp())).collect();
-            let esc_total_e = py_sum(esc_exps.iter().map(|(_, e)| *e));
-            for d in &escalation {
-                let e = esc_exps.iter().find(|(x, _)| x == d).map_or(0.0, |(_, e)| *e);
-                if let Some(slot) = probs.iter_mut().find(|(x, _)| x == d) {
-                    slot.1 = handoff_mass * e / esc_total_e;
-                }
+        let escalation: Vec<usize> =
+            escalation_dests.iter().filter_map(|d| ready.iter().position(|r| r == d)).collect();
+        if tuning.get("escalationSpecialist") != 0.0 && escalation.contains(&global_best) && escalation.len() >= 2 {
+            let handoff_mass = py_sum(escalation.iter().map(|&i| probs[i]));
+            let esc_scores = scoring.subset_scores(m, caches, &escalation, tuning.get("escalationPriorWeight"));
+            let esc_mx = esc_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let esc_exps: Vec<f64> = esc_scores.iter().map(|s| ((s - esc_mx) / temp).exp()).collect();
+            let esc_total_e = py_sum(esc_exps.iter().copied());
+            for &i in &escalation {
+                let first = escalation.iter().position(|&x| x == i).expect("member");
+                probs[i] = handoff_mass * esc_exps[first] / esc_total_e;
             }
             source = "escalation";
         }
 
-        let factors = route_balance_factors(&self.model.route_balance, tuning.get("routeBalanceWeight"));
+        let factors = balance_factors(&m.route_balance, tuning.get("routeBalanceWeight"));
         if !factors.is_empty() {
-            let adjusted: Vec<(String, f64)> =
-                probs.iter().map(|(d, p)| (d.clone(), p * factors.get(d).copied().unwrap_or(1.0))).collect();
-            let mass = py_sum(adjusted.iter().map(|(_, p)| *p));
-            probs = adjusted.into_iter().map(|(d, p)| (d, p / mass)).collect();
+            let adjusted: Vec<f64> =
+                probs.iter().zip(&ready).map(|(p, d)| p * factor_of(&factors, d).unwrap_or(1.0)).collect();
+            let mass = py_sum(adjusted.iter().copied());
+            probs = adjusted.into_iter().map(|p| p / mass).collect();
         }
         let mut order: Vec<usize> = (0..probs.len()).collect();
-        order.sort_by(|a, b| probs[*b].1.partial_cmp(&probs[*a].1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut best = probs[order[0]].0.clone();
-        let mut second = probs[order[1]].0.clone();
-        let mut conf = py_round_int(100.0 * probs[order[0]].1);
-        let mut conf2 = py_round_int(100.0 * probs[order[1]].1);
-        let mut note = self.plan_for(&best);
+        order.sort_by(|a, b| probs[*b].partial_cmp(&probs[*a]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut best = ready[order[0]].to_owned();
+        let mut second = ready[order[1]].to_owned();
+        let mut conf = py_round_int(100.0 * probs[order[0]]);
+        let mut conf2 = py_round_int(100.0 * probs[order[1]]);
+        let mut note = plan_for(plans, m, &best);
         let hint_dest = hint_for_type;
-        let hint_conf = match &hint_dest {
-            Some(h) => py_round_int(100.0 * probs.iter().find(|(d, _)| d == h).map_or(0.0, |(_, p)| *p)),
+        let hint_conf = match hint_dest {
+            Some(h) => py_round_int(100.0 * ready.iter().position(|d| *d == h).map_or(0.0, |i| probs[i])),
             None => 0,
         };
 
@@ -553,7 +861,7 @@ impl Learner {
         if let Some(exemplar) = exemplar.filter(|e| !e.is_empty())
             && thresh != 0.0
         {
-            let (k_dest, sim) = self.nearest(exemplar);
+            let (k_dest, sim) = nearest(m, ex_index, caches, exemplar);
             if let Some(k_dest) = k_dest.filter(|k| !k.is_empty())
                 && sim >= thresh
             {
@@ -567,19 +875,19 @@ impl Learner {
                     conf = k_conf.max(if same { conf } else { 0 });
                     best = k_dest;
                     source = "memory";
-                    note = format!("{} (matches a previous ticket)", self.plan_for(&best));
+                    note = format!("{} (matches a previous ticket)", plan_for(plans, m, &best));
                 }
             }
         }
 
-        if source != "memory" && (factors.get(&best).copied().unwrap_or(1.0) - 1.0).abs() > 1e-6 {
+        if source != "memory" && (factor_of(&factors, &best).unwrap_or(1.0) - 1.0).abs() > 1e-6 {
             note.push_str("; ranking adjusted using earlier routing outcomes");
         }
-        let hint_conflict = hint_dest.as_ref().is_some_and(|h| ready.contains(h) && &best != h);
+        let hint_conflict = hint_dest.is_some_and(|h| ready.contains(&h) && best != h);
         if hint_conflict {
-            let h = hint_dest.clone().expect("conflict implies a hint");
+            let h = hint_dest.expect("conflict implies a hint");
             if second != h {
-                second = h.clone();
+                second = h.to_owned();
                 conf2 = hint_conf;
             } else {
                 conf2 = conf2.max(hint_conf);
@@ -589,7 +897,7 @@ impl Learner {
         let margin = conf - conf2;
         let mut review =
             (conf as f64) < tuning.get("reviewConf") || (margin as f64) < tuning.get("reviewMargin") || hint_conflict;
-        if let Some(Value::Object(safety)) = self.route_safety.get(&best)
+        if let Some(Value::Object(safety)) = route_safety.get(&best)
             && safety.get("forceReview").is_some_and(truthy)
         {
             review = true;
@@ -600,7 +908,7 @@ impl Learner {
                 .unwrap_or_else(|| "route confidence needs more evidence".into());
             note.push_str(&format!("; review because {reason}"));
         }
-        let why = if second.is_empty() { vec![] } else { self.why(tuning, &counts, &best, &second, reporter) };
+        let why = if second.is_empty() { vec![] } else { why(m, vocab_len, caches, &scoring, &best, &second) };
         Prediction {
             dest: Some(best),
             conf,
@@ -624,10 +932,10 @@ impl Learner {
 }
 
 /// Index of the first maximum (Python's stable `sorted(..., reverse=True)[0]`).
-fn stable_argmax(scores: &[(String, f64)]) -> usize {
+fn stable_argmax(scores: &[f64]) -> usize {
     let mut best = 0;
-    for (i, (_, s)) in scores.iter().enumerate() {
-        if *s > scores[best].1 {
+    for (i, s) in scores.iter().enumerate() {
+        if *s > scores[best] {
             best = i;
         }
     }

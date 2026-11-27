@@ -7,6 +7,8 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::model::FastState;
+
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[a-z][a-z0-9']{2,}").expect("valid regex"));
 /// Case-reference codes ("hcw11593772keo", "tc25000123") collapse to one token.
 static REFERENCE: LazyLock<Regex> =
@@ -179,25 +181,37 @@ fn bigrams(tokens: &[String]) -> Vec<String> {
 /// Unigrams + bigrams. Summary features repeat `summary_weight` times;
 /// description features are deduplicated and sorted.
 pub fn features_for(ticket: &TicketText, request_type: &str, summary_weight: f64) -> Vec<String> {
+    let (summary, body) = feature_parts(ticket, request_type);
+    let repeat = summary_repeat(summary_weight);
+    let mut out = Vec::with_capacity(summary.len() * repeat + body.len());
+    for _ in 0..repeat {
+        out.extend(summary.iter().cloned());
+    }
+    out.extend(body);
+    out
+}
+
+/// How many times summary features repeat for a `summaryWeight`.
+pub fn summary_repeat(summary_weight: f64) -> usize {
+    summary_weight.trunc().max(0.0) as usize
+}
+
+/// The two halves of [`features_for`]: summary unigrams + bigrams (repeated
+/// `summaryWeight` times there), and the sorted, deduplicated body features.
+pub fn feature_parts(ticket: &TicketText, request_type: &str) -> (Vec<String>, Vec<String>) {
     let summary_tokens = tokenize(&format!("{} {}", ticket.summary, request_type));
     let body = [ticket.desc.clone(), ticket.labels.join(" "), ticket.components.join(" "), ticket.structured.join(" ")]
         .join(" ");
     let body_tokens = tokenize(&body);
     let mut summary = summary_tokens.clone();
     summary.extend(bigrams(&summary_tokens));
-    let repeat = summary_weight.trunc().max(0.0) as usize;
-    let mut out = Vec::with_capacity(summary.len() * repeat + body_tokens.len() * 2);
-    for _ in 0..repeat {
-        out.extend(summary.iter().cloned());
-    }
     let body_set: BTreeSet<String> = body_tokens.iter().cloned().chain(bigrams(&body_tokens)).collect();
-    out.extend(body_set);
-    out
+    (summary, body_set.into_iter().collect())
 }
 
 /// `collections.Counter(tokens)`: counts in first-occurrence order.
-pub fn counter(tokens: &[String]) -> IndexMap<&str, u32> {
-    let mut counts: IndexMap<&str, u32> = IndexMap::new();
+pub fn counter(tokens: &[String]) -> IndexMap<&str, u32, FastState> {
+    let mut counts: IndexMap<&str, u32, FastState> = IndexMap::default();
     for t in tokens {
         *counts.entry(t.as_str()).or_insert(0) += 1;
     }

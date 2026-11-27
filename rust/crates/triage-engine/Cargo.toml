@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+foldhash = "0.2.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
 regex = "1.13.2"
 serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }

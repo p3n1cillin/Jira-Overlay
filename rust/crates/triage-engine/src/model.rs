@@ -7,7 +7,16 @@
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
-pub type Table = IndexMap<String, f64>;
+/// Fast, non-cryptographic hashing for the learner's string-keyed tables.
+/// Iteration order is `IndexMap` insertion order whatever the hasher, so
+/// this changes speed only.
+pub type FastState = foldhash::fast::RandomState;
+pub type FastMap<K, V> = std::collections::HashMap<K, V, FastState>;
+pub type FastSet<K> = std::collections::HashSet<K, FastState>;
+
+pub type Table = IndexMap<String, f64, FastState>;
+/// dest → table.
+pub type Nested = IndexMap<String, Table, FastState>;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RouteBalance {
@@ -19,11 +28,11 @@ pub struct RouteBalance {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Model {
     pub priors: Table,
-    pub tokens: IndexMap<String, Table>,
+    pub tokens: Nested,
     pub totals: Table,
-    pub req_types: IndexMap<String, Table>,
-    pub reporters: IndexMap<String, Table>,
-    pub clone_projects: IndexMap<String, Table>,
+    pub req_types: Nested,
+    pub reporters: Nested,
+    pub clone_projects: Nested,
     pub seen: Table,
     /// `[sorted unique title tokens, dest]`, oldest first.
     pub exemplars: Vec<(Vec<String>, String)>,
@@ -36,13 +45,13 @@ pub struct Model {
 impl Default for Model {
     fn default() -> Self {
         Self {
-            priors: Table::new(),
-            tokens: IndexMap::new(),
-            totals: Table::new(),
-            req_types: IndexMap::new(),
-            reporters: IndexMap::new(),
-            clone_projects: IndexMap::new(),
-            seen: Table::new(),
+            priors: Table::default(),
+            tokens: Nested::default(),
+            totals: Table::default(),
+            req_types: Nested::default(),
+            reporters: Nested::default(),
+            clone_projects: Nested::default(),
+            seen: Table::default(),
             exemplars: Vec::new(),
             route_balance: RouteBalance::default(),
             scale: 1.0,
@@ -75,14 +84,14 @@ fn number(v: &Value) -> Option<f64> {
 fn table(v: Option<&Value>) -> Table {
     match v {
         Some(Value::Object(map)) => map.iter().filter_map(|(k, v)| number(v).map(|n| (k.clone(), n))).collect(),
-        _ => Table::new(),
+        _ => Table::default(),
     }
 }
 
-fn nested(v: Option<&Value>) -> IndexMap<String, Table> {
+fn nested(v: Option<&Value>) -> Nested {
     match v {
         Some(Value::Object(map)) => map.iter().map(|(k, v)| (k.clone(), table(Some(v)))).collect(),
-        _ => IndexMap::new(),
+        _ => Nested::default(),
     }
 }
 
@@ -144,9 +153,8 @@ impl Model {
     pub fn to_value(&self) -> Value {
         let floats = |t: &Table| Value::Object(t.iter().map(|(k, v)| (k.clone(), Value::from(*v))).collect());
         let ints = |t: &Table| Value::Object(t.iter().map(|(k, v)| (k.clone(), int_or_float(*v))).collect());
-        let nested = |n: &IndexMap<String, Table>, f: &dyn Fn(&Table) -> Value| {
-            Value::Object(n.iter().map(|(k, t)| (k.clone(), f(t))).collect())
-        };
+        let nested =
+            |n: &Nested, f: &dyn Fn(&Table) -> Value| Value::Object(n.iter().map(|(k, t)| (k.clone(), f(t))).collect());
         let mut out = Map::new();
         out.insert("priors".into(), floats(&self.priors));
         out.insert("tokens".into(), nested(&self.tokens, &floats));

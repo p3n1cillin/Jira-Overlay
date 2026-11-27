@@ -3954,6 +3954,7 @@ dependencies = [
 name = "triage-engine"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
  "indexmap",
  "regex",
  "serde_json",
