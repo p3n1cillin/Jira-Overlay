@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/jo-core", "crates/jo-jira", "crates/triage-engine"]
+members = ["crates/jo-core", "crates/jo-jira", "crates/triage-engine", "crates/triage-learner", "crates/jo-overlay", "crates/jira-overlay"]
 
 [workspace.package]
 edition = "2024"
