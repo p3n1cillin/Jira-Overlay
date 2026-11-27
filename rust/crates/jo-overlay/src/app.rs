@@ -712,9 +712,13 @@ impl<'a> OverlayApp<'a> {
 
     /// Fit the window after a compact frame (Python `root.after(10, _resize)`).
     pub fn after_compact_frame(&mut self, content_height: f32) {
-        let changed = (content_height - self.content_height).abs() > 0.5;
         self.content_height = content_height;
-        if (self.st.resize_requested || (changed && self.st.mapped)) && self.drag.is_none() {
+        // Refit whenever the window's height doesn't match its content, mapped
+        // or not: rows usually arrive while the overlay is still hidden, and a
+        // change-only check then left it at its 60 px start-up height.
+        let wanted_h = ((content_height + 2.0) * self.ppp).round() as i32;
+        let mismatch = wanted_h != self.rect.h;
+        if (self.st.resize_requested || mismatch) && self.drag.is_none() {
             self.st.resize_requested = false;
             self.fit_and_place();
         }
