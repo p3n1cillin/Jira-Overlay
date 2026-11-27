@@ -1,0 +1,1436 @@
+{
+ "full": {
+  "acc": 0.8723809523809524,
+  "segments": {
+   "Report a bug": [
+    153,
+    126
+   ],
+   "Data request": [
+    230,
+    205
+   ],
+   "Unknown request type": [
+    45,
+    40
+   ],
+   "Reporting request": [
+    95,
+    77
+   ],
+   "Hardware": [
+    366,
+    329
+   ],
+   "Get IT help": [
+    161,
+    139
+   ]
+  },
+  "featureOrigins": {
+   "intake": 553,
+   "outcome": 497
+  },
+  "firmAcc": 0.945067264573991,
+  "firmCov": 0.8495238095238096,
+  "n": 1050,
+  "balanced": 0.849889450837689,
+  "worst": 0.7746478873239436,
+  "per": {
+   "Resolved in SD": 0.8967889908256881,
+   "With DATA": 0.8930041152263375,
+   "With DEV": 0.841726618705036,
+   "Moved to PPS": 0.8421052631578947,
+   "With BI": 0.7746478873239436,
+   "Moved to IPS": 0.851063829787234
+  },
+  "perCounts": {
+   "Resolved in SD": [
+    436,
+    391
+   ],
+   "With DATA": [
+    243,
+    217
+   ],
+   "With DEV": [
+    139,
+    117
+   ],
+   "Moved to PPS": [
+    114,
+    96
+   ],
+   "With BI": [
+    71,
+    55
+   ],
+   "Moved to IPS": [
+    47,
+    40
+   ]
+  },
+  "precision": {
+   "Resolved in SD": 0.9421686746987952,
+   "With DATA": 0.8611111111111112,
+   "With DEV": 0.8297872340425532,
+   "Moved to PPS": 0.7619047619047619,
+   "With BI": 0.873015873015873,
+   "Moved to IPS": 0.7547169811320755
+  },
+  "precisionCounts": {
+   "Resolved in SD": [
+    415,
+    391
+   ],
+   "With DATA": [
+    252,
+    217
+   ],
+   "With DEV": [
+    141,
+    117
+   ],
+   "Moved to PPS": [
+    126,
+    96
+   ],
+   "With BI": [
+    63,
+    55
+   ],
+   "Moved to IPS": [
+    53,
+    40
+   ]
+  },
+  "macroPrecision": 0.8371174393175282,
+  "worstPrecision": 0.7547169811320755,
+  "f1": {
+   "With DATA": 0.8767676767676769,
+   "Moved to IPS": 0.8,
+   "Moved to PPS": 0.8,
+   "With DEV": 0.8357142857142857,
+   "With BI": 0.8208955223880596,
+   "Resolved in SD": 0.9189189189189189
+  },
+  "macroF1": 0.8420494006314901,
+  "worstF1": 0.8,
+  "firmBalanced": 0.907802922371436,
+  "firmWorst": 0.7894736842105263,
+  "firmPer": {
+   "Resolved in SD": 0.9739583333333334,
+   "With DATA": 0.9852216748768473,
+   "With DEV": 0.8898305084745762,
+   "Moved to PPS": 0.9333333333333333,
+   "With BI": 0.7894736842105263,
+   "Moved to IPS": 0.875
+  },
+  "firmPerCounts": {
+   "Resolved in SD": [
+    384,
+    374
+   ],
+   "With DATA": [
+    203,
+    200
+   ],
+   "With DEV": [
+    118,
+    105
+   ],
+   "Moved to PPS": [
+    90,
+    84
+   ],
+   "With BI": [
+    57,
+    45
+   ],
+   "Moved to IPS": [
+    40,
+    35
+   ]
+  },
+  "firmPrecision": {
+   "Resolved in SD": 0.9714285714285714,
+   "With DATA": 0.9389671361502347,
+   "With DEV": 0.9210526315789473,
+   "Moved to PPS": 0.9130434782608695,
+   "With BI": 0.9375,
+   "Moved to IPS": 0.875
+  },
+  "firmPrecisionCounts": {
+   "Resolved in SD": [
+    385,
+    374
+   ],
+   "With DATA": [
+    213,
+    200
+   ],
+   "With DEV": [
+    114,
+    105
+   ],
+   "Moved to PPS": [
+    92,
+    84
+   ],
+   "With BI": [
+    48,
+    45
+   ],
+   "Moved to IPS": [
+    40,
+    35
+   ]
+  },
+  "firmMacroPrecision": 0.926165302903104,
+  "firmWorstPrecision": 0.875,
+  "sources": {
+   "model": {
+    "n": 952,
+    "acc": 0.907563025210084
+   },
+   "memory": {
+    "n": 98,
+    "acc": 0.5306122448979592
+   }
+  },
+  "samples": [
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 79,
+    "margin": 58,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1150",
+    "summary": "Update login system outlook tc74958"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1151",
+    "summary": "Csv records"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1152",
+    "summary": "Endpoint api"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 99,
+    "margin": 98,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1153",
+    "summary": "Team timeout urgent bug"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1154",
+    "summary": "Login laptop"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1155",
+    "summary": "Keyboard monitor team"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1156",
+    "summary": "Endpoint release"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1157",
+    "summary": "Reset outlook"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1158",
+    "summary": "Reset issue keyboard team"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1159",
+    "summary": "Export import"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 99,
+    "margin": 99,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1160",
+    "summary": "Help mapping import tc19457"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1161",
+    "summary": "Error urgent vpn teams"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1162",
+    "summary": "Screen client"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "With DEV",
+    "conf": 94,
+    "margin": 91,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1163",
+    "summary": "Supplier purchase system"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1164",
+    "summary": "Issue merge mapping"
+   },
+   {
+    "actual": "With BI",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1165",
+    "summary": "Import extract"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1166",
+    "summary": "Printer teams system"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1167",
+    "summary": "Extract csv tc21339"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1168",
+    "summary": "Stack deploy"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1169",
+    "summary": "Client system problem workflow"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1170",
+    "summary": "Laptop keyboard help user"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1171",
+    "summary": "Proclaim access fee"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1172",
+    "summary": "Team printer login user"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1173",
+    "summary": "Extract csv"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "With DATA",
+    "conf": 71,
+    "margin": 52,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1174",
+    "summary": "User records csv team tc63526"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1175",
+    "summary": "Urgent matter fee"
+   },
+   {
+    "actual": "With BI",
+    "predicted": "With BI",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1176",
+    "summary": "Urgent metric dataset error"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 99,
+    "margin": 99,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1177",
+    "summary": "Cleanse duplicate"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1178",
+    "summary": "Laptop teams problem"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1179",
+    "summary": "Problem outlook today teams"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1180",
+    "summary": "Printer password"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 77,
+    "margin": 56,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1181",
+    "summary": "Update merge csv team"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1182",
+    "summary": "Field extract issue"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1183",
+    "summary": "Issue reset keyboard team"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1184",
+    "summary": "Vpn keyboard access unable"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 97,
+    "margin": 94,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1185",
+    "summary": "Vpn system user teams"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "Resolved in SD",
+    "conf": 45,
+    "margin": 32,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1186",
+    "summary": "User team api endpoint"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DEV",
+    "conf": 79,
+    "margin": 60,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1187",
+    "summary": "Workflow client update"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1188",
+    "summary": "Urgent outlook teams"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1189",
+    "summary": "Laptop teams"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 91,
+    "margin": 87,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1190",
+    "summary": "Team cleanse import"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 62,
+    "margin": 30,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1191",
+    "summary": "Endpoint release update help"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1192",
+    "summary": "Update duplicate field"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1193",
+    "summary": "Teams help vpn tc45838"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1194",
+    "summary": "Login password"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1195",
+    "summary": "Mapping duplicate"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 91,
+    "margin": 82,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1196",
+    "summary": "Update teams password"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1197",
+    "summary": "Password login"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 82,
+    "margin": 66,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1198",
+    "summary": "Case matter"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1199",
+    "summary": "Deploy stack"
+   }
+  ]
+ },
+ "window": {
+  "acc": 0.8525,
+  "segments": {
+   "Hardware": [
+    140,
+    125
+   ],
+   "Report a bug": [
+    58,
+    46
+   ],
+   "Data request": [
+    80,
+    73
+   ],
+   "Get IT help": [
+    68,
+    56
+   ],
+   "Reporting request": [
+    35,
+    25
+   ],
+   "Unknown request type": [
+    19,
+    16
+   ]
+  },
+  "featureOrigins": {
+   "intake": 203,
+   "outcome": 197
+  },
+  "firmAcc": 0.9285714285714286,
+  "firmCov": 0.84,
+  "n": 400,
+  "balanced": 0.8155777723277121,
+  "worst": 0.6875,
+  "per": {
+   "Moved to PPS": 0.7906976744186046,
+   "With DATA": 0.9080459770114943,
+   "Resolved in SD": 0.8819875776397516,
+   "Moved to IPS": 0.7777777777777778,
+   "With DEV": 0.847457627118644,
+   "With BI": 0.6875
+  },
+  "perCounts": {
+   "Moved to PPS": [
+    43,
+    34
+   ],
+   "With DATA": [
+    87,
+    79
+   ],
+   "Resolved in SD": [
+    161,
+    142
+   ],
+   "Moved to IPS": [
+    18,
+    14
+   ],
+   "With DEV": [
+    59,
+    50
+   ],
+   "With BI": [
+    32,
+    22
+   ]
+  },
+  "precision": {
+   "Moved to PPS": 0.723404255319149,
+   "With DATA": 0.8586956521739131,
+   "Resolved in SD": 0.9281045751633987,
+   "With BI": 0.8461538461538461,
+   "With DEV": 0.7936507936507936,
+   "Moved to IPS": 0.7368421052631579
+  },
+  "precisionCounts": {
+   "Moved to PPS": [
+    47,
+    34
+   ],
+   "With DATA": [
+    92,
+    79
+   ],
+   "Resolved in SD": [
+    153,
+    142
+   ],
+   "With BI": [
+    26,
+    22
+   ],
+   "With DEV": [
+    63,
+    50
+   ],
+   "Moved to IPS": [
+    19,
+    14
+   ]
+  },
+  "macroPrecision": 0.8144752046207097,
+  "worstPrecision": 0.723404255319149,
+  "f1": {
+   "With DATA": 0.88268156424581,
+   "Moved to IPS": 0.7567567567567567,
+   "Moved to PPS": 0.7555555555555555,
+   "With DEV": 0.819672131147541,
+   "With BI": 0.7586206896551724,
+   "Resolved in SD": 0.9044585987261147
+  },
+  "macroF1": 0.812957549347825,
+  "worstF1": 0.7555555555555555,
+  "firmBalanced": 0.8696077151883935,
+  "firmWorst": 0.6666666666666666,
+  "firmPer": {
+   "With DATA": 1.0,
+   "Resolved in SD": 0.9784172661870504,
+   "Moved to IPS": 0.7857142857142857,
+   "Moved to PPS": 0.8888888888888888,
+   "With DEV": 0.8979591836734694,
+   "With BI": 0.6666666666666666
+  },
+  "firmPerCounts": {
+   "With DATA": [
+    71,
+    71
+   ],
+   "Resolved in SD": [
+    139,
+    136
+   ],
+   "Moved to IPS": [
+    14,
+    11
+   ],
+   "Moved to PPS": [
+    36,
+    32
+   ],
+   "With DEV": [
+    49,
+    44
+   ],
+   "With BI": [
+    27,
+    18
+   ]
+  },
+  "firmPrecision": {
+   "With DATA": 0.9466666666666667,
+   "Resolved in SD": 0.9444444444444444,
+   "With BI": 0.8571428571428571,
+   "Moved to PPS": 0.8888888888888888,
+   "With DEV": 0.9361702127659575,
+   "Moved to IPS": 0.8461538461538461
+  },
+  "firmPrecisionCounts": {
+   "With DATA": [
+    75,
+    71
+   ],
+   "Resolved in SD": [
+    144,
+    136
+   ],
+   "With BI": [
+    21,
+    18
+   ],
+   "Moved to PPS": [
+    36,
+    32
+   ],
+   "With DEV": [
+    47,
+    44
+   ],
+   "Moved to IPS": [
+    13,
+    11
+   ]
+  },
+  "firmMacroPrecision": 0.9032444860104434,
+  "firmWorstPrecision": 0.8461538461538461,
+  "sources": {
+   "model": {
+    "n": 365,
+    "acc": 0.8821917808219178
+   },
+   "memory": {
+    "n": 35,
+    "acc": 0.5428571428571428
+   }
+  },
+  "samples": [
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 99,
+    "margin": 99,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1600",
+    "summary": "Button unable letter tc74804"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 71,
+    "margin": 49,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1601",
+    "summary": "Export urgent issue import"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "With DATA",
+    "conf": 89,
+    "margin": 86,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1602",
+    "summary": "Extract csv access unable"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1603",
+    "summary": "Export records"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1604",
+    "summary": "Vpn issue keyboard team"
+   },
+   {
+    "actual": "Moved to IPS",
+    "predicted": "With BI",
+    "conf": 81,
+    "margin": 71,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1605",
+    "summary": "Kpi metric user"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1606",
+    "summary": "Export unable import issue"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1607",
+    "summary": "Workflow screen"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1608",
+    "summary": "Api crash"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1609",
+    "summary": "Stack crash"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 99,
+    "margin": 99,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1610",
+    "summary": "Deploy timeout help access"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "Moved to PPS",
+    "conf": 45,
+    "margin": 9,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1611",
+    "summary": "Endpoint crash team today tc55741"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 58,
+    "margin": 23,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1612",
+    "summary": "Vat posting tc62677"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 99,
+    "margin": 98,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1613",
+    "summary": "Access proclaim system fee tc78893"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1614",
+    "summary": "Workflow proclaim"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1615",
+    "summary": "Problem duplicate merge"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1616",
+    "summary": "Help login monitor"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 60,
+    "margin": 25,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1617",
+    "summary": "Timeout build tc21774"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 20,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1618",
+    "summary": "Matter document"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 99,
+    "margin": 99,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1619",
+    "summary": "Mapping issue import error"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1620",
+    "summary": "Vpn today update laptop"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1621",
+    "summary": "User password outlook update"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DEV",
+    "conf": 89,
+    "margin": 80,
+    "review": true,
+    "correct": 0,
+    "key": "SD-1622",
+    "summary": "Release build"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1623",
+    "summary": "Password laptop"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 91,
+    "margin": 83,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1624",
+    "summary": "Printer login issue today"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "With DEV",
+    "conf": 98,
+    "margin": 97,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1625",
+    "summary": "Problem user exception build"
+   },
+   {
+    "actual": "With DEV",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 98,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1626",
+    "summary": "Today login monitor"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 94,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1627",
+    "summary": "Password login"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1628",
+    "summary": "Outlook keyboard"
+   },
+   {
+    "actual": "With BI",
+    "predicted": "With DEV",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1629",
+    "summary": "Stack exception"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 84,
+    "margin": 77,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1630",
+    "summary": "Vpn login user system"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1631",
+    "summary": "Printer login"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 62,
+    "margin": 33,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1632",
+    "summary": "Outlook printer urgent team"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1633",
+    "summary": "Mapping records urgent system"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1634",
+    "summary": "Login keyboard"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1635",
+    "summary": "Monitor today issue laptop tc75682"
+   },
+   {
+    "actual": "Moved to IPS",
+    "predicted": "Moved to IPS",
+    "conf": 100,
+    "margin": 82,
+    "review": true,
+    "correct": 1,
+    "key": "SD-1636",
+    "summary": "Invoice issue purchase"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1637",
+    "summary": "Team records duplicate"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1638",
+    "summary": "Laptop vpn"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1639",
+    "summary": "Monitor printer"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1640",
+    "summary": "Merge team error csv"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1641",
+    "summary": "Document client help"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1642",
+    "summary": "Help merge mapping"
+   },
+   {
+    "actual": "With BI",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 0,
+    "key": "SD-1643",
+    "summary": "Teams system user login"
+   },
+   {
+    "actual": "Moved to PPS",
+    "predicted": "Moved to PPS",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1644",
+    "summary": "Matter help letter tc96595"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 95,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1645",
+    "summary": "Payment update access invoice"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1646",
+    "summary": "Team reset login access tc87705"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1647",
+    "summary": "Csv field"
+   },
+   {
+    "actual": "Resolved in SD",
+    "predicted": "Resolved in SD",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1648",
+    "summary": "Laptop keyboard"
+   },
+   {
+    "actual": "With DATA",
+    "predicted": "With DATA",
+    "conf": 100,
+    "margin": 100,
+    "review": false,
+    "correct": 1,
+    "key": "SD-1649",
+    "summary": "Problem extract today cleanse tc56622"
+   }
+  ]
+ },
+ "scores": [
+  [
+   0.842,
+   0.85,
+   0.837,
+   0.8,
+   0.775,
+   0.926,
+   0.875,
+   0.908,
+   0.789,
+   0.945,
+   0.8495238095238096,
+   0.872
+  ],
+  [
+   0.813,
+   0.816,
+   0.814,
+   0.756,
+   0.688,
+   0.903,
+   0.846,
+   0.87,
+   0.667,
+   0.929,
+   0.84,
+   0.853
+  ]
+ ]
+}

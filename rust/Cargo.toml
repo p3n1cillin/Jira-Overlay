@@ -19,3 +19,7 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+# The engine's differential tests replay thousands of decisions; keep them fast.
+[profile.dev.package.triage-engine]
+opt-level = 2

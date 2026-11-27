@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The triage learner's model, replay and self-tuning engine: pure, no I/O.
+//!
+//! A line-for-line port of the Python learner. Predictions from the same
+//! state must be identical, so the code follows Python's evaluation order,
+//! dictionary insertion order, CPython's compensated `sum()` and its
+//! round-half-even rules (see [`num`]).
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod learner;
+pub mod model;
+pub mod num;
+pub mod replay;
+pub mod text;
+pub mod tuning;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use learner::{Learner, Prediction};
+pub use model::Model;
+pub use replay::{Metrics, Record, TuneResult, fit_example, replay, self_tune};
+pub use tuning::Tuning;
